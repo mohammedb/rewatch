@@ -69,14 +69,25 @@ no game is running or being recorded; with the window open it shows a bar with
 - The site is a small Cloudflare Worker (`updates-site/`, deployed as
   `rewatch-updates`) in front of the R2 bucket `rewatch-releases`, in the same
   Cloudflare account as the rest of ggwp.no. It serves `/` (landing page, not indexed), `/latest.json`,
-  `/download/latest`, `/download/<installer>` and `/fonts/*`.
-- The landing page is `updates-site/page.html`, bundled into the Worker as text;
-  `{{cta}}` and `{{version}}` are filled from `latest.json` on each request. Inter is
-  served by the Worker itself (`updates-site/fonts/`), so the page loads nothing from
-  other sites. Headlines use Bahnschrift, which every Windows PC has; phones fall back
-  to Inter. Preview it locally with the `rewatch-site` entry in `.claude/launch.json`
-  (`wrangler dev` on port 8787; seed the local bucket with
-  `npx wrangler r2 object put rewatch-releases/latest.json --file=... --local`).
+  `/download/latest`, `/download/<installer>`, `/fonts/*` and `/media/*`.
+- The landing page is `updates-site/page.html`, bundled into the Worker as text. It is
+  built from one real recorded game (Ranked Flex, 2026-11-13_00-42-08): `demo.json`
+  holds that game's timeline, cursor, review drawings, who-talked-when and AI review,
+  and is put into the page as JSON. The version line is filled from `latest.json`;
+  before any version is published the `<!--cta-->` buttons become a note. The fonts
+  (Archivo for headlines, Geist for text) are served by the Worker itself
+  (`updates-site/fonts/`), and the icons are Phosphor, inlined, so the page loads
+  nothing from other sites.
+- The footage and pictures live in the bucket under `media/` (served at `/media/`, with
+  range requests so Safari can play the videos). They are made by
+  `updates-site/build_media.py <recording folder>` (needs ffmpeg with libsvtav1,
+  libx264 and libwebp) and are kept out of git (`updates-site/media/`). Every video is
+  written without sound, but the picture shows other players' names and chat as
+  recorded. Upload them with
+  `npx wrangler r2 object put rewatch-releases/media/<name> --file=media/<name> --remote`.
+- Preview locally with the `rewatch-site` entry in `.claude/launch.json` (`wrangler dev`
+  on port 8787). Seed the local bucket the same way with `--local`, for `latest.json`
+  and each file in `media/`.
 - The Cloudflare account id is not in the repository: `release.mjs` reads it from
   `.secrets/cloudflare-account-id` (or the `CLOUDFLARE_ACCOUNT_ID` environment variable);
   set the same variable before `npx wrangler deploy` in `updates-site/`.
