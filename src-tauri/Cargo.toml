@@ -1,0 +1,50 @@
+[package]
+name = "rewatch"
+version = "0.2.4"
+description = "Personal League of Legends recorder and review tool"
+authors = ["you"]
+license = "MIT"
+edition = "2024"
+
+# See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
+
+[lib]
+# The `_lib` suffix may seem redundant but it is necessary
+# to make the lib name unique and wouldn't conflict with the bin name.
+# This seems to be only an issue on Windows, see https://github.com/rust-lang/cargo/issues/8519
+name = "rewatch_lib"
+crate-type = ["staticlib", "cdylib", "rlib"]
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[dependencies]
+tauri = { version = "2", features = ["protocol-asset", "tray-icon"] }
+tauri-plugin-opener = "2"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+wasapi = "0.27.0"
+ureq = { version = "3.5.2", features = ["json"] }
+anyhow = "1.0.104"
+chrono = "0.4.45"
+tauri-plugin-dialog = "2.8.4"
+windows = { version = "0.62.2", features = ["Win32_Foundation", "Win32_System_Threading", "Win32_System_Diagnostics_ToolHelp", "Win32_UI_WindowsAndMessaging", "Win32_UI_Input_KeyboardAndMouse", "Win32_Graphics_Gdi", "Win32_Graphics_Dxgi", "Win32_Graphics_Dxgi_Common", "Win32_UI_HiDpi", "Win32_System_ProcessStatus", "Win32_System_Performance", "Win32_System_JobObjects", "Win32_Security"] }
+tauri-plugin-single-instance = "2.5.5"
+tauri-plugin-autostart = "2.7.0"
+tiny_http = "0.12.0"
+iroh = "1.4.1"
+tokio = { version = "1.54.1", features = ["rt-multi-thread", "time", "sync", "io-util", "macros", "fs"] }
+minisign-verify = "0.3.0"
+base64 = "0.23.1"
+tauri-winrt-notification = "0.8.1"
+
+
+# Read the optimization guideline for more details: https://tauri.app/concept/size/#cargo-configuration
+[profile.release]
+codegen-units = 1
+lto = true
+opt-level = 3
+# Not "abort": a recorder must survive a failure in one of its parts. With unwinding,
+# a panic ends only the task or thread it happened in, and the recording carries on.
+panic = "unwind"
+strip = true

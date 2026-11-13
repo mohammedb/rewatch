@@ -1,0 +1,8 @@
+Rewatch uses FFmpeg (https://ffmpeg.org) to capture and encode video.
+
+The ffmpeg.exe in this folder is the unmodified "essentials" build from
+https://www.gyan.dev/ffmpeg/builds/ and is licensed under the GNU General Public
+License version 3; see FFMPEG-LICENSE.txt. Its source code is available from
+https://ffmpeg.org/download.html and from the build's page above.
+
+Rewatch runs it as a separate program and is not linked against it.

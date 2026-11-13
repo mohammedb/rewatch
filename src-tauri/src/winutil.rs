@@ -1,0 +1,370 @@
+//! Thin wrappers over the Windows calls the recorder needs.
+//!
+//! Hard rule: nothing here opens a handle to the game process, injects into it or
+//! installs an input hook. Processes are found through the system process list,
+//! windows through window enumeration, and the mouse through plain polling.
+
+use std::mem::size_of;
+use windows::core::BOOL;
+use windows::Win32::Foundation::{CloseHandle, HWND, LPARAM, POINT, RECT};
+use windows::Win32::Graphics::Dxgi::{CreateDXGIFactory1, IDXGIFactory1};
+use windows::Win32::Graphics::Gdi::{
+    GetMonitorInfoW, MonitorFromPoint, MonitorFromWindow, HMONITOR, MONITORINFO,
+    MONITOR_DEFAULTTONEAREST, MONITOR_DEFAULTTOPRIMARY,
+};
+use windows::Win32::System::Diagnostics::ToolHelp::{
+    CreateToolhelp32Snapshot, Process32FirstW, Process32NextW, PROCESSENTRY32W, TH32CS_SNAPPROCESS,
+};
+use windows::Win32::System::Performance::{QueryPerformanceCounter, QueryPerformanceFrequency};
+use windows::Win32::UI::HiDpi::{
+    SetProcessDpiAwarenessContext, DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2,
+};
+use windows::Win32::UI::Input::KeyboardAndMouse::{GetAsyncKeyState, VK_LBUTTON, VK_RBUTTON};
+use windows::Win32::UI::WindowsAndMessaging::{
+    EnumWindows, GetCursorPos, GetForegroundWindow, GetWindowRect, GetWindowThreadProcessId, IsWindowVisible,
+};
+
+const GAME_EXE: &str = "League of Legends.exe";
+
+/// Name of the game process to watch for. `REWATCH_GAME_EXE` overrides it so the
+/// whole record-and-save flow can be tested with a harmless stand-in process.
+pub fn game_exe() -> String {
+    std::env::var("REWATCH_GAME_EXE").unwrap_or_else(|_| GAME_EXE.to_string())
+}
+const DISCORD_EXES: [&str; 3] = ["Discord.exe", "DiscordPTB.exe", "DiscordCanary.exe"];
+
+pub struct ProcInfo {
+    pub pid: u32,
+    pub parent: u32,
+    pub name: String,
+}
+
+pub fn list_processes() -> Vec<ProcInfo> {
+    let mut out = Vec::new();
+    unsafe {
+        let Ok(snap) = CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0) else {
+            return out;
+        };
+        let mut e = PROCESSENTRY32W {
+            dwSize: size_of::<PROCESSENTRY32W>() as u32,
+            ..Default::default()
+        };
+        if Process32FirstW(snap, &mut e).is_ok() {
+            loop {
+                let len = e
+                    .szExeFile
+                    .iter()
+                    .position(|c| *c == 0)
+                    .unwrap_or(e.szExeFile.len());
+                out.push(ProcInfo {
+                    pid: e.th32ProcessID,
+                    parent: e.th32ParentProcessID,
+                    name: String::from_utf16_lossy(&e.szExeFile[..len]),
+                });
+                if Process32NextW(snap, &mut e).is_err() {
+                    break;
+                }
+            }
+        }
+        let _ = CloseHandle(snap);
+    }
+    out
+}
+
+pub fn find_pid_by_name(name: &str) -> Option<u32> {
+    list_processes()
+        .into_iter()
+        .find(|p| p.name.eq_ignore_ascii_case(name))
+        .map(|p| p.pid)
+}
+
+pub fn pid_alive(pid: u32) -> bool {
+    list_processes().iter().any(|p| p.pid == pid)
+}
+
+/// The top-most Discord process: the one whose parent is not itself Discord.
+/// Capturing that process "and its tree" covers the voice engine child process.
+pub fn find_discord_root_pid() -> Option<u32> {
+    let procs = list_processes();
+    let is_discord = |n: &str| DISCORD_EXES.iter().any(|d| d.eq_ignore_ascii_case(n));
+    let discord: Vec<&ProcInfo> = procs.iter().filter(|p| is_discord(&p.name)).collect();
+    discord
+        .iter()
+        .find(|p| !discord.iter().any(|q| q.pid == p.parent))
+        .or(discord.first())
+        .map(|p| p.pid)
+}
+
+/// Make every helper process this app starts (FFmpeg) end when the app ends, even if
+/// the app is killed. Without this a killed app would leave FFmpeg recording forever.
+pub fn end_helpers_with_app() {
+    use windows::Win32::System::JobObjects::{
+        AssignProcessToJobObject, CreateJobObjectW, JobObjectExtendedLimitInformation,
+        SetInformationJobObject, JOBOBJECT_EXTENDED_LIMIT_INFORMATION, JOB_OBJECT_LIMIT_BREAKAWAY_OK,
+        JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE,
+    };
+    use windows::Win32::System::Threading::GetCurrentProcess;
+    unsafe {
+        let Ok(job) = CreateJobObjectW(None, windows::core::PCWSTR::null()) else {
+            return;
+        };
+        let mut info = JOBOBJECT_EXTENDED_LIMIT_INFORMATION::default();
+        // Breakaway is allowed so the update installer can be started outside the job:
+        // it has to outlive the app it replaces.
+        info.BasicLimitInformation.LimitFlags = JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE | JOB_OBJECT_LIMIT_BREAKAWAY_OK;
+        let _ = SetInformationJobObject(
+            job,
+            JobObjectExtendedLimitInformation,
+            &info as *const _ as *const core::ffi::c_void,
+            size_of::<JOBOBJECT_EXTENDED_LIMIT_INFORMATION>() as u32,
+        );
+        // The job handle is never closed on purpose: Windows closes it when this
+        // process ends, which is what ends the helpers.
+        let _ = AssignProcessToJobObject(job, GetCurrentProcess());
+    }
+}
+
+pub fn set_dpi_aware() {
+    unsafe {
+        let _ = SetProcessDpiAwarenessContext(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2);
+    }
+}
+
+/// Display to capture: which graphics adapter/output it is for FFmpeg, and where it
+/// sits on the desktop (physical pixels) so mouse positions can be made relative.
+#[derive(Debug, Clone, Copy, serde::Serialize, serde::Deserialize)]
+pub struct CaptureTarget {
+    pub adapter_idx: u32,
+    pub output_idx: u32,
+    pub x: i32,
+    pub y: i32,
+    pub w: i32,
+    pub h: i32,
+}
+
+struct EnumState {
+    pid: u32,
+    best: Option<HWND>,
+    best_area: i64,
+}
+
+unsafe extern "system" fn enum_cb(hwnd: HWND, lparam: LPARAM) -> BOOL {
+    unsafe {
+        let state = &mut *(lparam.0 as *mut EnumState);
+        let mut pid = 0u32;
+        GetWindowThreadProcessId(hwnd, Some(&mut pid));
+        if pid == state.pid && IsWindowVisible(hwnd).as_bool() {
+            let mut r = RECT::default();
+            if GetWindowRect(hwnd, &mut r).is_ok() {
+                let area = (r.right - r.left) as i64 * (r.bottom - r.top) as i64;
+                if area > state.best_area {
+                    state.best_area = area;
+                    state.best = Some(hwnd);
+                }
+            }
+        }
+        BOOL(1)
+    }
+}
+
+/// Monitor that shows the largest visible window of the given process, if it has one.
+fn monitor_of_process_window(pid: u32) -> Option<HMONITOR> {
+    let mut state = EnumState {
+        pid,
+        best: None,
+        best_area: 0,
+    };
+    unsafe {
+        let _ = EnumWindows(Some(enum_cb), LPARAM(&mut state as *mut _ as isize));
+        state
+            .best
+            .map(|h| MonitorFromWindow(h, MONITOR_DEFAULTTONEAREST))
+    }
+}
+
+fn primary_monitor() -> HMONITOR {
+    unsafe { MonitorFromPoint(POINT { x: 0, y: 0 }, MONITOR_DEFAULTTOPRIMARY) }
+}
+
+fn target_for_monitor(hmon: HMONITOR) -> Option<CaptureTarget> {
+    unsafe {
+        let factory: IDXGIFactory1 = CreateDXGIFactory1().ok()?;
+        let mut a = 0u32;
+        while let Ok(adapter) = factory.EnumAdapters1(a) {
+            let mut o = 0u32;
+            while let Ok(output) = adapter.EnumOutputs(o) {
+                if let Ok(desc) = output.GetDesc() {
+                    if desc.Monitor == hmon {
+                        let r = desc.DesktopCoordinates;
+                        return Some(CaptureTarget {
+                            adapter_idx: a,
+                            output_idx: o,
+                            x: r.left,
+                            y: r.top,
+                            w: r.right - r.left,
+                            h: r.bottom - r.top,
+                        });
+                    }
+                }
+                o += 1;
+            }
+            a += 1;
+        }
+    }
+    None
+}
+
+fn fallback_target(hmon: HMONITOR) -> CaptureTarget {
+    let mut mi = MONITORINFO {
+        cbSize: size_of::<MONITORINFO>() as u32,
+        ..Default::default()
+    };
+    let (mut w, mut h, mut x, mut y) = (1920, 1080, 0, 0);
+    unsafe {
+        if GetMonitorInfoW(hmon, &mut mi).as_bool() {
+            x = mi.rcMonitor.left;
+            y = mi.rcMonitor.top;
+            w = mi.rcMonitor.right - mi.rcMonitor.left;
+            h = mi.rcMonitor.bottom - mi.rcMonitor.top;
+        }
+    }
+    CaptureTarget {
+        adapter_idx: 0,
+        output_idx: 0,
+        x,
+        y,
+        w,
+        h,
+    }
+}
+
+/// Capture target for the display the game window is on. Waits up to `wait_secs`
+/// for the window to appear, then falls back to the primary display.
+pub fn capture_target(game_pid: Option<u32>, wait_secs: u32) -> CaptureTarget {
+    let mut hmon = None;
+    if let Some(pid) = game_pid {
+        for _ in 0..(wait_secs * 4).max(1) {
+            hmon = monitor_of_process_window(pid);
+            if hmon.is_some() || !pid_alive(pid) {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(250));
+        }
+    }
+    let hmon = hmon.unwrap_or_else(primary_monitor);
+    target_for_monitor(hmon).unwrap_or_else(|| fallback_target(hmon))
+}
+
+/// Cursor position in physical desktop pixels plus left/right button state.
+pub fn mouse_state() -> Option<(i32, i32, u8)> {
+    unsafe {
+        let mut p = POINT::default();
+        GetCursorPos(&mut p).ok()?;
+        let l = (GetAsyncKeyState(VK_LBUTTON.0 as i32) as u16 & 0x8000) != 0;
+        let r = (GetAsyncKeyState(VK_RBUTTON.0 as i32) as u16 & 0x8000) != 0;
+        Some((p.x, p.y, (l as u8) | ((r as u8) << 1)))
+    }
+}
+
+/// Whether a key is held down right now (polled; no hook).
+pub fn key_down(vk: i32) -> bool {
+    unsafe { (GetAsyncKeyState(vk) as u16 & 0x8000) != 0 }
+}
+
+/// The process that owns the window in front. Only asks Windows which window that is;
+/// the process itself is not opened.
+pub fn foreground_pid() -> Option<u32> {
+    unsafe {
+        let hwnd = GetForegroundWindow();
+        if hwnd.0.is_null() {
+            return None;
+        }
+        let mut pid = 0u32;
+        GetWindowThreadProcessId(hwnd, Some(&mut pid));
+        (pid != 0).then_some(pid)
+    }
+}
+
+/// A key, with optional modifiers, that the user presses to drop a bookmark.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct Hotkey {
+    pub vk: i32,
+    pub ctrl: bool,
+    pub shift: bool,
+    pub alt: bool,
+}
+
+/// Read "F8", "Ctrl+Shift+B", "Numpad0" and the like. None if it names no key.
+pub fn parse_hotkey(text: &str) -> Option<Hotkey> {
+    let mut key = Hotkey { vk: 0, ctrl: false, shift: false, alt: false };
+    for part in text.split('+').map(|p| p.trim().to_ascii_uppercase()).filter(|p| !p.is_empty()) {
+        match part.as_str() {
+            "CTRL" | "CONTROL" => key.ctrl = true,
+            "SHIFT" => key.shift = true,
+            "ALT" => key.alt = true,
+            name => {
+                key.vk = match name {
+                    "INSERT" => 0x2D,
+                    "DELETE" => 0x2E,
+                    "HOME" => 0x24,
+                    "END" => 0x23,
+                    "PAGEUP" => 0x21,
+                    "PAGEDOWN" => 0x22,
+                    "PAUSE" => 0x13,
+                    "SCROLLLOCK" => 0x91,
+                    _ if name.len() == 1 && name.as_bytes()[0].is_ascii_alphanumeric() => name.as_bytes()[0] as i32,
+                    _ => {
+                        if let Some(n) = name.strip_prefix("NUMPAD").and_then(|n| n.parse::<i32>().ok()).filter(|n| (0..=9).contains(n)) {
+                            0x60 + n
+                        } else if let Some(n) = name.strip_prefix('F').and_then(|n| n.parse::<i32>().ok()).filter(|n| (1..=24).contains(n)) {
+                            0x70 + n - 1
+                        } else {
+                            return None;
+                        }
+                    }
+                }
+            }
+        }
+    }
+    (key.vk != 0).then_some(key)
+}
+
+/// Whether the hotkey is held right now. This asks Windows for the key's state; it
+/// installs nothing, does not swallow the key, and works while a game has focus
+/// (registered hotkeys do not: League tells Windows to ignore them).
+pub fn hotkey_down(key: &Hotkey) -> bool {
+    let down = |vk: i32| unsafe { (GetAsyncKeyState(vk) as u16 & 0x8000) != 0 };
+    down(key.vk) && down(0x11) == key.ctrl && down(0x10) == key.shift && down(0x12) == key.alt
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn hotkeys_are_parsed() {
+        assert_eq!(parse_hotkey("F8"), Some(Hotkey { vk: 0x77, ctrl: false, shift: false, alt: false }));
+        assert_eq!(parse_hotkey(" f24 "), Some(Hotkey { vk: 0x87, ctrl: false, shift: false, alt: false }));
+        assert_eq!(parse_hotkey("Ctrl+Shift+B"), Some(Hotkey { vk: 0x42, ctrl: true, shift: true, alt: false }));
+        assert_eq!(parse_hotkey("alt + numpad0"), Some(Hotkey { vk: 0x60, ctrl: false, shift: false, alt: true }));
+        assert_eq!(parse_hotkey("Insert"), Some(Hotkey { vk: 0x2D, ctrl: false, shift: false, alt: false }));
+        assert_eq!(parse_hotkey(""), None);
+        assert_eq!(parse_hotkey("Ctrl"), None);
+        assert_eq!(parse_hotkey("F99"), None);
+        assert_eq!(parse_hotkey("banana"), None);
+    }
+}
+
+/// High-resolution counter in 100-nanosecond units (same unit as sound packet timestamps).
+pub fn qpc_100ns() -> u64 {
+    unsafe {
+        let mut c = 0i64;
+        let mut f = 0i64;
+        let _ = QueryPerformanceCounter(&mut c);
+        let _ = QueryPerformanceFrequency(&mut f);
+        if f <= 0 {
+            return 0;
+        }
+        ((c as u128) * 10_000_000u128 / (f as u128)) as u64
+    }
+}

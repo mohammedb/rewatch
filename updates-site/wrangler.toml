@@ -1,0 +1,23 @@
+# rewatch.ggwp.no: the app's update address and download page (worker.js).
+# Lives in the same Cloudflare account as the rest of ggwp.no and touches nothing else there.
+#
+#   deploy:   npx wrangler deploy            (from this folder)
+#   publish a version: node scripts/release.mjs  (builds, signs, uploads, announces)
+#
+# The Cloudflare account is not kept in this file. Set CLOUDFLARE_ACCOUNT_ID, or put the
+# id in ../.secrets/cloudflare-account-id (release.mjs reads it from there).
+name = "rewatch-updates"
+main = "worker.js"
+compatibility_date = "2026-10-01"
+workers_dev = false
+routes = [{ pattern = "rewatch.ggwp.no", custom_domain = true }]
+
+[[r2_buckets]]
+binding = "RELEASES"
+bucket_name = "rewatch-releases"
+
+# page.html is bundled as text by wrangler's default rules; the fonts need this one.
+[[rules]]
+type = "Data"
+globs = ["**/*.woff2"]
+fallthrough = true
