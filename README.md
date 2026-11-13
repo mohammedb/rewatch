@@ -442,5 +442,11 @@ big). Not checked: a real game, the reel and downscaling on real hardware.
 
 ## Not built yet
 
-Code signing (so Windows stops warning about the installer). The Trends tab reads
-every recording each time it opens; with hundreds of games it will want a cache.
+Code signing (so Windows stops warning about the installer).
+
+## After 0.3.0 (not released yet)
+
+- The Trends tab keeps each recording's row and reads it again only when its match,
+  review or insights file changes.
+- Clips, highlight clips, the reel and split-view clips share one list of encoders to
+  try (`video::h264_ladder`), in a quality or a bitrate mode.

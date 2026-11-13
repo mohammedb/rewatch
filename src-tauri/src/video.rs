@@ -133,6 +133,43 @@ fn encoder_args(s: &Settings, family: Family) -> Vec<String> {
     }
 }
 
+/// How a re-encode of a clip is told what size to aim for.
+#[derive(Debug, Clone, Copy)]
+pub enum Rate {
+    /// Constant quality: the graphics cards' quality number; the processor gets 2 less.
+    Quality(u32),
+    /// A video bitrate in kbps, capped at that rate (for clips of a set file size).
+    Kbps(u32),
+}
+
+/// H.264 encoder arguments to try in turn for a clip: the graphics card's encoder if
+/// there is one, the processor otherwise.
+pub fn h264_ladder(rate: Rate) -> Vec<Vec<String>> {
+    let v = |list: &[&str]| list.iter().map(|x| x.to_string()).collect::<Vec<String>>();
+    match rate {
+        Rate::Quality(q) => {
+            let (q, crf) = (q.to_string(), q.saturating_sub(2).to_string());
+            vec![
+                v(&["-c:v", "h264_nvenc", "-preset", "p5", "-rc", "vbr", "-cq", &q, "-b:v", "0"]),
+                v(&["-c:v", "h264_amf", "-quality", "balanced", "-rc", "cqp", "-qp_i", &q, "-qp_p", &q]),
+                v(&["-c:v", "h264_qsv", "-global_quality", &q]),
+                v(&["-c:v", "libx264", "-preset", "veryfast", "-crf", &crf, "-pix_fmt", "yuv420p"]),
+            ]
+        }
+        Rate::Kbps(k) => {
+            let (r, buf) = (format!("{k}k"), format!("{}k", k * 2));
+            let cap = ["-b:v", r.as_str(), "-maxrate", r.as_str(), "-bufsize", buf.as_str()];
+            let with = |head: &[&str]| [v(head), v(&cap)].concat();
+            vec![
+                with(&["-c:v", "h264_nvenc", "-preset", "p5", "-rc", "vbr"]),
+                with(&["-c:v", "h264_amf", "-quality", "balanced", "-rc", "vbr_peak"]),
+                with(&["-c:v", "h264_qsv"]),
+                [with(&["-c:v", "libx264", "-preset", "medium"]), v(&["-pix_fmt", "yuv420p"])].concat(),
+            ]
+        }
+    }
+}
+
 fn device_args(target: &CaptureTarget) -> Vec<String> {
     if target.adapter_idx == 0 {
         return Vec::new();
@@ -399,6 +436,15 @@ mod tests {
         assert!(capture_chain(&uhd, 60, Family::Nvenc, Some(5), Some(1080), true).contains("scale_cuda=w=-2:h=1080"));
         assert!(capture_chain(&uhd, 60, Family::Qsv, Some(5), Some(1080), true).contains("scale_qsv=w=-2:h=1080"));
         assert!(capture_chain(&uhd, 60, Family::Nvenc, Some(5), Some(1080), false).contains("hwdownload,format=bgra,scale=-2:1080"));
+        // One encoder ladder for clips: quality mode keeps the old numbers (the processor
+        // 2 lower), bitrate mode caps every encoder at the same rate.
+        let q = h264_ladder(Rate::Quality(23));
+        assert_eq!(q.len(), 4);
+        assert!(q[0].join(" ").contains("h264_nvenc -preset p5 -rc vbr -cq 23"));
+        assert!(q[3].join(" ").contains("libx264 -preset veryfast -crf 21 -pix_fmt yuv420p"));
+        let k = h264_ladder(Rate::Kbps(900));
+        assert!(k.iter().all(|e| e.join(" ").contains("-b:v 900k -maxrate 900k -bufsize 1800k")));
+        assert!(k[3].join(" ").ends_with("-pix_fmt yuv420p"));
         // Without on-card scaling, QSV still gets a pixel format its encoder accepts.
         assert!(capture_chain(&uhd, 60, Family::Qsv, Some(5), Some(1080), false).ends_with("format=nv12"));
     }

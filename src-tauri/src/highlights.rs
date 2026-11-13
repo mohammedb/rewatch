@@ -190,12 +190,7 @@ fn cut(ffmpeg: &Path, dir: &Path, h: &Highlight, out: &Path) -> Result<()> {
     }
     let part = out.with_extension("part");
     let mut last = anyhow!("no encoder");
-    for enc in [
-        &["-c:v", "h264_nvenc", "-preset", "p5", "-rc", "vbr", "-cq", "27", "-b:v", "0"][..],
-        &["-c:v", "h264_amf", "-quality", "balanced", "-rc", "cqp", "-qp_i", "27", "-qp_p", "27"][..],
-        &["-c:v", "h264_qsv", "-global_quality", "27"][..],
-        &["-c:v", "libx264", "-preset", "veryfast", "-crf", "25", "-pix_fmt", "yuv420p"][..],
-    ] {
+    for enc in crate::video::h264_ladder(crate::video::Rate::Quality(27)) {
         let mut args: Vec<String> = ["-y", "-hide_banner", "-loglevel", "error"].map(String::from).to_vec();
         args.extend(inputs.iter().cloned());
         let mut graph = "[0:v]scale=-2:'min(1080,ih)'[v]".to_string();
@@ -203,7 +198,7 @@ fn cut(ffmpeg: &Path, dir: &Path, h: &Highlight, out: &Path) -> Result<()> {
             graph += &format!(";{}amix=inputs={}:normalize=0[a]", sound.join(""), sound.len());
         }
         args.extend(["-filter_complex".into(), graph, "-map".into(), "[v]".into(), "-map".into(), if sound.len() > 1 { "[a]".into() } else { "0:a?".into() }]);
-        args.extend(enc.iter().map(|x| x.to_string()));
+        args.extend(enc);
         args.extend(["-c:a", "aac", "-ar", "48000", "-ac", "2", "-b:a", "160k", "-movflags", "+faststart", "-f", "mp4"].map(String::from));
         args.push(p(&part));
         match run_tool(ffmpeg, &args) {
@@ -241,14 +236,9 @@ fn run_with_encoders(ffmpeg: &Path, args_prefix: &[String], out: &Path) -> Resul
     let part = out.with_extension("part");
     let p = |x: &Path| x.to_string_lossy().to_string();
     let mut last = anyhow!("no encoder");
-    for enc in [
-        &["-c:v", "h264_nvenc", "-preset", "p5", "-rc", "vbr", "-cq", "26", "-b:v", "0"][..],
-        &["-c:v", "h264_amf", "-quality", "balanced", "-rc", "cqp", "-qp_i", "26", "-qp_p", "26"][..],
-        &["-c:v", "h264_qsv", "-global_quality", "26"][..],
-        &["-c:v", "libx264", "-preset", "veryfast", "-crf", "24", "-pix_fmt", "yuv420p"][..],
-    ] {
+    for enc in crate::video::h264_ladder(crate::video::Rate::Quality(26)) {
         let mut args = args_prefix.to_vec();
-        args.extend(enc.iter().map(|x| x.to_string()));
+        args.extend(enc);
         args.extend(["-c:a", "aac", "-ar", "48000", "-ac", "2", "-b:a", "160k", "-movflags", "+faststart", "-f", "mp4"].map(String::from));
         args.push(p(&part));
         match run_tool(ffmpeg, &args) {

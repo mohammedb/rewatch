@@ -179,13 +179,32 @@ pub fn build_highlight_reel(settings: &Settings, id: &str, stop: &dyn Fn() -> bo
     Ok(out.to_string_lossy().to_string())
 }
 
-/// Compact cross-game metrics for the library Trends view.
+/// When the files a Trends row is made from last changed.
+type TrendStamp = [Option<std::time::SystemTime>; 3];
+
+/// Trends rows already worked out, by recording folder, with the stamp they were made at.
+static TREND_CACHE: std::sync::Mutex<Option<std::collections::HashMap<PathBuf, (TrendStamp, Value)>>> = std::sync::Mutex::new(None);
+
+fn trend_stamp(dir: &Path) -> TrendStamp {
+    let changed = |name: &str| fs::metadata(dir.join(name)).and_then(|m| m.modified()).ok();
+    [changed("match.json"), changed("review.json"), changed(crate::insight::FILE)]
+}
+
+/// Compact cross-game metrics for the library Trends view. Each recording is read once
+/// and again only when its match, review or insights file changes.
 pub fn trends(settings: &Settings) -> Vec<Value> {
     let mut out = Vec::new();
     let Some(root) = settings.recordings_path() else { return out };
     let Ok(entries) = fs::read_dir(&root) else { return out };
+    let mut guard = TREND_CACHE.lock().unwrap();
+    let cache = guard.get_or_insert_with(Default::default);
     for entry in entries.flatten() {
         let dir = entry.path();
+        let stamp = trend_stamp(&dir);
+        if let Some((_, row)) = cache.get(&dir).filter(|(seen, _)| *seen == stamp) {
+            out.push(row.clone());
+            continue;
+        }
         let Some(doc) = read_json(&dir.join("match.json")) else { continue };
         let Some(id) = doc.get("id").and_then(|v| v.as_str()) else { continue };
         let game = doc.get("game").cloned().unwrap_or(Value::Null);
@@ -243,12 +262,12 @@ pub fn trends(settings: &Settings) -> Vec<Value> {
                     if clock.is_empty() {
                         return vt;
                     }
-                    let mut best_i = 0;
-                    for (idx, c) in clock.iter().enumerate() {
-                        if c.get(0).and_then(|x| x.as_f64()).unwrap_or(0.0) <= vt {
-                            best_i = idx;
-                        }
-                    }
+                    // The clock samples are in time order: stop at the first one after `vt`.
+                    let best_i = clock
+                        .iter()
+                        .take_while(|c| c.get(0).and_then(|x| x.as_f64()).unwrap_or(0.0) <= vt)
+                        .count()
+                        .saturating_sub(1);
                     let c0 = clock[best_i].get(0).and_then(|x| x.as_f64()).unwrap_or(0.0);
                     let g0 = clock[best_i].get(1).and_then(|x| x.as_f64()).unwrap_or(0.0);
                     g0 + (vt - c0)
@@ -263,6 +282,9 @@ pub fn trends(settings: &Settings) -> Vec<Value> {
                         }
                         if gt >= 900.0 && cs15.is_none() {
                             cs15 = val;
+                        }
+                        if cs15.is_some() {
+                            break;
                         }
                     }
                 }
@@ -291,7 +313,7 @@ pub fn trends(settings: &Settings) -> Vec<Value> {
         let avg_avoidable = (!avoid_vals.is_empty()).then(|| avoid_vals.iter().sum::<f64>() / avoid_vals.len() as f64);
 
         let review = read_review(&dir);
-        out.push(json!({
+        let row = json!({
             "id": id,
             "startedEpochMs": doc.get("startedEpochMs"),
             "queueId": game.get("queueId"),
@@ -314,7 +336,9 @@ pub fn trends(settings: &Settings) -> Vec<Value> {
             "keep": review.get("keep").cloned().unwrap_or(json!(false)),
             "deathCauses": death_causes,
             "avgAvoidable": avg_avoidable,
-        }));
+        });
+        cache.insert(dir, (stamp, row.clone()));
+        out.push(row);
     }
     out.sort_by(|a, b| b["id"].as_str().cmp(&a["id"].as_str()));
     out
@@ -465,8 +489,6 @@ pub fn export_clip(
     // Target-size Discord encode: bitrate-capped H.264.
     let (v_kbps, audio_kbps) = capped_rates(len, mb, !labels.is_empty())?;
     let max_h = if v_kbps < 1800 { 720 } else { 1080 };
-    let v_rate = format!("{v_kbps}k");
-    let v_buf = format!("{}k", v_kbps * 2);
 
     let mut graph = format!("[0:v]scale=-2:'min({max_h},ih)',format=yuv420p[v]");
     if labels.len() > 1 {
@@ -474,12 +496,7 @@ pub fn export_clip(
     }
 
     let mut last = anyhow!("no encoder");
-    for enc in [
-        vec!["-c:v", "h264_nvenc", "-preset", "p5", "-rc", "vbr", "-b:v", &v_rate, "-maxrate", &v_rate, "-bufsize", &v_buf],
-        vec!["-c:v", "h264_amf", "-quality", "balanced", "-rc", "vbr_peak", "-b:v", &v_rate, "-maxrate", &v_rate, "-bufsize", &v_buf],
-        vec!["-c:v", "h264_qsv", "-b:v", &v_rate, "-maxrate", &v_rate, "-bufsize", &v_buf],
-        vec!["-c:v", "libx264", "-preset", "medium", "-b:v", &v_rate, "-maxrate", &v_rate, "-bufsize", &v_buf],
-    ] {
+    for enc in crate::video::h264_ladder(crate::video::Rate::Kbps(v_kbps)) {
         let mut args = inputs.clone();
         args.extend(["-filter_complex".into(), graph.clone(), "-map".into(), "[v]".into()]);
         match labels.len() {
@@ -490,7 +507,7 @@ pub fn export_clip(
         if !labels.is_empty() {
             args.extend(["-c:a".into(), "aac".into(), "-b:a".into(), format!("{audio_kbps}k")]);
         }
-        args.extend(enc.into_iter().map(String::from));
+        args.extend(enc);
         args.extend(["-movflags".into(), "+faststart".into(), p(&out)]);
         match run_tool(&ffmpeg, &args) {
             Ok(_) => return Ok(p(&out)),
@@ -644,23 +661,10 @@ pub fn export_split(
         None => None,
     };
 
-    let encoders: Vec<Vec<String>> = if let Some((vk, _)) = capped {
-        let vr = format!("{vk}k");
-        let vb = format!("{}k", vk * 2);
-        vec![
-            ["-c:v", "h264_nvenc", "-preset", "p5", "-rc", "vbr", "-b:v", &vr, "-maxrate", &vr, "-bufsize", &vb].map(String::from).to_vec(),
-            ["-c:v", "h264_amf", "-quality", "balanced", "-rc", "vbr_peak", "-b:v", &vr, "-maxrate", &vr, "-bufsize", &vb].map(String::from).to_vec(),
-            ["-c:v", "h264_qsv", "-b:v", &vr, "-maxrate", &vr, "-bufsize", &vb].map(String::from).to_vec(),
-            ["-c:v", "libx264", "-preset", "medium", "-b:v", &vr, "-maxrate", &vr, "-bufsize", &vb, "-pix_fmt", "yuv420p"].map(String::from).to_vec(),
-        ]
-    } else {
-        vec![
-            ["-c:v", "h264_nvenc", "-preset", "p5", "-rc", "vbr", "-cq", "23", "-b:v", "0"].map(String::from).to_vec(),
-            ["-c:v", "h264_amf", "-quality", "balanced", "-rc", "cqp", "-qp_i", "23", "-qp_p", "23"].map(String::from).to_vec(),
-            ["-c:v", "h264_qsv", "-global_quality", "23"].map(String::from).to_vec(),
-            ["-c:v", "libx264", "-preset", "veryfast", "-crf", "21", "-pix_fmt", "yuv420p"].map(String::from).to_vec(),
-        ]
-    };
+    let encoders = crate::video::h264_ladder(match capped {
+        Some((vk, _)) => crate::video::Rate::Kbps(vk),
+        None => crate::video::Rate::Quality(23),
+    });
     let audio_kbps = capped.map(|(_, a)| a).unwrap_or(192);
 
     // The graphics card's encoder if there is one, the processor otherwise.
