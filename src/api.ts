@@ -6,7 +6,7 @@ import { listen } from "@tauri-apps/api/event";
 import { open } from "@tauri-apps/plugin-dialog";
 import { revealItemInDir } from "@tauri-apps/plugin-opener";
 import { mock } from "./mock";
-import type { Coach, Environment, Extras, Highlight, TeamReview, Insights, MatchFull, MatchSummary, MicInfo, Pov, Review, Settings, ShareInfo, Status, TrackName, UpdateInfo, Voice, WatchPeer } from "./types";
+import type { Coach, Environment, Extras, Highlight, TeamReview, Insights, LeagueBackup, MatchFull, MatchSummary, MicInfo, Pov, Review, Settings, ShareInfo, Status, TrackName, TrendMatch, UpdateInfo, Voice, WatchPeer } from "./types";
 
 export const inApp = "__TAURI_INTERNALS__" in window;
 
@@ -26,8 +26,8 @@ export const api = {
   deleteMatch: (id: string) => call<void>("delete_match", { id }),
   startManualRecording: () => call<void>("start_manual_recording"),
   stopRecording: () => call<string | null>("stop_recording"),
-  exportClip: (id: string, start: number, end: number, tracks: TrackName[]) =>
-    call<string>("export_clip", { id, start, end, tracks }),
+  exportClip: (id: string, start: number, end: number, tracks: TrackName[], maxMb?: number | null) =>
+    call<string>("export_clip", { id, start, end, tracks, maxMb: maxMb ?? null }),
   exportFull: (id: string) => call<string>("export_full", { id }),
   shareInfo: () => call<ShareInfo>("share_info"),
   friendPing: (code: string) => call<string>("friend_ping", { code }),
@@ -41,6 +41,12 @@ export const api = {
   voice: (id: string) => call<Voice>("voice", { id }),
   /** The highlights of a recording; `save` makes their clips now. */
   highlights: (id: string, save: boolean) => call<Highlight[]>("highlights", { id, save }),
+  buildHighlightReel: (id: string) => call<string>("build_highlight_reel", { id }),
+  libraryTrends: () => call<TrendMatch[]>("library_trends"),
+  listLeagueBackups: () => call<LeagueBackup[]>("list_league_backups"),
+  createLeagueBackup: (label: string) => call<LeagueBackup>("create_league_backup", { label }),
+  restoreLeagueBackup: (id: string) => call<LeagueBackup>("restore_league_backup", { id }),
+  deleteLeagueBackup: (id: string) => call<void>("delete_league_backup", { id }),
   /** A review of one team fight from my view and the teammates' views given. */
   teamReview: (id: string, start: number, end: number, views: { source: string; shift: number; champion: string }[]) =>
     call<TeamReview>("team_review", { id, start, end, views }),
@@ -55,8 +61,8 @@ export const api = {
   updateInfo: () => call<UpdateInfo>("update_info"),
   updateCheck: () => call<UpdateInfo>("update_check"),
   updateInstall: () => call<void>("update_install"),
-  exportSplit: (id: string, start: number, end: number, views: { source: string; shift: number; label: string }[], tracks: TrackName[], listen: number | null, label: string) =>
-    call<string>("export_split", { id, start, end, views, tracks, listen, label }),
+  exportSplit: (id: string, start: number, end: number, views: { source: string; shift: number; label: string }[], tracks: TrackName[], listen: number | null, label: string, maxMb?: number | null) =>
+    call<string>("export_split", { id, start, end, views, tracks, listen, label, maxMb: maxMb ?? null }),
 };
 
 /** URL the page can load a file on disk from. */

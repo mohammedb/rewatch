@@ -1,4 +1,4 @@
-import { Bookmark, CircleDot, MessageSquare, Search, Star, Video } from "lucide-react";
+import { Bookmark, CircleDot, Film, MessageSquare, Search, Star, Tag, Video } from "lucide-react";
 import { useEffect, useMemo, useState } from "react";
 import { absoluteFileUrl, api, pickFolder } from "./api";
 import { ItemIcon, Portrait } from "./ChampIcon";
@@ -51,7 +51,16 @@ function FirstRun({ settings, onSave }: { settings: Settings; onSave: (s: Settin
 
 export function Games({ matches, settings, busy, onOpen, onRecord, onSaveSettings }: Props) {
   const [filter, setFilter] = useState<Filter>("all");
+  const [activeTag, setActiveTag] = useState<string | null>(null);
   const [query, setQuery] = useState("");
+
+  const allTags = useMemo(() => {
+    const counts = new Map<string, number>();
+    for (const m of matches ?? []) {
+      for (const t of m.tags ?? []) counts.set(t, (counts.get(t) ?? 0) + 1);
+    }
+    return [...counts.entries()].sort((a, b) => b[1] - a[1] || a[0].localeCompare(b[0]));
+  }, [matches]);
 
   const shown = useMemo(() => {
     const q = query.trim().toLowerCase();
@@ -59,10 +68,15 @@ export function Games({ matches, settings, busy, onOpen, onRecord, onSaveSetting
       if (filter === "win" && m.game?.result !== "Win") return false;
       if (filter === "lose" && m.game?.result !== "Lose") return false;
       if (filter === "kept" && !m.keep) return false;
-      if (q && !`${m.game?.me?.champion ?? ""} ${m.game?.queueName ?? ""}`.toLowerCase().includes(q)) return false;
+      if (activeTag && !(m.tags ?? []).includes(activeTag)) return false;
+      if (q) {
+        const players = (m.game?.players ?? []).map((p) => `${p.name} ${p.champion}`).join(" ");
+        const hay = `${m.game?.me?.champion ?? ""} ${m.game?.queueName ?? ""} ${(m.tags ?? []).join(" ")} ${m.notesText ?? ""} ${players}`.toLowerCase();
+        if (!hay.includes(q)) return false;
+      }
       return true;
     });
-  }, [matches, filter, query]);
+  }, [matches, filter, activeTag, query]);
 
   if (!settings) return <div className="page" />;
   const all = matches ?? [];
@@ -97,7 +111,7 @@ export function Games({ matches, settings, busy, onOpen, onRecord, onSaveSetting
                 </div>
                 <label className="search">
                   <Search size={14} aria-hidden />
-                  <input className="field-input" type="text" placeholder="Find a champion" value={query} onChange={(e) => setQuery(e.target.value)} aria-label="Find a champion" />
+                  <input className="field-input" type="text" placeholder="Search champ, tag, note…" value={query} onChange={(e) => setQuery(e.target.value)} aria-label="Search champion, tag, note or player" />
                 </label>
               </>
             )}
@@ -106,6 +120,18 @@ export function Games({ matches, settings, busy, onOpen, onRecord, onSaveSetting
             </button>
           </div>
         </div>
+
+        {allTags.length > 0 && (
+          <div className="tag-filters" role="group" aria-label="Filter by tag">
+            <Tag size={13} className="muted" aria-hidden />
+            <button className="chip" aria-pressed={activeTag === null} onClick={() => setActiveTag(null)}>All tags</button>
+            {allTags.map(([tag, count]) => (
+              <button key={tag} className="chip" aria-pressed={activeTag === tag} onClick={() => setActiveTag(activeTag === tag ? null : tag)}>
+                #{tag} <span className="muted">{count}</span>
+              </button>
+            ))}
+          </div>
+        )}
 
         {matches === null ? null : all.length === 0 ? (
           <div className="empty">
@@ -128,6 +154,7 @@ export function Games({ matches, settings, busy, onOpen, onRecord, onSaveSetting
               const mins = Math.max(1, (m.game?.length ?? m.duration) / 60);
               const manual = m.mode === "manual";
               const queue = m.game?.queueName ?? (manual ? "Screen recording" : m.game?.mode === "PRACTICETOOL" ? "Practice Tool" : "League game");
+              const tags = m.tags ?? [];
               return (
                 <button key={m.id} className="card" onClick={() => onOpen(m.id)}>
                   <span className={`shot ${m.thumb ? "" : "blank"}`}>
@@ -135,6 +162,7 @@ export function Games({ matches, settings, busy, onOpen, onRecord, onSaveSetting
                     {result && <span className={`res ${cls}`}>{result === "Win" ? "Victory" : "Defeat"}</span>}
                     <span className="flags">
                       {m.keep && <span className="kept" title="Kept: never deleted by the size limit"><Star size={12} fill="currentColor" aria-label="Kept" /></span>}
+                      {m.trimmedToHighlights && <span title="Trimmed to stitched highlights reel"><Film size={12} aria-hidden />Reel</span>}
                       {m.noteCount > 0 && <span title={`${m.noteCount} note${m.noteCount === 1 ? "" : "s"}`}><MessageSquare size={12} aria-hidden />{m.noteCount}</span>}
                       {m.summary.bookmarks > 0 && <span title={`${m.summary.bookmarks} bookmark${m.summary.bookmarks === 1 ? "" : "s"}`}><Bookmark size={12} aria-hidden />{m.summary.bookmarks}</span>}
                     </span>
@@ -146,6 +174,12 @@ export function Games({ matches, settings, busy, onOpen, onRecord, onSaveSetting
                     <span className="name">{me?.champion ?? (manual ? "Screen recording" : "League game")}</span>
                     <span className="kda">{me && <>{me.kills}<i>/</i><span className="d">{me.deaths}</span><i>/</i>{me.assists}</>}</span>
                     <span className="when caps">{when(m.startedEpochMs)}{me ? `  ·  ${queue}` : ""}</span>
+                    {tags.length > 0 && (
+                      <span className="card-tags">
+                        {tags.slice(0, 3).map((t) => <i key={t}>#{t}</i>)}
+                        {tags.length > 3 && <i>+{tags.length - 3}</i>}
+                      </span>
+                    )}
                     <span className="foot">
                       <span>{me ? `${me.cs} CS, ${(me.cs / mins).toFixed(1)} a minute` : `${m.height}p, ${bytes(m.sizeBytes)}`}</span>
                       <span className="build">

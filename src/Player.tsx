@@ -1,7 +1,7 @@
 import {
   ArrowLeft, AudioLines, Bookmark, TrendingUp, Users, Grid2x2, HardDriveDownload, LayoutGrid, LayoutPanelLeft, Volume2, ChevronLeft, ChevronRight, Circle, Download, Eraser, FolderOpen, Gamepad2, Headphones, Keyboard,
   Maximize2, Mic, MicOff, MousePointer2, MousePointerClick, MoveUpRight, PanelRightClose, PanelRightOpen, Pause, Pencil,
-  Play, Scissors, SkipBack, SkipForward, Skull, Star, Swords, Trash2, VolumeX, X, type LucideIcon,
+  Play, Repeat, Scissors, SkipBack, SkipForward, Skull, Star, Swords, Trash2, VolumeX, X, type LucideIcon,
 } from "lucide-react";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { api, fileUrl, onEvent, showInFolder } from "./api";
@@ -10,8 +10,8 @@ import { bytes, categorize, CATEGORY_LABEL, clock, describe, gameClockAt, laneNa
 import { eventGlyph, FILTER_ICON } from "./icons";
 import { DISCORD_COLOR, fightsOf, type Fight, Lanes, QueueBar, ReviewTab, VOICE_COLORS, type Metric, type Queue, type QueueItem, type VoiceRow } from "./Insights";
 import { Timeline, type Marker } from "./Timeline";
-import { drawKeys, drawMouse, KeyOverlay, parseKeys, parseMouse, SideView, Splitter, TileBar, usePovMouse, ZoomPane, type KeyLog, type MouseLog } from "./Views";
-import type { Coach, Drawing, Extras, Friend, Highlight, Insights, MatchFull, PlayerTitle, TeamReview, PlayerRow, Pov, Review, Shape, Tool, TrackName, Voice, WatchEvent } from "./types";
+import { drawKeys, drawMouse, KeyOverlay, parseKeys, parseMouse, ShapeView, SideView, Splitter, TileBar, usePovMouse, ZoomPane, type KeyLog, type MouseLog } from "./Views";
+import type { AudioPrefs, Coach, Drawing, Extras, Friend, Highlight, Insights, MatchFull, MatchSummary, PlayerTitle, TeamReview, PlayerRow, Pov, Review, Shape, Tool, TrackName, Voice, WatchEvent } from "./types";
 
 const INKS = ["#ffd23f", "#f2584b", "#4c9dff", "#ffffff"];
 const FILTERS = ["kill", "death", "assist", "fight", "objective", "structure", "item", "bookmark", "note"] as const;
@@ -32,7 +32,7 @@ const TOOLS: { tool: Tool; label: string; icon: LucideIcon }[] = [
 const SHORTCUTS: [string, string][] = [
   ["Space", "Play or pause"], ["← →", "Back or forward 5 seconds"], ["Shift ← →", "1 second"], ["J L", "10 seconds"],
   [", .", "One frame"], ["P N", "Previous or next moment"], ["1 2 3", "Mute game, Discord, mic"], ["D", "Draw"],
-  ["[ ]", "Mark clip start and end"], ["V", "Next teammate's view"], ["S", "Split view on or off"], ["T", "Hide or show the side panel"], ["F", "Full screen"],
+  ["[ ]", "Mark clip start and end"], ["R", "Loop clip or moment"], ["V", "Next teammate's view"], ["S", "Split view on or off"], ["T", "Hide or show the side panel"], ["F", "Full screen"],
 ];
 /** Why a teammate's view cannot be opened: short label, and the longer hint. */
 const POV_STATUS: Record<string, [string, string]> = {
@@ -101,26 +101,6 @@ const DEFAULT_PREFS: Prefs = {
   versus: "",
 };
 
-function ShapeView({ s, w, h }: { s: Shape; w: number; h: number }) {
-  const P = s.pts.map(([x, y]) => [x * w, y * h] as [number, number]);
-  const common = { stroke: s.color, strokeWidth: 4, fill: "none", strokeLinecap: "round" as const, strokeLinejoin: "round" as const };
-  if (s.tool === "pen") return <polyline points={P.map((p) => p.join(",")).join(" ")} {...common} />;
-  const [a, b] = [P[0], P[P.length - 1]];
-  if (!a || !b) return null;
-  if (s.tool === "circle") {
-    return <ellipse cx={(a[0] + b[0]) / 2} cy={(a[1] + b[1]) / 2} rx={Math.abs(b[0] - a[0]) / 2} ry={Math.abs(b[1] - a[1]) / 2} {...common} />;
-  }
-  const ang = Math.atan2(b[1] - a[1], b[0] - a[0]);
-  const head = 22;
-  const wing = (d: number) => `${b[0] - head * Math.cos(ang + d)},${b[1] - head * Math.sin(ang + d)}`;
-  return (
-    <g>
-      <line x1={a[0]} y1={a[1]} x2={b[0]} y2={b[1]} {...common} />
-      <polyline points={`${wing(0.45)} ${b[0]},${b[1]} ${wing(-0.45)}`} {...common} />
-    </g>
-  );
-}
-
 function Scoreboard({ players, titles }: { players: PlayerRow[]; titles: Map<string, PlayerTitle> }) {
   const myTeam = players.find((p) => p.isMe)?.team;
   const teams = [...new Set(players.map((p) => p.team))].sort((a) => (a === myTeam ? -1 : 1));
@@ -181,6 +161,8 @@ interface PlayerProps {
   onBack: () => void;
   /** The teammates list, for watching together. */
   friends: Friend[];
+  /** Library matches, for side-by-side game comparison in the graph. */
+  matches?: MatchSummary[];
   /** Opened from a teammate's invitation: start in watch-together. */
   joinTogether?: boolean;
   /** Told whenever watch-together is switched on or off here. */
@@ -189,11 +171,12 @@ interface PlayerProps {
   hintsOn?: boolean;
 }
 
-export function Player({ id, onBack, friends, joinTogether, onTogether, hintsOn }: PlayerProps) {
+export function Player({ id, onBack, friends, matches, joinTogether, onTogether, hintsOn }: PlayerProps) {
   const [match, setMatch] = useState<MatchFull | null>(null);
   const [loadError, setLoadError] = useState<string | null>(null);
   const [review, setReview] = useState<Review>({ keep: false, notes: [], drawings: [] });
   const [time, setTime] = useState(0);
+  const [videoDuration, setVideoDuration] = useState(0);
   const [playing, setPlaying] = useState(false);
   const [rate, setRate] = useState(1);
   const [tab, setTab] = useState<"moments" | "review" | "notes" | "players">("moments");
@@ -227,6 +210,10 @@ export function Player({ id, onBack, friends, joinTogether, onTogether, hintsOn 
   const [draft, setDraft] = useState<Shape | null>(null);
   const [inPt, setInPt] = useState<number | null>(null);
   const [outPt, setOutPt] = useState<number | null>(null);
+  const [looping, setLooping] = useState(false);
+  const [maxMb, setMaxMb] = useState<number | null>(null);
+  const [buildingReel, setBuildingReel] = useState(false);
+  const [tagDraft, setTagDraft] = useState("");
   const [noteText, setNoteText] = useState("");
   const [toast, setToast] = useState<{ text: string; path?: string } | null>(null);
   const [busy, setBusy] = useState(false);
@@ -267,6 +254,18 @@ export function Player({ id, onBack, friends, joinTogether, onTogether, hintsOn 
   const prefsRef = useRef(prefs);
   prefsRef.current = prefs;
   const listedRef = useRef<Marker[]>([]);
+  const inPtRef = useRef<number | null>(null);
+  inPtRef.current = inPt;
+  const outPtRef = useRef<number | null>(null);
+  outPtRef.current = outPt;
+  const loopingRef = useRef(false);
+  loopingRef.current = looping;
+  const voiceRef = useRef<Voice | null>(null);
+  voiceRef.current = voice;
+  const extrasRef = useRef<Extras[]>([]);
+  extrasRef.current = extras;
+  const listenRef = useRef<string | null>(null);
+  listenRef.current = listen;
 
   const updatePrefs = useCallback((patch: Partial<Prefs>) => {
     setPrefs((p) => {
@@ -276,35 +275,66 @@ export function Player({ id, onBack, friends, joinTogether, onTogether, hintsOn 
     });
   }, []);
 
+  /** Effective audio settings for this match: per-match override in review.json, or user defaults. */
+  const audio: AudioPrefs = useMemo(
+    () => review.audio ?? { volume: prefs.volume, muted: prefs.muted, duck: false },
+    [review.audio, prefs.volume, prefs.muted],
+  );
+  const audioRef = useRef(audio);
+  audioRef.current = audio;
+
+  const setTrackAudio = useCallback(
+    (patch: Partial<AudioPrefs>) => {
+      const cur = audioRef.current;
+      const next: AudioPrefs = {
+        volume: patch.volume ?? cur.volume,
+        muted: patch.muted ?? cur.muted,
+        duck: patch.duck ?? cur.duck,
+      };
+      setReview((r) => ({ ...r, audio: next }));
+      if (patch.volume || patch.muted) {
+        updatePrefs({ volume: next.volume, muted: next.muted });
+      }
+    },
+    [updatePrefs],
+  );
+
   // ---- load
   useEffect(() => {
     api.getMatch(id).then((m) => {
       setMatch(m);
       setReview(m.review ?? { keep: false, notes: [], drawings: [] });
-      if (m.mouse) {
+      if (m.mouse && !m.trimmedToHighlights) {
         fetch(fileUrl(m.dir, m.mouse.file))
           .then((r) => r.text())
           .then((text) => setMouse(parseMouse(text, m.mouse!.offset)))
           .catch(() => setMouse(null));
       }
-      if (m.keys) {
+      if (m.keys && !m.trimmedToHighlights) {
         fetch(fileUrl(m.dir, m.keys.file))
           .then((r) => r.text())
           .then((text) => setKeys(parseKeys(text, m.keys!.offset, m.keys!.names)))
           .catch(() => setKeys(null));
       }
+      // A game trimmed to its highlight reel no longer lines up with teammates' views.
+      if (!m.trimmedToHighlights) api.povList(id).then(setPovs).catch(() => setPovs([]));
     }).catch((e) => setLoadError(String(e)));
-    api.povList(id).then(setPovs).catch(() => setPovs([]));
   }, [id]);
+
+  const trimmed = !!match?.trimmedToHighlights;
 
   // ---- teammates' notes, drawings and speech times; asked again now and then so a
   // note someone writes during a shared review shows up for everyone
   useEffect(() => {
+    if (trimmed) {
+      setExtras([]);
+      return;
+    }
     const load = () => api.povExtras(id).then(setExtras).catch(() => {});
     load();
     const iv = setInterval(load, 20000);
     return () => clearInterval(iv);
-  }, [id]);
+  }, [id, trimmed]);
 
   // ---- hints about deaths arrive in the background a while after a game
   useEffect(() => onEvent<string | null>("insights", (which) => {
@@ -334,6 +364,16 @@ export function Player({ id, onBack, friends, joinTogether, onTogether, hintsOn 
   const saveClips = useCallback(() => {
     setSavingClips(true);
     api.highlights(id, true).then(setHighlights).catch((e) => setToast({ text: String(e) })).finally(() => setSavingClips(false));
+  }, [id]);
+  const buildReel = useCallback(() => {
+    setBuildingReel(true);
+    api.buildHighlightReel(id)
+      .then((path) => {
+        setMatch((m) => (m ? { ...m, reel: path } : m));
+        setToast({ text: `Saved highlight reel to ${path}`, path });
+      })
+      .catch((e) => setToast({ text: String(e) }))
+      .finally(() => setBuildingReel(false));
   }, [id]);
   /** Teammates' views that could go into a team review: ready and with a usable source. */
   const reviewViews = useMemo(() => povs.filter((p) => p.status === "ready" && p.source && p.champion).slice(0, 4), [povs]);
@@ -365,7 +405,7 @@ export function Player({ id, onBack, friends, joinTogether, onTogether, hintsOn 
     setHighlights(match.highlights ?? []);
     setMyTeam(match.team ?? []);
     if (match.voice) setVoice(match.voice);
-    else if (match.tracks.some((t) => t.name !== "game")) api.voice(match.id).then(setVoice).catch(() => {});
+    else if (!match.trimmedToHighlights && match.tracks.some((t) => t.name !== "game")) api.voice(match.id).then(setVoice).catch(() => {});
   }, [match]);
 
   // ---- follow the saving of teammates' views, and refresh the list when one lands
@@ -393,8 +433,9 @@ export function Player({ id, onBack, friends, joinTogether, onTogether, hintsOn 
     return () => clearTimeout(h);
   }, [review, match]);
 
-  const duration = match?.duration ?? 0;
-  const tracks = match?.tracks ?? [];
+  const duration = match?.trimmedToHighlights ? (videoDuration || match.reelDuration || match.duration) : (match?.duration ?? 0);
+  // A trimmed game's reel already has Discord and the mic mixed into its own sound.
+  const tracks = (match?.tracks ?? []).filter((t) => !trimmed || t.name === "game");
   const hasTrack = (n: TrackName) => tracks.some((t) => t.name === n);
 
   // ---- keep the separate sound tracks locked to the video
@@ -439,17 +480,17 @@ export function Player({ id, onBack, friends, joinTogether, onTogether, hintsOn 
   useEffect(() => {
     const apply = (el: HTMLMediaElement | null, name: TrackName) => {
       if (!el) return;
-      el.volume = prefs.volume[name];
-      el.muted = prefs.muted[name];
+      el.volume = audio.volume[name];
+      el.muted = audio.muted[name];
     };
     apply(videoRef.current, "game");
     apply(discordRef.current, "discord");
     apply(micRef.current, "mic");
     // In split view only one view's game sound plays at a time.
     if (videoRef.current && listen !== null) videoRef.current.muted = true;
-  }, [prefs.volume, prefs.muted, match, pov, listen]);
+  }, [audio.volume, audio.muted, match, pov, listen]);
 
-  // ---- one animation loop: time readout and the mouse overlay
+  // ---- one animation loop: time readout, A-B looping, voice ducking, mouse & key overlays
   useEffect(() => {
     let raf = 0;
     let lastShown = -1;
@@ -458,7 +499,39 @@ export function Player({ id, onBack, friends, joinTogether, onTogether, hintsOn 
       const v = videoRef.current;
       const c = canvasRef.current;
       if (!v) return;
-      const now = v.currentTime - shiftRef.current;
+      let now = v.currentTime - shiftRef.current;
+
+      // A-B loop playback
+      if (loopingRef.current && !v.paused) {
+        const q = queueRef.current;
+        const a = inPtRef.current !== null && outPtRef.current !== null && outPtRef.current > inPtRef.current + 0.1
+          ? inPtRef.current
+          : q ? q.items[q.idx].start : null;
+        const b = inPtRef.current !== null && outPtRef.current !== null && outPtRef.current > inPtRef.current + 0.1
+          ? outPtRef.current
+          : q ? q.items[q.idx].end : null;
+        if (a !== null && b !== null && now >= b - 0.04) {
+          const target = Math.max(0, a + shiftRef.current);
+          v.currentTime = target;
+          now = a;
+        }
+      }
+
+      // Smooth voice ducking on game audio when someone is speaking
+      const aud = audioRef.current;
+      if (!aud.muted.game && listenRef.current === null) {
+        let speaking = false;
+        if (aud.duck && !v.paused) {
+          const vc = voiceRef.current;
+          const hit = (spans?: [number, number][] | null) => !!spans?.some((s) => s[0] <= now && now <= s[1]);
+          speaking = hit(vc?.mic) || hit(vc?.discord) || extrasRef.current.some((ex) => hit(ex.voice));
+        }
+        const targetVol = aud.volume.game * (speaking ? 0.3 : 1);
+        if (Math.abs(v.volume - targetVol) > 0.01) {
+          v.volume = v.volume + (targetVol - v.volume) * 0.25;
+        }
+      }
+
       if (!v.paused && Math.abs(now - lastShown) > 0.066) {
         lastShown = now;
         setTime(now);
@@ -503,6 +576,17 @@ export function Player({ id, onBack, friends, joinTogether, onTogether, hintsOn 
     setTime(clamped - shiftRef.current);
     announce(true);
   }, [duration, announce]);
+  const toggleLoop = useCallback(() => {
+    setLooping((prev) => {
+      const next = !prev;
+      if (next && !(inPtRef.current !== null && outPtRef.current !== null && outPtRef.current > inPtRef.current) && !queueRef.current) {
+        const now = refNow();
+        setInPt(Math.max(0, now - 5));
+        setOutPt(Math.min(duration || now + 5, now + 5));
+      }
+      return next;
+    });
+  }, [refNow, duration]);
   /** Show another view (or mine, with null) at the same moment of the game. */
   const switchPov = useCallback((next: Pov | null) => {
     const v = videoRef.current;
@@ -579,9 +663,9 @@ export function Player({ id, onBack, friends, joinTogether, onTogether, hintsOn 
     if (target) seek(lead(target));
   }, [seek, refNow, startQueue]);
 
-  // ---- a walk-through stops at the end of each stretch
+  // ---- a walk-through stops at the end of each stretch (unless looping)
   useEffect(() => {
-    if (!queue || !playing) return;
+    if (!queue || !playing || looping) return;
     const item = queue.items[queue.idx];
     if (queueDone.current || time < item.start - 2) {
       // Played on past the stop, or went somewhere else: back to ordinary playback.
@@ -592,7 +676,7 @@ export function Player({ id, onBack, friends, joinTogether, onTogether, hintsOn 
       queueDone.current = true;
       announce(true);
     }
-  }, [time, queue, playing, announce]);
+  }, [time, queue, playing, looping, announce]);
 
   // ---- watching together
   useEffect(() => {
@@ -652,31 +736,46 @@ export function Player({ id, onBack, friends, joinTogether, onTogether, hintsOn 
     else document.documentElement.requestFullscreen().catch(() => {});
   }, []);
 
-  // ---- notes and drawings
+  // ---- notes, tags and drawings
   const addNote = () => {
     const text = noteText.trim();
     if (!text) return;
     setReview((r) => ({ ...r, notes: [...r.notes, { id: uid(), t: time, text }].sort((a, b) => a.t - b.t) }));
     setNoteText("");
   };
+  const addTag = () => {
+    const tag = tagDraft.trim().toLowerCase();
+    if (!tag) return;
+    setReview((r) => ({ ...r, tags: (r.tags ?? []).includes(tag) ? r.tags : [...(r.tags ?? []), tag] }));
+    setTagDraft("");
+  };
+  const removeTag = (tag: string) => {
+    setReview((r) => ({ ...r, tags: (r.tags ?? []).filter((t) => t !== tag) }));
+  };
   // A drawing belongs to the recording it was drawn over, named by that player.
   const myName = match?.game?.me?.name ?? "";
   const viewName = pov ? pov.player : myName;
-  const drawnHere = (d: Drawing) => (d.view ?? myName) === viewName;
-  const commitShape = (shape: Shape) => {
+  const drawnFor = (d: Drawing, target: string) => (d.view ?? myName) === target;
+  const commitShape = (shape: Shape, targetView?: string) => {
+    const target = targetView ?? viewName;
     setReview((r) => {
-      const existing = r.drawings.find((d) => drawnHere(d) && Math.abs(d.t - time) < 0.3);
+      const existing = r.drawings.find((d) => drawnFor(d, target) && Math.abs(d.t - time) < 0.3);
       const drawings: Drawing[] = existing
         ? r.drawings.map((d) => (d === existing ? { ...d, shapes: [...d.shapes, shape] } : d))
-        : [...r.drawings, { id: uid(), t: time, shapes: [shape], ...(pov ? { view: pov.player } : {}) }];
+        : [...r.drawings, { id: uid(), t: time, shapes: [shape], ...(target !== myName ? { view: target } : {}) }];
       return { ...r, drawings };
     });
   };
-  const visibleDrawings = review.drawings.filter((d) => drawnHere(d) && Math.abs(d.t - time) <= DRAW_WINDOW);
+  const visibleDrawings = review.drawings.filter((d) => drawnFor(d, viewName) && Math.abs(d.t - time) <= DRAW_WINDOW);
   /** What teammates drew over the recording that is showing. */
   const sharedDrawings = extras.flatMap((e) => e.drawings.filter((d) => d.view === viewName && Math.abs(d.t - time) <= DRAW_WINDOW));
+  const visibleViews = [viewName, ...split.map((p) => p.player)];
+  const anyVisibleDrawings = review.drawings.some((d) => visibleViews.includes(d.view ?? myName) && Math.abs(d.t - time) <= DRAW_WINDOW);
   const clearDrawings = () =>
-    setReview((r) => ({ ...r, drawings: r.drawings.filter((d) => !drawnHere(d) || Math.abs(d.t - time) > DRAW_WINDOW) }));
+    setReview((r) => ({
+      ...r,
+      drawings: r.drawings.filter((d) => !visibleViews.includes(d.view ?? myName) || Math.abs(d.t - time) > DRAW_WINDOW),
+    }));
   const pointIn = (e: React.PointerEvent): [number, number] => {
     const r = svgRef.current!.getBoundingClientRect();
     return [Math.min(Math.max((e.clientX - r.left) / r.width, 0), 1), Math.min(Math.max((e.clientY - r.top) / r.height, 0), 1)];
@@ -689,8 +788,9 @@ export function Player({ id, onBack, friends, joinTogether, onTogether, hintsOn 
       if (el.tagName === "TEXTAREA" || el.tagName === "INPUT" || el.tagName === "SELECT") return;
       const v = videoRef.current;
       if (!v || e.ctrlKey || e.altKey || e.metaKey) return;
+      const a = audioRef.current;
+      const mute = (n: TrackName) => setTrackAudio({ muted: { ...a.muted, [n]: !a.muted[n] } });
       const p = prefsRef.current;
-      const mute = (n: TrackName) => updatePrefs({ muted: { ...p.muted, [n]: !p.muted[n] } });
       switch (e.key.length === 1 ? e.key.toLowerCase() : e.key) {
         case " ": e.preventDefault(); toggle(); break;
         case "ArrowLeft": e.preventDefault(); seek(refNow() - (e.shiftKey ? 1 : 5)); break;
@@ -703,6 +803,7 @@ export function Player({ id, onBack, friends, joinTogether, onTogether, hintsOn 
         case "p": jump(-1); break;
         case "[": setInPt(refNow()); break;
         case "]": setOutPt(refNow()); break;
+        case "r": toggleLoop(); break;
         case "v": if (splitRef.current.length === 0) cyclePov(); break;
         case "s": toggleSplitMode(); break;
         case "1": mute("game"); break;
@@ -711,12 +812,12 @@ export function Player({ id, onBack, friends, joinTogether, onTogether, hintsOn 
         case "d": setTool((t) => (t ? null : "pen")); break;
         case "t": updatePrefs({ theater: !p.theater }); break;
         case "f": fullscreen(); break;
-        case "Escape": setTool(null); setHelp(false); setQueue(null); break;
+        case "Escape": setTool(null); setHelp(false); setQueue(null); setLooping(false); break;
       }
     };
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
-  }, [seek, step, toggle, jump, fullscreen, updatePrefs, refNow, cyclePov, toggleSplitMode]);
+  }, [seek, step, toggle, jump, fullscreen, updatePrefs, setTrackAudio, toggleLoop, refNow, cyclePov, toggleSplitMode]);
 
   // ---- timeline data
   const champKeys = useMemo(() => {
@@ -727,7 +828,7 @@ export function Player({ id, onBack, friends, joinTogether, onTogether, hintsOn 
   const champKey = useCallback((name?: string) => (name ? champKeys.get(name) : undefined), [champKeys]);
 
   const markers = useMemo<Marker[]>(() => {
-    if (!match) return [];
+    if (!match || match.trimmedToHighlights) return [];
     const out: Marker[] = [];
     for (const e of match.events) {
       const cat = categorize(e);
@@ -739,12 +840,18 @@ export function Player({ id, onBack, friends, joinTogether, onTogether, hintsOn 
     if (prefs.filters.bookmark) for (const b of match.bookmarks) out.push({ t: b.t, cat: "bookmark", side: "neutral", label: "Bookmark" });
     if (prefs.filters.note) for (const n of review.notes) out.push({ t: n.t, cat: "note", side: "neutral", label: n.text.slice(0, 70) });
     if (prefs.filters.note) for (const e of extras) for (const n of e.notes) out.push({ t: n.t, cat: "tnote", side: "ally", label: `${e.friend}: ${n.text.slice(0, 60)}` });
+    if (prefs.keys && keys) {
+      for (const s of keys.summonerPresses) {
+        out.push({ t: s.t, cat: "summoner", side: "neutral", label: `Pressed ${s.key}` });
+      }
+    }
     return out.sort((a, b) => a.t - b.t);
-  }, [match, review.notes, extras, prefs.filters]);
-  const listed = useMemo(() => markers.filter((m) => m.cat !== "note" && m.cat !== "tnote"), [markers]);
+  }, [match, review.notes, extras, prefs.filters, prefs.keys, keys]);
+  const listed = useMemo(() => markers.filter((m) => m.cat !== "note" && m.cat !== "tnote" && m.cat !== "summoner"), [markers]);
   listedRef.current = listed;
 
-  const fights = useMemo(() => fightsOf(match?.events ?? []), [match]);
+  // Events are on the full game's clock, so a game trimmed to its reel shows none.
+  const fights = useMemo(() => (match?.trimmedToHighlights ? [] : fightsOf(match?.events ?? [])), [match]);
   const bands = useMemo(() => fights.map((f) => ({ start: f.start, end: f.end, side: (f.ours > f.theirs ? "ally" : f.ours < f.theirs ? "enemy" : "neutral") as Side })), [fights]);
   const teamNotes = useMemo(
     () => extras.flatMap((e) => e.notes.map((n) => ({ ...n, friend: e.friend, champion: e.champion, championKey: e.championKey, code: e.code }))).sort((a, b) => a.t - b.t),
@@ -752,13 +859,14 @@ export function Player({ id, onBack, friends, joinTogether, onTogether, hintsOn 
   );
   const voiceRows = useMemo<VoiceRow[]>(() => {
     const rows: VoiceRow[] = [];
+    if (trimmed) return rows;
     if (voice?.mic?.length) rows.push({ key: "me", label: "You", color: VOICE_COLORS[0], spans: voice.mic });
     extras.forEach((e, i) => {
       if (e.voice.length) rows.push({ key: e.code, label: e.friend || e.player, color: VOICE_COLORS[1 + (i % (VOICE_COLORS.length - 1))], spans: e.voice });
     });
     if (voice?.discord?.length) rows.push({ key: "discord", label: rows.length > 1 ? "Discord (everyone)" : "Discord", color: DISCORD_COLOR, spans: voice.discord });
     return rows;
-  }, [voice, extras]);
+  }, [voice, extras, trimmed]);
   const gameAt = useCallback((t: number) => gameClockAt(match?.clock ?? [], t), [match]);
 
   const cpm = useMemo(() => {
@@ -793,7 +901,7 @@ export function Player({ id, onBack, friends, joinTogether, onTogether, hintsOn 
   const game = gameClockAt(match.clock, time);
   let currentIdx = -1;
   listed.forEach((m, i) => { if (m.t <= time + 0.5) currentIdx = i; });
-  const audible = TRACKS.map((t) => t.name).filter((n) => hasTrack(n) && !prefs.muted[n]);
+  const audible = TRACKS.map((t) => t.name).filter((n) => hasTrack(n) && !audio.muted[n]);
   const marked = inPt !== null && outPt !== null && outPt > inPt;
   const clipRange: [number, number] = marked ? [inPt!, outPt!] : [Math.max(0, time - 30), Math.max(1, time)];
 
@@ -828,6 +936,7 @@ export function Player({ id, onBack, friends, joinTogether, onTogether, hintsOn 
         {me && titles.get(me.champion) && <span className="mytitle" title={titles.get(me.champion)!.why}>{titles.get(me.champion)!.title}</span>}
         <div className="facts">
           {match.game?.queueName && <span>{match.game.queueName}</span>}
+          {match.trimmedToHighlights && <span>Highlights reel</span>}
           <span>{when(match.startedEpochMs)}</span>
           <span>{bytes(match.sizeBytes)}</span>
         </div>
@@ -876,6 +985,7 @@ export function Player({ id, onBack, friends, joinTogether, onTogether, hintsOn 
                 onLoadedMetadata={() => {
                   const v = videoRef.current;
                   if (!v) return;
+                  setVideoDuration(v.duration);
                   const resume = pendingRef.current;
                   pendingRef.current = null;
                   if (resume) {
@@ -894,7 +1004,9 @@ export function Player({ id, onBack, friends, joinTogether, onTogether, hintsOn 
               />
               <canvas ref={canvasRef} />
               {/* My own keys only: teammates' key logs are not shared. */}
-              {match.keys && keys && prefs.keys && !pov && <KeyOverlay names={match.keys.names} ref={keysElRef} />}
+              {match.keys && keys && prefs.keys && !pov && !match.trimmedToHighlights && (
+                <KeyOverlay names={match.keys.names} rows={match.keys.rows} ref={keysElRef} />
+              )}
               <svg
                 ref={svgRef}
                 className={`draw ${tool ? "active" : ""}`}
@@ -936,11 +1048,16 @@ export function Player({ id, onBack, friends, joinTogether, onTogether, hintsOn 
                 key={p.friend}
                 pov={p}
                 masterRef={videoRef}
-                muted={prefs.muted.game || listen !== p.friend}
-                volume={prefs.volume.game}
+                muted={audio.muted.game || listen !== p.friend}
+                volume={audio.volume.game}
                 listening={listen === p.friend}
                 big={prefs.layout === "focus" && big === p.friend}
                 show={prefs}
+                drawings={review.drawings.filter((d) => drawnFor(d, p.player) && Math.abs(d.t - time) <= DRAW_WINDOW)}
+                sharedDrawings={extras.flatMap((e) => e.drawings.filter((d) => d.view === p.player && Math.abs(d.t - time) <= DRAW_WINDOW))}
+                tool={tool}
+                ink={ink}
+                onCommitShape={(shape, v) => commitShape(shape, v)}
                 onListen={() => setListen(p.friend)}
                 onBig={() => {
                   if (prefs.layout === "focus" && big === p.friend) setBig(null);
@@ -961,10 +1078,12 @@ export function Player({ id, onBack, friends, joinTogether, onTogether, hintsOn 
               <Splitter label="Size of the big view" onMove={(x, r) => updatePrefs({ mainPct: Math.round(Math.min(Math.max(((x - r.left) / r.width) * 100, 35), 88)) })} />
             )}
             </div>
-            {game !== null && <div className="gclock">{clock(game)}<small>in game</small></div>}
+            {game !== null && !match.trimmedToHighlights && <div className="gclock">{clock(game)}<small>in game</small></div>}
             {queue && (
               <QueueBar
                 queue={queue}
+                looping={looping}
+                onToggleLoop={toggleLoop}
                 onGo={(i) => startQueue(queue.title, queue.items, i)}
                 onReplay={() => startQueue(queue.title, queue.items, queue.idx)}
                 onClose={() => setQueue(null)}
@@ -1023,23 +1142,28 @@ export function Player({ id, onBack, friends, joinTogether, onTogether, hintsOn 
                 <button key={c} className="ink" style={{ background: c }} aria-label={`Colour ${c}`} aria-pressed={ink === c} onClick={() => setInk(c)} />
               ))}
               <hr />
-              <button className="btn sq" aria-label="Erase drawings at this moment" title="Erase drawings at this moment" disabled={visibleDrawings.length === 0} onClick={clearDrawings}><Eraser size={17} /></button>
+              <button className="btn sq" aria-label="Erase drawings at this moment" title="Erase drawings at this moment" disabled={!anyVisibleDrawings} onClick={clearDrawings}><Eraser size={17} /></button>
             </div>
           </div>
 
           <div className="deck">
-            <Timeline duration={duration} time={time} markers={markers} bands={prefs.filters.fight || prefs.filters.kill || prefs.filters.death ? bands : []} cpm={cpm} cpmBucket={CPM_BUCKET} inPt={inPt} outPt={outPt} clockSamples={match.clock} champKey={champKey} onSeek={seek} />
+            <Timeline duration={duration} time={time} markers={markers} bands={prefs.filters.fight || prefs.filters.kill || prefs.filters.death ? bands : []} cpm={match.trimmedToHighlights ? [] : cpm} cpmBucket={CPM_BUCKET} inPt={inPt} outPt={outPt} looping={looping} clockSamples={match.clock} champKey={champKey} onSeek={seek} />
             <Lanes
               duration={duration}
               time={time}
               voice={voiceRows}
               showVoice={prefs.comms}
-              stats={match.stats ?? null}
-              showStats={prefs.graph}
+              stats={match.trimmedToHighlights ? null : (match.stats ?? null)}
+              showStats={prefs.graph && !match.trimmedToHighlights}
               players={match.game?.players ?? []}
               metric={prefs.metric}
               versus={prefs.versus}
               gameAt={gameAt}
+              cpm={match.trimmedToHighlights ? [] : cpm}
+              cpmBucket={CPM_BUCKET}
+              keys={match.trimmedToHighlights ? null : keys}
+              currentId={match.id}
+              compareGames={matches}
               onMetric={(metric) => updatePrefs({ metric })}
               onVersus={(versus) => updatePrefs({ versus })}
               onSeek={seek}
@@ -1064,17 +1188,27 @@ export function Player({ id, onBack, friends, joinTogether, onTogether, hintsOn 
               <div className="mixer" role="group" aria-label="Sound tracks">
                 {TRACKS.filter((t) => hasTrack(t.name)).map(({ name, label, icon: On, off: Off }, i) => {
                   const tr = tracks.find((t) => t.name === name)!;
-                  const muted = prefs.muted[name];
+                  const muted = audio.muted[name];
                   const hint = tr.silent ? `Nothing was heard on this track${tr.note ? ` (${tr.note})` : ""}` : `${muted ? "Unmute" : "Mute"} ${label} (${i + 1})`;
                   return (
                     <div key={name} className={`mix ${muted ? "off" : ""} ${tr.silent ? "silent" : ""}`} title={hint}>
-                      <button className="btn" aria-pressed={!muted} aria-label={`${label} sound`} onClick={() => updatePrefs({ muted: { ...prefs.muted, [name]: !muted } })}>
+                      <button className="btn" aria-pressed={!muted} aria-label={`${label} sound`} onClick={() => setTrackAudio({ muted: { ...audio.muted, [name]: !muted } })}>
                         {muted ? <Off size={15} /> : <On size={15} />}<span className="w">{label}</span>
                       </button>
-                      <input type="range" min={0} max={1} step={0.05} value={prefs.volume[name]} aria-label={`${label} volume`} onChange={(e) => updatePrefs({ volume: { ...prefs.volume, [name]: Number(e.target.value) } })} />
+                      <input type="range" min={0} max={1} step={0.05} value={audio.volume[name]} aria-label={`${label} volume`} onChange={(e) => setTrackAudio({ volume: { ...audio.volume, [name]: Number(e.target.value) } })} />
                     </div>
                   );
                 })}
+                {hasTrack("game") && (hasTrack("discord") || hasTrack("mic")) && (
+                  <button
+                    className={`btn duck ${audio.duck ? "on" : ""}`}
+                    aria-pressed={!!audio.duck}
+                    title="Auto-duck game audio whenever someone speaks on Discord or microphone"
+                    onClick={() => setTrackAudio({ duck: !audio.duck })}
+                  >
+                    <AudioLines size={13} aria-hidden /><span className="w">Duck</span>
+                  </button>
+                )}
               </div>
             </div>
 
@@ -1088,7 +1222,7 @@ export function Player({ id, onBack, friends, joinTogether, onTogether, hintsOn 
                     </button>
                   );
                 })}
-                {match.mouse && (
+                {match.mouse && !match.trimmedToHighlights && (
                   <>
                     <button className="chip" aria-pressed={prefs.trail} style={{ ["--c" as string]: "var(--mark)" }} aria-label="Cursor trail" title="Cursor trail" onClick={() => updatePrefs({ trail: !prefs.trail })}><MousePointer2 size={15} aria-hidden /><span className="w">Cursor trail</span></button>
                     <button className="chip" aria-pressed={prefs.clicks} aria-label="Clicks" title="Clicks, with clicks per minute around this moment" onClick={() => updatePrefs({ clicks: !prefs.clicks })}>
@@ -1096,7 +1230,7 @@ export function Player({ id, onBack, friends, joinTogether, onTogether, hintsOn 
                     </button>
                   </>
                 )}
-                {match.keys && (
+                {match.keys && !match.trimmedToHighlights && (
                   <button className="chip" aria-pressed={prefs.keys} aria-label="Keys" title="Which keys were held, over the video, with key presses per minute around this moment" onClick={() => updatePrefs({ keys: !prefs.keys })}>
                     <Keyboard size={15} aria-hidden /><span className="w">Keys</span>{kpmNow !== null && <span className="num">{kpmNow}/min</span>}
                   </button>
@@ -1104,13 +1238,26 @@ export function Player({ id, onBack, friends, joinTogether, onTogether, hintsOn 
                 {voiceRows.length > 0 && (
                   <button className="chip" aria-pressed={prefs.comms} aria-label="Who was talking" title="Rows under the timeline showing who was talking when" onClick={() => updatePrefs({ comms: !prefs.comms })}><AudioLines size={15} aria-hidden /><span className="w">Comms</span></button>
                 )}
-                {match.stats && (
+                {match.stats && !match.trimmedToHighlights && (
                   <button className="chip" aria-pressed={prefs.graph} aria-label="Graph" title="CS, level and gold over the game, under the timeline" onClick={() => updatePrefs({ graph: !prefs.graph })}><TrendingUp size={15} aria-hidden /><span className="w">Graph</span></button>
                 )}
               </div>
               <span className="grow" />
-                            <button className={`btn ${inPt !== null ? "on" : ""}`} onClick={() => setInPt(time)} title="Mark where the clip starts ([)">Start{inPt !== null ? ` ${clock(inPt)}` : ""}</button>
+              <button className={`btn ${inPt !== null ? "on" : ""}`} onClick={() => setInPt(time)} title="Mark where the clip starts ([)">Start{inPt !== null ? ` ${clock(inPt)}` : ""}</button>
               <button className={`btn ${outPt !== null ? "on" : ""}`} onClick={() => setOutPt(time)} title="Mark where the clip ends (])">End{outPt !== null ? ` ${clock(outPt)}` : ""}</button>
+              <button className={`btn sq ${looping ? "on" : ""}`} aria-pressed={looping} aria-label="Loop A-B range" title="Loop A-B range or current moment (R)" onClick={toggleLoop}>
+                <Repeat size={14} />
+              </button>
+              {(inPt !== null || outPt !== null) && (
+                <button className="btn sq quiet" aria-label="Clear loop marks" title="Clear Start/End marks" onClick={() => { setInPt(null); setOutPt(null); setLooping(false); }}>
+                  <X size={14} />
+                </button>
+              )}
+              <select className="field-input" value={maxMb ?? ""} onChange={(e) => setMaxMb(e.target.value ? Number(e.target.value) : null)} aria-label="Export file size target" title="Target file size for exported clip">
+                <option value="">Original</option>
+                <option value="10">10 MB Discord</option>
+                <option value="50">50 MB Nitro</option>
+              </select>
               {split.length > 0 ? (
                 <button
                   className="btn"
@@ -1119,13 +1266,13 @@ export function Player({ id, onBack, friends, joinTogether, onTogether, hintsOn 
                   onClick={() => {
                     const views = split.filter((p) => p.source).map((p) => ({ source: p.source!, shift: p.shift, label: p.friend }));
                     const heard = listen === null ? -1 : views.findIndex((v) => v.label === listen);
-                    run("Making the split-view clip…", () => api.exportSplit(match.id, clipRange[0], clipRange[1], views, audible, heard < 0 ? null : heard, "You"));
+                    run("Making the split-view clip…", () => api.exportSplit(match.id, clipRange[0], clipRange[1], views, audible, heard < 0 ? null : heard, "You", maxMb));
                   }}
                 >
                   <Scissors size={15} aria-hidden />{marked ? `Save split clip, ${clock(clipRange[1] - clipRange[0])} long` : "Save last 30 seconds, split"}
                 </button>
               ) : (
-                <button className="btn" disabled={busy} onClick={() => run("Cutting the clip…", () => api.exportClip(match.id, clipRange[0], clipRange[1], audible))} title="Uses the sound tracks that are not muted right now">
+                <button className="btn" disabled={busy} onClick={() => run("Cutting the clip…", () => api.exportClip(match.id, clipRange[0], clipRange[1], audible, maxMb))} title="Uses the sound tracks that are not muted right now">
                   <Scissors size={15} aria-hidden />{marked ? `Save clip, ${clock(clipRange[1] - clipRange[0])} long` : "Save last 30 seconds"}
                 </button>
               )}
@@ -1159,9 +1306,9 @@ export function Player({ id, onBack, friends, joinTogether, onTogether, hintsOn 
 
           {tab === "review" && (
             <ReviewTab
-              events={match.events}
+              events={trimmed ? [] : match.events}
               fights={fights}
-              bookmarks={match.bookmarks}
+              bookmarks={trimmed ? [] : match.bookmarks}
               queue={queue}
               champKey={champKey}
               onStart={startQueue}
@@ -1170,14 +1317,22 @@ export function Player({ id, onBack, friends, joinTogether, onTogether, hintsOn 
               hintState={hintBusy ? "busy" : hintsOn ? "ready" : "off"}
               hintError={hintError}
               onAskHints={askHints}
-              highlights={highlights}
+              highlights={trimmed ? [] : highlights}
               savingClips={savingClips}
               onSaveClips={saveClips}
               onShowClip={showInFolder}
+              reel={match.reel}
+              buildingReel={buildingReel}
+              onBuildReel={buildReel}
               team={teamReviews}
               teamViews={1 + reviewViews.length}
               teamBusy={teamBusy}
               onTeamReview={askTeam}
+              stats={match.trimmedToHighlights ? null : (match.stats ?? null)}
+              players={match.game?.players ?? []}
+              keys={match.trimmedToHighlights ? null : keys}
+              cpm={match.trimmedToHighlights ? [] : cpm}
+              duration={duration}
             />
           )}
 
@@ -1198,6 +1353,28 @@ export function Player({ id, onBack, friends, joinTogether, onTogether, hintsOn 
 
           {tab === "notes" && (
             <>
+              <div className="tagrow">
+                <div className="tags">
+                  {(review.tags ?? []).map((t) => (
+                    <span className="tag" key={t}>
+                      #{t}
+                      <button type="button" aria-label={`Remove tag ${t}`} onClick={() => removeTag(t)}><X size={11} /></button>
+                    </span>
+                  ))}
+                </div>
+                <form className="tagadd" onSubmit={(e) => { e.preventDefault(); addTag(); }}>
+                  <input
+                    className="field-input"
+                    type="text"
+                    value={tagDraft}
+                    placeholder="Add a tag (e.g. vod, macro, duo)…"
+                    aria-label="New game tag"
+                    onChange={(e) => setTagDraft(e.target.value)}
+                    onFocus={() => videoRef.current?.pause()}
+                  />
+                  <button className="btn" type="submit" disabled={!tagDraft.trim()}>Tag</button>
+                </form>
+              </div>
               <div className="sidebody">
                 {review.notes.length === 0 && teamNotes.length === 0 && <p>Pause on a moment and write what you see. Notes show on the timeline, and teammates who recorded this game see them too.</p>}
                 {review.notes.map((n) => (

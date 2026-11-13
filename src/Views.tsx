@@ -5,7 +5,29 @@ import { Expand, RotateCcw, Shrink, Volume2, X } from "lucide-react";
 import { useEffect, useRef, useState, type ReactNode, type Ref } from "react";
 import { Portrait } from "./ChampIcon";
 import { laneName } from "./format";
-import type { Pov } from "./types";
+import type { Drawing, Pov, Shape, Tool } from "./types";
+
+// ------------------------------------------------------------------ shapes
+
+export function ShapeView({ s, w, h }: { s: Shape; w: number; h: number }) {
+  const P = s.pts.map(([x, y]) => [x * w, y * h] as [number, number]);
+  const common = { stroke: s.color, strokeWidth: 4, fill: "none", strokeLinecap: "round" as const, strokeLinejoin: "round" as const };
+  if (s.tool === "pen") return <polyline points={P.map((p) => p.join(",")).join(" ")} {...common} />;
+  const [a, b] = [P[0], P[P.length - 1]];
+  if (!a || !b) return null;
+  if (s.tool === "circle") {
+    return <ellipse cx={(a[0] + b[0]) / 2} cy={(a[1] + b[1]) / 2} rx={Math.abs(b[0] - a[0]) / 2} ry={Math.abs(b[1] - a[1]) / 2} {...common} />;
+  }
+  const ang = Math.atan2(b[1] - a[1], b[0] - a[0]);
+  const head = 22;
+  const wing = (d: number) => `${b[0] - head * Math.cos(ang + d)},${b[1] - head * Math.sin(ang + d)}`;
+  return (
+    <g>
+      <line x1={a[0]} y1={a[1]} x2={b[0]} y2={b[1]} {...common} />
+      <polyline points={`${wing(0.45)} ${b[0]},${b[1]} ${wing(-0.45)}`} {...common} />
+    </g>
+  );
+}
 
 // ------------------------------------------------------------------ cursor
 
@@ -127,6 +149,12 @@ export interface KeyLog {
   state: Uint8Array;
   /** Times at which any key went down, for keys per minute. */
   presses: number[];
+  /** Percentage of active playing time spent holding Space (camera center/lock). */
+  spaceHoldPct: number | null;
+  /** Count of A / attack-move key presses while playing. */
+  aPresses: number;
+  /** Times when D or F (summoner spells) were pressed. */
+  summonerPresses: { key: string; t: number }[];
 }
 
 export function parseKeys(text: string, offset: number, names: string[]): KeyLog {
@@ -136,21 +164,58 @@ export function parseKeys(text: string, offset: number, names: string[]): KeyLog
   const mask = new Uint32Array(n);
   const state = new Uint8Array(n);
   const presses: number[] = [];
+  const summonerPresses: { key: string; t: number }[] = [];
+  const idxOf = (match: (name: string) => boolean) => names.findIndex((nm) => match(nm.trim().toLowerCase()));
+  const spaceIdx = idxOf((nm) => nm === "space" || nm === "cam");
+  const aIdx = idxOf((nm) => nm === "a" || nm === "atk" || nm === "attack");
+  const dIdx = idxOf((nm) => nm === "d");
+  const fIdx = idxOf((nm) => nm === "f");
+
   let count = 0;
   let prev = 0;
+  let aPresses = 0;
   for (let i = 1; i < lines.length; i++) {
     const p = lines[i].split(",");
     if (p.length < 3) continue;
     const at = Number(p[0]) / 1000 - offset;
     const m = Number(p[1]) >>> 0;
+    const st = Number(p[2]);
     t[count] = at;
     mask[count] = m;
-    state[count] = Number(p[2]);
-    if (m & ~prev) presses.push(at);
+    state[count] = st;
+    const rising = m & ~prev;
+    if (st === 0 && rising) {
+      presses.push(at);
+      if (aIdx >= 0 && (rising >>> aIdx) & 1) aPresses++;
+      if (dIdx >= 0 && (rising >>> dIdx) & 1) summonerPresses.push({ key: names[dIdx], t: at });
+      if (fIdx >= 0 && (rising >>> fIdx) & 1) summonerPresses.push({ key: names[fIdx], t: at });
+    }
     prev = m;
     count++;
   }
-  return { names, t: t.subarray(0, count), mask: mask.subarray(0, count), state: state.subarray(0, count), presses };
+
+  let playTime = 0;
+  let spaceTime = 0;
+  if (spaceIdx >= 0 && count > 1) {
+    for (let i = 0; i < count - 1; i++) {
+      if (state[i] !== 0) continue;
+      const dt = Math.min(Math.max(t[i + 1] - t[i], 0), 5);
+      playTime += dt;
+      if ((mask[i] >>> spaceIdx) & 1) spaceTime += dt;
+    }
+  }
+  const spaceHoldPct = playTime > 0 && spaceIdx >= 0 ? Math.round((spaceTime / playTime) * 100) : null;
+
+  return {
+    names,
+    t: t.subarray(0, count),
+    mask: mask.subarray(0, count),
+    state: state.subarray(0, count),
+    presses,
+    spaceHoldPct,
+    aPresses,
+    summonerPresses,
+  };
 }
 
 /** How the keycaps are laid out; names a recording does not have are left out. */
@@ -178,10 +243,11 @@ export function drawKeys(el: HTMLElement | null, log: KeyLog | null, t: number) 
 }
 
 /** Keycaps shown over the video; lit by `drawKeys`. */
-export function KeyOverlay({ names, ref }: { names: string[]; ref: Ref<HTMLDivElement> }) {
+export function KeyOverlay({ names, rows, ref }: { names: string[]; rows?: string[][]; ref: Ref<HTMLDivElement> }) {
+  const layout = rows && rows.length ? rows : KEY_ROWS;
   return (
     <div className="keys" ref={ref} aria-hidden data-state="play">
-      {KEY_ROWS.map((row, r) => {
+      {layout.map((row, r) => {
         const caps = row.map((name) => ({ name, k: names.indexOf(name) })).filter((c) => c.k >= 0);
         return caps.length ? (
           <div className="krow" key={r}>
@@ -385,6 +451,11 @@ interface SideViewProps {
   listening: boolean;
   big: boolean;
   show: { trail: boolean; clicks: boolean };
+  drawings?: Drawing[];
+  sharedDrawings?: Drawing[];
+  tool: Tool | null;
+  ink: string;
+  onCommitShape?: (shape: Shape, view: string) => void;
   onListen: () => void;
   onBig: () => void;
   onRemove: () => void;
@@ -393,11 +464,32 @@ interface SideViewProps {
 }
 
 /** One teammate's view in split view, kept on the same game moment as your own video. */
-export function SideView({ pov, masterRef, muted, volume, listening, big, show, onListen, onBig, onRemove, onToggle, onFail }: SideViewProps) {
+export function SideView({
+  pov,
+  masterRef,
+  muted,
+  volume,
+  listening,
+  big,
+  show,
+  drawings = [],
+  sharedDrawings = [],
+  tool,
+  ink,
+  onCommitShape,
+  onListen,
+  onBig,
+  onRemove,
+  onToggle,
+  onFail,
+}: SideViewProps) {
   const ref = useRef<HTMLVideoElement>(null);
   const canvasRef = useRef<HTMLCanvasElement>(null);
+  const svgRef = useRef<SVGSVGElement>(null);
   const [state, setState] = useState<"loading" | "ok" | "outside">("loading");
   const [ratio, setRatio] = useState("16 / 9");
+  const [drawH, setDrawH] = useState(563);
+  const [draft, setDraft] = useState<Shape | null>(null);
   const mouse = usePovMouse(pov);
   const showRef = useRef(show);
   showRef.current = show;
@@ -423,7 +515,10 @@ export function SideView({ pov, masterRef, muted, volume, listening, big, show, 
     };
     const v = ref.current;
     const onMeta = () => {
-      if (v && v.videoWidth && v.videoHeight) setRatio(`${v.videoWidth} / ${v.videoHeight}`);
+      if (v && v.videoWidth && v.videoHeight) {
+        setRatio(`${v.videoWidth} / ${v.videoHeight}`);
+        setDrawH(Math.round((1000 * v.videoHeight) / v.videoWidth));
+      }
       follow(true);
     };
     v?.addEventListener("loadedmetadata", onMeta);
@@ -455,22 +550,51 @@ export function SideView({ pov, masterRef, muted, volume, listening, big, show, 
     return () => cancelAnimationFrame(raf);
   }, [mouse, pov.mouseW, pov.mouseH]);
 
+  const pointIn = (e: React.PointerEvent): [number, number] => {
+    const r = svgRef.current!.getBoundingClientRect();
+    return [Math.min(Math.max((e.clientX - r.left) / r.width, 0), 1), Math.min(Math.max((e.clientY - r.top) / r.height, 0), 1)];
+  };
+
   const lane = laneName(pov.position);
   return (
     <div className={`tile ${listening ? "listening" : ""} ${big ? "big" : ""}`}>
-      <ZoomPane>
+      <ZoomPane panDisabled={!!tool}>
         <div className="frame" style={{ aspectRatio: ratio, width: `min(100cqw, calc(100cqh * ${ratio}))` }}>
           <video
             ref={ref}
             src={pov.video ?? undefined}
             preload="auto"
             muted
-            onClick={onToggle}
+            onClick={() => !tool && onToggle()}
             onError={onFail}
             onWaiting={() => setState((s) => (s === "outside" ? s : "loading"))}
             onCanPlay={() => setState((s) => (s === "outside" ? s : "ok"))}
           />
           <canvas ref={canvasRef} />
+          <svg
+            ref={svgRef}
+            className={`draw ${tool ? "active" : ""}`}
+            viewBox={`0 0 1000 ${drawH}`}
+            onPointerDown={(e) => {
+              if (!tool) return;
+              masterRef.current?.pause();
+              e.currentTarget.setPointerCapture(e.pointerId);
+              setDraft({ tool, color: ink, pts: [pointIn(e)] });
+            }}
+            onPointerMove={(e) => {
+              if (!draft) return;
+              const p = pointIn(e);
+              setDraft((d) => d && { ...d, pts: d.tool === "pen" ? [...d.pts, p] : [d.pts[0], p] });
+            }}
+            onPointerUp={() => {
+              if (draft && draft.pts.length > 1 && onCommitShape) onCommitShape(draft, pov.player);
+              setDraft(null);
+            }}
+          >
+            {sharedDrawings.flatMap((d) => d.shapes.map((s, i) => <ShapeView key={"t" + d.id + i} s={s} w={1000} h={drawH} />))}
+            {drawings.flatMap((d) => d.shapes.map((s, i) => <ShapeView key={d.id + i} s={s} w={1000} h={drawH} />))}
+            {draft && <ShapeView s={draft} w={1000} h={drawH} />}
+          </svg>
         </div>
       </ZoomPane>
       <TileBar big={big} onBig={onBig} onRemove={onRemove} />

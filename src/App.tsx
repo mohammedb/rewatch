@@ -1,13 +1,14 @@
-import { Clapperboard, Download, SlidersHorizontal, Square, TriangleAlert, Users, X } from "lucide-react";
+import { BarChart3, Clapperboard, Download, SlidersHorizontal, Square, TriangleAlert, Users, X } from "lucide-react";
 import { useCallback, useEffect, useState } from "react";
 import { api, onEvent } from "./api";
 import { clock } from "./format";
 import { Games } from "./Games";
 import { Player } from "./Player";
 import { SettingsPage } from "./SettingsPage";
+import { Trends } from "./Trends";
 import type { MatchSummary, Settings, Status, UpdateInfo, WatchPeer } from "./types";
 
-type View = { name: "library" } | { name: "player"; id: string; together?: boolean } | { name: "settings" };
+type View = { name: "library" } | { name: "trends" } | { name: "player"; id: string; together?: boolean } | { name: "settings" };
 
 function Elapsed({ since }: { since: number }) {
   const [, tick] = useState(0);
@@ -95,8 +96,11 @@ export default function App() {
       <header className="topbar">
         <div className="brand"><b>REWATCH</b><span>v{update?.current ?? ""}</span></div>
         <nav className="tabsbar" aria-label="Main">
-          <button className="tab" aria-current={view.name !== "settings" ? "page" : undefined} onClick={() => setView({ name: "library" })}>
+          <button className="tab" aria-current={view.name === "library" || view.name === "player" ? "page" : undefined} onClick={() => setView({ name: "library" })}>
             <Clapperboard size={17} aria-hidden />Games
+          </button>
+          <button className="tab" aria-current={view.name === "trends" ? "page" : undefined} onClick={() => setView({ name: "trends" })}>
+            <BarChart3 size={17} aria-hidden />Trends
           </button>
           <button className="tab" aria-current={view.name === "settings" ? "page" : undefined} onClick={() => setView({ name: "settings" })}>
             <SlidersHorizontal size={17} aria-hidden />Settings
@@ -166,6 +170,7 @@ export default function App() {
             key={view.id + (view.together ? "-together" : "")}
             id={view.id}
             friends={settings?.friends ?? []}
+            matches={matches ?? undefined}
             joinTogether={view.together}
             hintsOn={!!settings?.aiReview && !!settings.geminiKey.trim()}
             onTogether={(on) => setSession(on ? view.id : null)}
@@ -174,6 +179,8 @@ export default function App() {
               refreshMatches();
             }}
           />
+        ) : view.name === "trends" ? (
+          <Trends onOpen={(id) => setView({ name: "player", id })} />
         ) : view.name === "settings" ? (
           settings && <SettingsPage settings={settings} onSave={saveSettings} />
         ) : (

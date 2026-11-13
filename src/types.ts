@@ -7,11 +7,27 @@ export interface QueueToggles {
   other: boolean;
 }
 
+export interface KeySlot {
+  vk: string;
+  label: string;
+  row: number;
+}
+
+export interface LeagueBackup {
+  id: string;
+  createdAt: string;
+  label: string;
+  files: string[];
+  sizeBytes: number;
+  auto: boolean;
+}
+
 export interface Settings {
   recordingsDir: string;
   autoRecord: boolean;
   startWithWindows: boolean;
   fps: number;
+  resolution: "native" | "1440" | "1080" | "720";
   codec: "h264" | "hevc" | "av1";
   encoder: "auto" | "nvenc" | "amf" | "qsv" | "cpu";
   quality: number;
@@ -20,12 +36,14 @@ export interface Settings {
   micDevice: string;
   mouseTracking: boolean;
   keyTracking: boolean;
+  keyMap: KeySlot[];
   useClientApi: boolean;
   queues: QueueToggles;
   quotaGb: number;
   bookmarkHotkey: string;
   ffmpegPath: string;
   leagueDir: string;
+  autoBackupLeague: boolean;
   shareWithFriends: boolean;
   shareName: string;
   keepTeammateViews: boolean;
@@ -34,6 +52,7 @@ export interface Settings {
   notify: boolean;
   autoUpdate: boolean;
   autoHighlights: boolean;
+  highlightsOnly: boolean;
   aiReview: boolean;
   geminiKey: string;
   friends: Friend[];
@@ -176,6 +195,7 @@ export interface KeysMeta {
   offset: number;
   /** Key names; key i is bit i of each row's mask. */
   names: string[];
+  rows?: string[][];
 }
 
 export interface MatchSummary {
@@ -198,8 +218,13 @@ export interface MatchSummary {
   dir: string;
   sizeBytes: number;
   keep: boolean;
+  tags?: string[];
+  notesText?: string;
   noteCount: number;
   thumb: string | null;
+  reel?: string | null;
+  trimmedToHighlights?: boolean;
+  reelDuration?: number;
   summary: { deaths: number; bookmarks: number };
 }
 
@@ -304,7 +329,17 @@ export interface Stats {
   t: number[];
   /** Your unspent gold. */
   gold: number[];
-  players: { name: string; cs: number[]; level: number[]; kills: number[]; deaths: number[]; assists: number[] }[];
+  players: {
+    name: string;
+    cs: number[];
+    level: number[];
+    kills: number[];
+    deaths: number[];
+    assists: number[];
+    itemGold?: number[];
+    wardScore?: number[];
+    dead?: boolean[];
+  }[];
 }
 
 /** What a teammate wrote and drew on the same game, and when they spoke, in my video's time. */
@@ -354,10 +389,43 @@ export interface UpdateInfo {
   error: string | null;
 }
 
+export interface AudioPrefs {
+  volume: Record<TrackName, number>;
+  muted: Record<TrackName, boolean>;
+  duck?: boolean;
+}
+
 export interface Review {
   keep: boolean;
   notes: Note[];
   drawings: Drawing[];
+  tags?: string[];
+  audio?: AudioPrefs;
+}
+
+export interface TrendMatch {
+  id: string;
+  startedEpochMs: number;
+  queueId?: number | null;
+  queueName?: string | null;
+  result?: "Win" | "Lose" | null;
+  champion: string;
+  championKey?: string | null;
+  position: string;
+  kills: number;
+  deaths: number;
+  assists: number;
+  cs: number;
+  wards?: number | null;
+  length: number;
+  cs10?: number | null;
+  cs15?: number | null;
+  deadPct?: number | null;
+  allies: { name: string; champion: string }[];
+  tags: string[];
+  keep: boolean;
+  deathCauses: string[];
+  avgAvoidable?: number | null;
 }
 
 export interface MatchFull extends Omit<MatchSummary, "keep" | "noteCount" | "thumb" | "summary"> {

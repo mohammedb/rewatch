@@ -1,7 +1,7 @@
 // Sample data so the interface can be worked on in a plain browser. Never used
 // inside the desktop app.
 
-import type { Coach, Extras, GameEvent, Highlight, TeamReview, Insights, MatchFull, MatchSummary, PlayerRow, Review, Settings, Stats, Status, UpdateInfo, Voice, WatchPeer } from "./types";
+import type { Coach, Extras, GameEvent, Highlight, TeamReview, Insights, LeagueBackup, MatchFull, MatchSummary, PlayerRow, Review, Settings, Stats, Status, TrendMatch, UpdateInfo, Voice, WatchPeer } from "./types";
 
 const LANE: Record<string, string> = { Rin: "MIDDLE", Vex1: "MIDDLE", Sindre: "JUNGLE", Rook: "JUNGLE", Kaja: "BOTTOM", Lumen: "BOTTOM", Tor: "UTILITY", Peel: "UTILITY", Ida: "TOP", Stone: "TOP" };
 const row = (name: string, champion: string, key: string, team: string, k: number, d: number, a: number, cs: number, isMe = false): PlayerRow => ({
@@ -57,6 +57,9 @@ const stats: Stats = (() => {
       kills: curve(p.kills, 1.4),
       deaths: curve(p.deaths, 1.2),
       assists: curve(p.assists, 1.1),
+      itemGold: t.map((x) => Math.round((3200 + (i % 4) * 450) + (x / 120) * (7600 + (i % 3) * 900))),
+      wardScore: t.map((x) => Math.round((12 + i * 2) * (x / 120) + 6)),
+      dead: t.map((x) => (i === 0 ? x >= 40 && x <= 50 : false)),
     })),
   };
 })();
@@ -124,9 +127,9 @@ const teamReview: TeamReview = {
 
 let watchPeers: WatchPeer[] = [{ code: "kaja", name: "Kaja", playing: false, rate: 1, matchId: "2026-11-12_20-14-03", t: 61 }];
 
-const update: UpdateInfo = { current: "0.2.0", available: { version: "0.2.1", notes: "Smaller copies for teammates and a comms timeline.", url: "" }, checked: true, installing: false, error: null };
+const update: UpdateInfo = { current: "0.2.4", available: { version: "0.2.5", notes: "Highlight reels, trends, and per-match audio.", url: "" }, checked: true, installing: false, error: null };
 
-const base = (id: string, ms: number, result: "Win" | "Lose", champ: PlayerRow): MatchSummary => ({
+const base = (id: string, ms: number, result: "Win" | "Lose", champ: PlayerRow, tags: string[] = []): MatchSummary => ({
   id, startedAt: new Date(ms).toISOString(), startedEpochMs: ms, mode: "game", duration: 120, width: 1280, height: 720,
   fps: 60, codec: "h264", video: "game.mp4",
   tracks: [
@@ -138,20 +141,21 @@ const base = (id: string, ms: number, result: "Win" | "Lose", champ: PlayerRow):
   bookmarks: [{ t: 45 }, { t: 90 }],
   mouse: { file: "mouse.csv", offset: 0, w: 1280, h: 720 },
   keys: { file: "keys.csv", offset: 0, names: ["Q", "W", "E", "R", "D", "F", "1", "2", "3", "4", "5", "6", "7", "B", "A", "S", "Tab", "Space", "Ctrl", "Shift"] },
-  dir: "/mock", sizeBytes: 6.4 * 1024 ** 3, keep: false, noteCount: 2, thumb: null,
+  dir: "/mock", sizeBytes: 6.4 * 1024 ** 3, keep: false, tags, notesText: "Walked up without vision of Zed.\nBaron call was late.", noteCount: 2, thumb: null, reel: null,
   summary: { deaths: 3, bookmarks: 2 },
 });
 
 const now = Date.now();
 const matches: MatchSummary[] = [
-  base("2026-11-12_20-14-03", now - 2 * 3600e3, "Win", players[0]),
-  { ...base("2026-11-11_22-40-51", now - 26 * 3600e3, "Lose", { ...players[0], champion: "Orianna", championKey: "Orianna", kills: 2, deaths: 7, assists: 5, cs: 187 }), keep: true, sizeBytes: 5.1 * 1024 ** 3 },
-  { ...base("2026-11-10_19-02-17", now - 50 * 3600e3, "Win", { ...players[0], champion: "Syndra", championKey: "Syndra", kills: 11, deaths: 2, assists: 4, cs: 260 }), game: { ...base("x", 0, "Win", players[0]).game, queueName: "Ranked Flex", queueId: 440 }, noteCount: 0 },
-  { ...base("2026-11-10_17-30-00", now - 52 * 3600e3, "Win", players[0]), mode: "manual", game: { result: null }, noteCount: 0, summary: { deaths: 0, bookmarks: 0 } },
+  base("2026-11-12_20-14-03", now - 2 * 3600e3, "Win", players[0], ["roaming", "vision"]),
+  { ...base("2026-11-11_22-40-51", now - 26 * 3600e3, "Lose", { ...players[0], champion: "Orianna", championKey: "Orianna", kills: 2, deaths: 7, assists: 5, cs: 187 }, ["laning"]), keep: true, sizeBytes: 5.1 * 1024 ** 3 },
+  { ...base("2026-11-10_19-02-17", now - 50 * 3600e3, "Win", { ...players[0], champion: "Syndra", championKey: "Syndra", kills: 11, deaths: 2, assists: 4, cs: 260 }, ["carry"]), game: { ...base("x", 0, "Win", players[0]).game, queueName: "Ranked Flex", queueId: 440 }, noteCount: 0, notesText: "" },
+  { ...base("2026-11-10_17-30-00", now - 52 * 3600e3, "Win", players[0]), mode: "manual", game: { result: null }, noteCount: 0, notesText: "", summary: { deaths: 0, bookmarks: 0 } },
 ];
 
 let review: Review = {
   keep: false,
+  tags: ["roaming", "vision"],
   notes: [
     { id: "n1", t: 39, text: "Walked up without vision of Zed. Ward the raptor side before trading." },
     { id: "n2", t: 76, text: "Baron call was late; we had no pink in pit." },
@@ -161,12 +165,17 @@ let review: Review = {
   ],
 };
 
+let backups: LeagueBackup[] = [
+  { id: "2026-11-12_19-50-00", createdAt: new Date(now - 3 * 3600e3).toISOString(), label: "Auto before game", files: ["PersistedSettings.json", "input.ini", "game.cfg"], sizeBytes: 18420, auto: true },
+  { id: "2026-11-10_14-12-00", createdAt: new Date(now - 56 * 3600e3).toISOString(), label: "Main account bindings", files: ["PersistedSettings.json", "input.ini", "game.cfg"], sizeBytes: 18390, auto: false },
+];
+
 let settings: Settings = {
-  recordingsDir: "E:\\Rewatch", autoRecord: true, startWithWindows: true, fps: 60, codec: "h264", encoder: "auto", quality: 23, recordDiscord: true, recordMic: true,
-  micDevice: "", mouseTracking: true, keyTracking: true, useClientApi: true,
+  recordingsDir: "E:\\Rewatch", autoRecord: true, startWithWindows: true, fps: 60, resolution: "native", codec: "h264", encoder: "auto", quality: 23, recordDiscord: true, recordMic: true,
+  micDevice: "", mouseTracking: true, keyTracking: true, keyMap: [], useClientApi: true,
   queues: { rankedSolo: true, rankedFlex: true, normal: true, aram: false, custom: true, other: true },
-  quotaGb: 300, bookmarkHotkey: "F8", ffmpegPath: "", leagueDir: "",
-  shareWithFriends: true, shareName: "Rin", keepTeammateViews: true, reviewCopies: true, shareNotes: true, notify: true, autoUpdate: true, autoHighlights: true, aiReview: true, geminiKey: "sample",
+  quotaGb: 300, bookmarkHotkey: "F8", ffmpegPath: "", leagueDir: "", autoBackupLeague: true,
+  shareWithFriends: true, shareName: "Rin", keepTeammateViews: true, reviewCopies: true, shareNotes: true, notify: true, autoUpdate: true, autoHighlights: true, highlightsOnly: false, aiReview: true, geminiKey: "sample",
   friends: [
     { name: "Kaja", code: "3f9a1c0b7d2e4a6f8b1c3d5e7f9a0b2c4d6e8f0a1b3c5d7e9f1a2b4c6d8e0f13" },
     { name: "Tor", code: "a81d4e6f0b2c3d5e7f9a1b3c5d7e9f0a2b4c6d8e0f1a3b5c7d9e1f2a4b6c8d0e" },
@@ -196,8 +205,46 @@ export async function mock<T>(cmd: string, args?: Record<string, unknown>): Prom
       case "save_review": review = args!.review as Review; return null;
       case "start_manual_recording": status.state = "recording"; status.mode = "manual"; status.startedEpochMs = Date.now(); return null;
       case "stop_recording": status.state = "idle"; status.mode = null; return matches[0].id;
-      case "export_clip": return "E:\\Rewatch\\Clips\\clip.mp4";
+      case "export_clip": return args?.maxMb ? `E:\\Rewatch\\Clips\\clip_${args.maxMb}mb.mp4` : "E:\\Rewatch\\Clips\\clip.mp4";
       case "export_full": return "E:\\Rewatch\\all-tracks.mp4";
+      case "build_highlight_reel": return "E:\\Rewatch\\2026-11-12_20-14-03\\highlights_reel.mp4";
+      case "library_trends": {
+        const list: TrendMatch[] = matches
+          .filter((m) => m.mode !== "manual" && m.game.me)
+          .map((m, idx) => ({
+            id: m.id,
+            startedEpochMs: m.startedEpochMs,
+            queueId: m.game.queueId,
+            queueName: m.game.queueName,
+            result: m.game.result ?? null,
+            champion: m.game.me!.champion,
+            championKey: m.game.me!.championKey,
+            position: m.game.me!.position ?? "MIDDLE",
+            kills: m.game.me!.kills,
+            deaths: m.game.me!.deaths,
+            assists: m.game.me!.assists,
+            cs: m.game.me!.cs,
+            wards: 24 + idx * 3,
+            length: m.game.length ?? m.duration,
+            cs10: 78 - idx * 4,
+            cs15: 128 - idx * 6,
+            deadPct: 8 + idx * 4,
+            allies: (m.game.players ?? []).filter((p) => !p.isMe && p.team === m.game.me!.team).map((p) => ({ name: p.name, champion: p.champion })),
+            tags: m.tags ?? [],
+            keep: m.keep,
+            deathCauses: idx === 0 ? ["no_vision"] : idx === 1 ? ["overextended", "outnumbered"] : [],
+            avgAvoidable: idx === 0 ? 0.81 : idx === 1 ? 0.65 : 0.25,
+          }));
+        return list;
+      }
+      case "list_league_backups": return backups;
+      case "create_league_backup": {
+        const b: LeagueBackup = { id: new Date().toISOString().replace(/[:.]/g, "-"), createdAt: new Date().toISOString(), label: String(args?.label || "Manual snapshot"), files: ["PersistedSettings.json", "input.ini", "game.cfg"], sizeBytes: 18500, auto: false };
+        backups = [b, ...backups];
+        return b;
+      }
+      case "restore_league_backup": return backups.find((b) => b.id === args?.id) ?? backups[0];
+      case "delete_league_backup": backups = backups.filter((b) => b.id !== args?.id); return null;
       case "share_info": return { code: "c4e19d2a7b3f5061a8d4e2c9b7f1a3d5e6c8b0a2f4d6e8c1a3b5d7f9e0c2a4b6", running: true, online: true, error: null, requests: [{ code: "9d41c7e2a0b3f5648c1d2e3f4a5b6c7d8e9f0a1b2c3d4e5f6a7b8c9d0e1f2a3b", name: "Ida", atMs: Date.now() - 20000 }] };
       case "friend_ping": return "Kaja";
       case "pov_list": return [
@@ -217,7 +264,7 @@ export async function mock<T>(cmd: string, args?: Record<string, unknown>): Prom
       case "watch_peers": return watchPeers;
       case "update_info": case "update_check": return update;
       case "update_install": update.installing = true; return null;
-      case "export_split": return "E:\\Rewatch\\Clips\\split.mp4";
+      case "export_split": return args?.maxMb ? `E:\\Rewatch\\Clips\\split_${args.maxMb}mb.mp4` : "E:\\Rewatch\\Clips\\split.mp4";
       default: return null;
     }
   })();

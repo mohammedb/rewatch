@@ -51,6 +51,18 @@ pub struct Friend {
     pub code: String,
 }
 
+/// One key tracked for the key overlay in the review player.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", default)]
+pub struct KeySlot {
+    /// Windows key name ("Q", "Space", "Mouse4", "T"...).
+    pub vk: String,
+    /// Short label shown on the keycap (defaults to `vk`).
+    pub label: String,
+    /// Which row of the overlay it sits on (0, 1, or 2).
+    pub row: u8,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", default)]
 pub struct Settings {
@@ -61,6 +73,8 @@ pub struct Settings {
     /// opening the app first.
     pub start_with_windows: bool,
     pub fps: u32,
+    /// "native" | "1440" | "1080" | "720"
+    pub resolution: String,
     /// "h264" | "hevc" | "av1"
     pub codec: String,
     /// "auto" | "nvenc" | "amf" | "qsv" | "cpu"
@@ -74,6 +88,8 @@ pub struct Settings {
     pub mouse_tracking: bool,
     /// Log which game keys were held, for the key overlay in the player.
     pub key_tracking: bool,
+    /// Custom key list for the overlay. Empty uses the standard League key set.
+    pub key_map: Vec<KeySlot>,
     /// Read the queue name from the League client's local API (read-only).
     pub use_client_api: bool,
     pub queues: QueueToggles,
@@ -85,6 +101,8 @@ pub struct Settings {
     pub ffmpeg_path: String,
     /// League install folder. Empty means auto-detect.
     pub league_dir: String,
+    /// Automatically snapshot League's Config folder before a game when settings changed.
+    pub auto_backup_league: bool,
     /// Let the teammates listed below watch recordings from this PC.
     pub share_with_friends: bool,
     /// Name shown to teammates.
@@ -103,6 +121,9 @@ pub struct Settings {
     pub auto_update: bool,
     /// Save each game's highlights (multikills, aces, big fights) as short clips.
     pub auto_highlights: bool,
+    /// After saving the stitched highlight reel for a non-kept game, remove the full
+    /// `game.mp4` to save disk space.
+    pub highlights_only: bool,
     /// Send a short clip of each death to Google's Decisions API for hints in the
     /// Review tab. Off unless switched on, and needs the key below.
     pub ai_review: bool,
@@ -118,6 +139,7 @@ impl Default for Settings {
             auto_record: true,
             start_with_windows: true,
             fps: 60,
+            resolution: "native".into(),
             codec: "h264".into(),
             encoder: "auto".into(),
             quality: 23,
@@ -126,12 +148,14 @@ impl Default for Settings {
             mic_device: String::new(),
             mouse_tracking: true,
             key_tracking: true,
+            key_map: Vec::new(),
             use_client_api: true,
             queues: QueueToggles::default(),
             quota_gb: 300,
             bookmark_hotkey: "F8".into(),
             ffmpeg_path: String::new(),
             league_dir: String::new(),
+            auto_backup_league: true,
             share_with_friends: true,
             share_name: String::new(),
             keep_teammate_views: true,
@@ -140,6 +164,7 @@ impl Default for Settings {
             notify: true,
             auto_update: true,
             auto_highlights: true,
+            highlights_only: false,
             ai_review: false,
             gemini_key: String::new(),
             friends: Vec::new(),

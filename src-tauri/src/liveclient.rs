@@ -87,6 +87,9 @@ pub struct PlayerStats {
     pub kills: Vec<i32>,
     pub deaths: Vec<i32>,
     pub assists: Vec<i32>,
+    pub item_gold: Vec<i32>,
+    pub ward_score: Vec<f64>,
+    pub dead: Vec<bool>,
 }
 
 const STATS_EVERY: f64 = 10.0;
@@ -317,27 +320,73 @@ impl LiveData {
                         Some(i) => i,
                         None => {
                             // Seen for the first time: pad so every row has one value per sample.
-                            self.stats.players.push(PlayerStats { name, cs: vec![0; n], level: vec![0; n], kills: vec![0; n], deaths: vec![0; n], assists: vec![0; n] });
+                            self.stats.players.push(PlayerStats {
+                                name,
+                                cs: vec![0; n],
+                                level: vec![0; n],
+                                kills: vec![0; n],
+                                deaths: vec![0; n],
+                                assists: vec![0; n],
+                                item_gold: vec![0; n],
+                                ward_score: vec![0.0; n],
+                                dead: vec![false; n],
+                            });
                             self.stats.players.len() - 1
                         }
                     };
                     let score = |k: &str| p.pointer(&format!("/scores/{k}")).and_then(|x| x.as_f64()).unwrap_or(0.0) as i32;
+                    let ward = p
+                        .pointer("/scores/wardScore")
+                        .and_then(|x| x.as_f64())
+                        .unwrap_or(0.0);
+                    let item_gold: i32 = p
+                        .get("items")
+                        .and_then(|v| v.as_array())
+                        .map(|its| {
+                            its.iter()
+                                .map(|it| {
+                                    let price = it.get("price").and_then(|x| x.as_i64()).unwrap_or(0);
+                                    let count = it.get("count").and_then(|x| x.as_i64()).unwrap_or(1).max(1);
+                                    (price * count) as i32
+                                })
+                                .sum()
+                        })
+                        .unwrap_or(0);
+                    let dead = p.get("isDead").and_then(|x| x.as_bool()).unwrap_or(false);
                     let row = &mut self.stats.players[idx];
                     row.cs.push(score("creepScore"));
                     row.level.push(p.get("level").and_then(|x| x.as_i64()).unwrap_or(0) as i32);
                     row.kills.push(score("kills"));
                     row.deaths.push(score("deaths"));
                     row.assists.push(score("assists"));
+                    row.item_gold.push(item_gold);
+                    row.ward_score.push((ward * 10.0).round() / 10.0);
+                    row.dead.push(dead);
                 }
                 self.stats.t.push(t_session);
                 self.stats.gold.push(data.pointer("/activePlayer/currentGold").and_then(|x| x.as_f64()).unwrap_or(0.0).round());
                 // Anyone missing from this read keeps their last value.
                 for row in &mut self.stats.players {
-                    for col in [&mut row.cs, &mut row.level, &mut row.kills, &mut row.deaths, &mut row.assists] {
+                    for col in [
+                        &mut row.cs,
+                        &mut row.level,
+                        &mut row.kills,
+                        &mut row.deaths,
+                        &mut row.assists,
+                        &mut row.item_gold,
+                    ] {
                         while col.len() <= n {
                             let last = col.last().copied().unwrap_or(0);
                             col.push(last);
                         }
+                    }
+                    while row.ward_score.len() <= n {
+                        let last = row.ward_score.last().copied().unwrap_or(0.0);
+                        row.ward_score.push(last);
+                    }
+                    while row.dead.len() <= n {
+                        let last = row.dead.last().copied().unwrap_or(false);
+                        row.dead.push(last);
                     }
                 }
             }
@@ -631,7 +680,15 @@ mod stats_tests {
     use serde_json::json;
 
     fn read(game_time: f64, cs: i64, with_enemy: bool) -> Value {
-        let p = |name: &str, champ: &str, cs: i64| json!({ "riotIdGameName": name, "championName": champ, "team": "ORDER", "level": 3, "items": [], "scores": { "kills": 1, "deaths": 0, "assists": 2, "creepScore": cs } });
+        let p = |name: &str, champ: &str, cs: i64| json!({
+            "riotIdGameName": name,
+            "championName": champ,
+            "team": "ORDER",
+            "level": 3,
+            "isDead": cs == 15,
+            "items": [{ "itemID": 1056, "price": 400, "count": 1 }, { "itemID": 2003, "price": 50, "count": 2 }],
+            "scores": { "kills": 1, "deaths": 0, "assists": 2, "creepScore": cs, "wardScore": 4.25 }
+        });
         let mut all = vec![p("Rin", "Ahri", cs)];
         if with_enemy {
             all.push(p("Enemy", "Zed", 7));
@@ -650,8 +707,14 @@ mod stats_tests {
         assert_eq!(d.stats.gold, vec![512.0, 512.0, 512.0]);
         let me = d.stats.players.iter().find(|p| p.name == "Rin").unwrap();
         assert_eq!(me.cs, vec![0, 9, 15]);
+        assert_eq!(me.item_gold, vec![500, 500, 500]);
+        assert_eq!(me.ward_score, vec![4.3, 4.3, 4.3]);
+        assert_eq!(me.dead, vec![false, false, true]);
         let enemy = d.stats.players.iter().find(|p| p.name == "Enemy").unwrap();
         assert_eq!(enemy.cs, vec![0, 7, 7]);
         assert_eq!(enemy.kills.len(), 3);
+        assert_eq!(enemy.item_gold.len(), 3);
+        assert_eq!(enemy.ward_score.len(), 3);
+        assert_eq!(enemy.dead.len(), 3);
     }
 }

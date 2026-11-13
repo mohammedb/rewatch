@@ -13,6 +13,7 @@ use serde_json::{json, Value};
 use std::path::{Path, PathBuf};
 
 pub const FILE: &str = "highlights.json";
+pub const REEL_FILE: &str = "highlights_reel.mp4";
 const VERSION: i64 = 1;
 const LEAD: f64 = 8.0;
 const TAIL: f64 = 4.0;
@@ -203,7 +204,7 @@ fn cut(ffmpeg: &Path, dir: &Path, h: &Highlight, out: &Path) -> Result<()> {
         }
         args.extend(["-filter_complex".into(), graph, "-map".into(), "[v]".into(), "-map".into(), if sound.len() > 1 { "[a]".into() } else { "0:a?".into() }]);
         args.extend(enc.iter().map(|x| x.to_string()));
-        args.extend(["-c:a", "aac", "-b:a", "160k", "-movflags", "+faststart", "-f", "mp4"].map(String::from));
+        args.extend(["-c:a", "aac", "-ar", "48000", "-ac", "2", "-b:a", "160k", "-movflags", "+faststart", "-f", "mp4"].map(String::from));
         args.push(p(&part));
         match run_tool(ffmpeg, &args) {
             Ok(_) => {
@@ -217,6 +218,249 @@ fn cut(ffmpeg: &Path, dir: &Path, h: &Highlight, out: &Path) -> Result<()> {
     Err(last)
 }
 
+fn clean_label(s: &str) -> String {
+    s.chars()
+        .filter(|c| c.is_ascii_alphanumeric() || " _-.,!".contains(*c))
+        .take(40)
+        .collect()
+}
+
+fn has_audio_stream(ffmpeg: &Path, file: &Path) -> bool {
+    let out = std::process::Command::new(ffmpeg)
+        .args(["-hide_banner", "-i"])
+        .arg(file)
+        .stdin(std::process::Stdio::null())
+        .output();
+    match out {
+        Ok(o) => String::from_utf8_lossy(&o.stderr).contains("Audio:"),
+        Err(_) => false,
+    }
+}
+
+fn run_with_encoders(ffmpeg: &Path, args_prefix: &[String], out: &Path) -> Result<()> {
+    let part = out.with_extension("part");
+    let p = |x: &Path| x.to_string_lossy().to_string();
+    let mut last = anyhow!("no encoder");
+    for enc in [
+        &["-c:v", "h264_nvenc", "-preset", "p5", "-rc", "vbr", "-cq", "26", "-b:v", "0"][..],
+        &["-c:v", "h264_amf", "-quality", "balanced", "-rc", "cqp", "-qp_i", "26", "-qp_p", "26"][..],
+        &["-c:v", "h264_qsv", "-global_quality", "26"][..],
+        &["-c:v", "libx264", "-preset", "veryfast", "-crf", "24", "-pix_fmt", "yuv420p"][..],
+    ] {
+        let mut args = args_prefix.to_vec();
+        args.extend(enc.iter().map(|x| x.to_string()));
+        args.extend(["-c:a", "aac", "-ar", "48000", "-ac", "2", "-b:a", "160k", "-movflags", "+faststart", "-f", "mp4"].map(String::from));
+        args.push(p(&part));
+        match run_tool(ffmpeg, &args) {
+            Ok(_) => {
+                std::fs::rename(&part, out)?;
+                return Ok(());
+            }
+            Err(e) => last = e,
+        }
+    }
+    let _ = std::fs::remove_file(&part);
+    Err(last)
+}
+
+/// Stitch all highlight clips in `dir` into a single `highlights_reel.mp4` with title cards
+/// and smooth crossfades. Returns the reel path.
+pub fn build_reel(settings: &Settings, dir: &Path, stop: &dyn Fn() -> bool) -> Result<PathBuf> {
+    let doc: Value = serde_json::from_str(&std::fs::read_to_string(dir.join("match.json"))?)?;
+    let found = find(&doc);
+    if found.is_empty() {
+        return Err(anyhow!("No highlights were found in this game."));
+    }
+    let (ffmpeg, _) = settings.ffmpeg_tools();
+    let has_full = dir.join("game.mp4").exists();
+    for h in &found {
+        let out = dir.join(file_name(h));
+        if out.exists() {
+            continue;
+        }
+        if !has_full {
+            return Err(anyhow!("The full recording was already trimmed."));
+        }
+        if stop() {
+            return Err(anyhow!("A game started; building the reel waits until it is over."));
+        }
+        cut(&ffmpeg, dir, h, &out)?;
+    }
+
+    let clips: Vec<(&Highlight, PathBuf)> = found
+        .iter()
+        .filter_map(|h| {
+            let p = dir.join(file_name(h));
+            p.exists().then_some((h, p))
+        })
+        .collect();
+    if clips.is_empty() {
+        return Err(anyhow!("No highlight clips are available to stitch."));
+    }
+    let out = dir.join(REEL_FILE);
+    if clips.len() == 1 {
+        std::fs::copy(&clips[0].1, &out)?;
+        return Ok(out);
+    }
+
+    let mut inputs: Vec<String> = ["-y", "-hide_banner", "-loglevel", "error"].map(String::from).to_vec();
+    let mut durations = Vec::new();
+    let mut all_audio = true;
+    for (_, path) in &clips {
+        inputs.extend(["-i".into(), path.to_string_lossy().to_string()]);
+        let info = crate::video::probe(&ffmpeg, path);
+        durations.push(info.duration.max(1.0));
+        if !has_audio_stream(&ffmpeg, path) {
+            all_audio = false;
+        }
+    }
+
+    let font = "C\\:/Windows/Fonts/segoeuib.ttf";
+    let has_font = Path::new("C:/Windows/Fonts/segoeuib.ttf").exists();
+    let can_xfade = durations.iter().all(|d| *d >= 1.5);
+    let fade = 0.35f64;
+
+    // First try smooth crossfades + clip title overlay.
+    if can_xfade {
+        let mut graph = String::new();
+        for (i, (h, _)) in clips.iter().enumerate() {
+            let label = clean_label(&h.label);
+            graph += &format!("[{i}:v]fps=60,scale=1920:1080:force_original_aspect_ratio=decrease,pad=1920:1080:(ow-iw)/2:(oh-ih)/2:black,setsar=1,format=yuv420p");
+            if has_font && !label.is_empty() {
+                graph += &format!(",drawtext=fontfile='{font}':text='{label}':x=36:y=36:fontsize=28:fontcolor=white:box=1:boxcolor=black@0.65:boxborderw=10:enable='between(t,0.15,2.6)'");
+            }
+            graph += &format!("[v{i}];");
+            if all_audio {
+                graph += &format!("[{i}:a]aformat=sample_rates=48000:channel_layouts=stereo[a{i}];");
+            }
+        }
+        let mut cur_v = "[v0]".to_string();
+        let mut cur_a = "[a0]".to_string();
+        let mut offset = durations[0] - fade;
+        for i in 1..clips.len() {
+            let out_v = if i + 1 == clips.len() { "[v]" } else { &format!("[vx{i}]") };
+            graph += &format!("{cur_v}[v{i}]xfade=transition=fade:duration={fade:.2}:offset={:.2}{out_v};", offset.max(0.1));
+            cur_v = out_v.to_string();
+            if all_audio {
+                let out_a = if i + 1 == clips.len() { "[a]" } else { &format!("[ax{i}]") };
+                graph += &format!("{cur_a}[a{i}]acrossfade=d={fade:.2}{out_a};");
+                cur_a = out_a.to_string();
+            }
+            offset += durations[i] - fade;
+        }
+        let graph = graph.trim_end_matches(';').to_string();
+        let mut args = inputs.clone();
+        args.extend(["-filter_complex".into(), graph, "-map".into(), "[v]".into()]);
+        if all_audio {
+            args.extend(["-map".into(), "[a]".into()]);
+        } else {
+            args.push("-an".into());
+        }
+        if run_with_encoders(&ffmpeg, &args, &out).is_ok() {
+            return Ok(out);
+        }
+    }
+
+    // Fallback: straight concat filter without crossfade.
+    let mut graph = String::new();
+    for i in 0..clips.len() {
+        graph += &format!("[{i}:v]fps=60,scale=1920:1080:force_original_aspect_ratio=decrease,pad=1920:1080:(ow-iw)/2:(oh-ih)/2:black,setsar=1,format=yuv420p[v{i}];");
+        if all_audio {
+            graph += &format!("[{i}:a]aformat=sample_rates=48000:channel_layouts=stereo[a{i}];");
+        }
+    }
+    for i in 0..clips.len() {
+        graph += &format!("[v{i}]");
+        if all_audio {
+            graph += &format!("[a{i}]");
+        }
+    }
+    if all_audio {
+        graph += &format!("concat=n={}:v=1:a=1[v][a]", clips.len());
+    } else {
+        graph += &format!("concat=n={}:v=1:a=0[v]", clips.len());
+    }
+    let mut args = inputs;
+    args.extend(["-filter_complex".into(), graph, "-map".into(), "[v]".into()]);
+    if all_audio {
+        args.extend(["-map".into(), "[a]".into()]);
+    } else {
+        args.push("-an".into());
+    }
+    run_with_encoders(&ffmpeg, &args, &out)?;
+    Ok(out)
+}
+
+/// How long after a game starts its full recording is kept in Highlights-only mode,
+/// so there is time to star (keep) it first.
+pub const TRIM_GRACE_MS: i64 = 24 * 3600 * 1000;
+
+/// Remove `game.mp4` (and `review.mp4`) of a non-kept game once its highlight reel is
+/// ready and the grace period is over, when Highlights-only mode is enabled. `match.json`
+/// then plays the reel, whose sound already holds Discord and the microphone.
+pub fn maybe_trim_full(settings: &Settings, dir: &Path, now_ms: i64) -> Result<bool> {
+    if !settings.highlights_only {
+        return Ok(false);
+    }
+    let reel = dir.join(REEL_FILE);
+    let game_mp4 = dir.join("game.mp4");
+    if !game_mp4.exists() || std::fs::metadata(&reel).map(|m| m.len()).unwrap_or(0) == 0 {
+        return Ok(false);
+    }
+    let keep = std::fs::read_to_string(dir.join("review.json"))
+        .ok()
+        .and_then(|s| serde_json::from_str::<Value>(&s).ok())
+        .and_then(|r| r.get("keep").and_then(|v| v.as_bool()))
+        .unwrap_or(false);
+    if keep {
+        return Ok(false);
+    }
+    let mut doc: Value = serde_json::from_str(&std::fs::read_to_string(dir.join("match.json"))?)?;
+    // A recording without a start time is never trimmed.
+    let started = doc.get("startedEpochMs").and_then(|x| x.as_i64()).unwrap_or(now_ms);
+    if now_ms - started < TRIM_GRACE_MS {
+        return Ok(false);
+    }
+    // Delete first: if the file is open somewhere, nothing changes.
+    if std::fs::remove_file(&game_mp4).is_err() {
+        return Ok(false);
+    }
+    let _ = std::fs::remove_file(dir.join("review.mp4"));
+    let (ffmpeg, _) = settings.ffmpeg_tools();
+    let reel_duration = crate::video::probe(&ffmpeg, &reel).duration;
+    if let Some(o) = doc.as_object_mut() {
+        o.insert("video".into(), json!(REEL_FILE));
+        o.insert("trimmedToHighlights".into(), json!(true));
+        if reel_duration > 0.0 {
+            o.insert("reelDuration".into(), json!(reel_duration));
+        }
+        // The reel's own sound already has Discord and the microphone mixed in; the
+        // separate tracks run on the full game's clock and would not line up.
+        if let Some(tracks) = o.get_mut("tracks").and_then(|t| t.as_array_mut()) {
+            tracks.retain(|t| t.get("name").and_then(|n| n.as_str()) == Some("game"));
+        }
+    }
+    std::fs::write(dir.join("match.json"), serde_json::to_string_pretty(&doc)?)?;
+    let id = dir.file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_default();
+    log(format!("[highlights] {id}: trimmed full game.mp4 (highlights-only mode)"));
+    Ok(true)
+}
+
+/// Trim every recording under `root` whose grace period is over. Returns how many.
+pub fn trim_due(settings: &Settings, root: &Path) -> usize {
+    if !settings.highlights_only {
+        return 0;
+    }
+    let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_millis() as i64).unwrap_or(0);
+    let Ok(entries) = std::fs::read_dir(root) else { return 0 };
+    entries
+        .flatten()
+        .map(|e| e.path())
+        .filter(|dir| dir.join(REEL_FILE).exists() && dir.join("game.mp4").exists())
+        .filter(|dir| matches!(maybe_trim_full(settings, dir, now), Ok(true)))
+        .count()
+}
+
 /// Save every highlight of the recording in `dir` that has no clip yet. `stop` is
 /// asked before each one. A small note file marks the recording as done.
 pub fn save(settings: &Settings, dir: &Path, stop: &dyn Fn() -> bool) -> Result<Vec<Value>> {
@@ -224,9 +468,10 @@ pub fn save(settings: &Settings, dir: &Path, stop: &dyn Fn() -> bool) -> Result<
     let (ffmpeg, _) = settings.ffmpeg_tools();
     let found = find(&doc);
     let mut made = 0;
+    let has_full = dir.join("game.mp4").exists();
     for h in &found {
         let out = dir.join(file_name(h));
-        if out.exists() {
+        if out.exists() || !has_full {
             continue;
         }
         if stop() {
@@ -234,6 +479,13 @@ pub fn save(settings: &Settings, dir: &Path, stop: &dyn Fn() -> bool) -> Result<
         }
         cut(&ffmpeg, dir, h, &out)?;
         made += 1;
+    }
+    if settings.highlights_only && !found.is_empty() && !dir.join(REEL_FILE).exists() {
+        if stop() {
+            return Err(anyhow!("A game started; building the reel waits until it is over."));
+        }
+        // The full recording is removed later by `trim_due`, after the grace period.
+        build_reel(settings, dir, stop)?;
     }
     std::fs::write(dir.join(FILE), json!({ "version": VERSION, "count": found.len() }).to_string())?;
     if made > 0 {
@@ -316,5 +568,46 @@ mod tests {
         assert_eq!(found.len(), 6);
         assert!(found.iter().all(|h| h.end - h.start <= LONGEST + 1e-9 && h.end > h.start));
         assert!(found.windows(2).all(|w| w[0].t < w[1].t));
+    }
+
+    #[test]
+    fn highlights_only_trim_respects_keep_and_updates_match() {
+        let dir = std::env::temp_dir().join(format!("rewatch_hl_trim_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("game.mp4"), b"full").unwrap();
+        std::fs::write(dir.join(REEL_FILE), b"reel").unwrap();
+        let started = 1_000_000_000_000i64;
+        let tracks = json!([{ "name": "game" }, { "name": "discord" }, { "name": "mic" }]);
+        std::fs::write(
+            dir.join("match.json"),
+            json!({ "video": "game.mp4", "duration": 1200.0, "startedEpochMs": started, "tracks": tracks }).to_string(),
+        )
+        .unwrap();
+
+        let mut s = Settings::default();
+        s.highlights_only = true;
+        let later = started + TRIM_GRACE_MS + 1;
+
+        // Kept game is not trimmed.
+        std::fs::write(dir.join("review.json"), json!({ "keep": true }).to_string()).unwrap();
+        assert!(!maybe_trim_full(&s, &dir, later).unwrap());
+        assert!(dir.join("game.mp4").exists());
+
+        // Within the grace period nothing is trimmed, so there is time to star the game.
+        std::fs::write(dir.join("review.json"), json!({ "keep": false }).to_string()).unwrap();
+        assert!(!maybe_trim_full(&s, &dir, started + 3600 * 1000).unwrap());
+        assert!(dir.join("game.mp4").exists());
+
+        // Unkept game past the grace period gets trimmed and points video at the reel.
+        assert!(maybe_trim_full(&s, &dir, later).unwrap());
+        assert!(!dir.join("game.mp4").exists());
+        let doc: Value = serde_json::from_str(&std::fs::read_to_string(dir.join("match.json")).unwrap()).unwrap();
+        assert_eq!(doc["video"], REEL_FILE);
+        assert_eq!(doc["trimmedToHighlights"], true);
+        // Only the reel's own sound is left: Discord and mic run on the full game's clock.
+        assert_eq!(doc["tracks"], json!([{ "name": "game" }]));
+
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

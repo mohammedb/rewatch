@@ -37,6 +37,10 @@ pub struct SessionMeta {
     /// Game keys were logged to `keys.csv`.
     #[serde(default)]
     pub keys: bool,
+    #[serde(default)]
+    pub key_names: Vec<String>,
+    #[serde(default)]
+    pub key_rows: Vec<Vec<String>>,
 }
 
 pub struct Session {
@@ -122,6 +126,7 @@ impl Session {
         let ref_epoch_us = SystemTime::now().duration_since(UNIX_EPOCH)?.as_micros() as i64;
         let stop = Arc::new(AtomicBool::new(false));
 
+        let tracked_keys = crate::keys::active_keys(settings);
         let meta = SessionMeta {
             id,
             started_at: now.to_rfc3339(),
@@ -136,6 +141,8 @@ impl Session {
             mouse: settings.mouse_tracking,
             // Only for League games: a manual recording has no game window to watch.
             keys: settings.key_tracking && game_pid.is_some(),
+            key_names: crate::keys::names(&tracked_keys),
+            key_rows: crate::keys::rows(&tracked_keys),
         };
         fs::write(dir.join("session.json"), serde_json::to_string_pretty(&meta)?)?;
 
@@ -179,8 +186,8 @@ impl Session {
 
         let keys = match (meta.keys, game_pid) {
             (true, Some(pid)) => {
-                let (path, stop) = (dir.join("keys.csv"), stop.clone());
-                Some(std::thread::spawn(move || crate::keys::record_loop(path, pid, clock, stop)))
+                let (path, stop, tk) = (dir.join("keys.csv"), stop.clone(), tracked_keys);
+                Some(std::thread::spawn(move || crate::keys::record_loop(path, pid, tk, clock, stop)))
             }
             _ => None,
         };
@@ -389,7 +396,19 @@ pub fn finalize_dir(
             json!({ "file": "mouse.csv", "offset": video_start, "w": meta.target.w, "h": meta.target.h })
         } else { Value::Null },
         "keys": if meta.keys && file_size(&keys_file) > 20 {
-            json!({ "file": "keys.csv", "offset": video_start, "names": crate::keys::names() })
+            let fallback = (meta.key_names.is_empty() || meta.key_rows.is_empty())
+                .then(|| crate::keys::active_keys(settings));
+            let key_names = if meta.key_names.is_empty() {
+                crate::keys::names(fallback.as_deref().unwrap_or(&[]))
+            } else {
+                meta.key_names.clone()
+            };
+            let key_rows = if meta.key_rows.is_empty() {
+                crate::keys::rows(fallback.as_deref().unwrap_or(&[]))
+            } else {
+                meta.key_rows.clone()
+            };
+            json!({ "file": "keys.csv", "offset": video_start, "names": key_names, "rows": key_rows })
         } else { Value::Null },
     });
     fs::write(dir.join("match.json"), serde_json::to_string_pretty(&doc)?)?;

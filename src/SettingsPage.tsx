@@ -1,7 +1,8 @@
-import { AudioLines, CircleDot, Copy, Download, Sparkles, ListVideo, Plus, ShieldCheck, Users, Video, X, type LucideIcon } from "lucide-react";
+import { Archive, AudioLines, CircleDot, Copy, Download, ListVideo, Plus, RotateCcw, ShieldCheck, Sparkles, Users, Video, X, type LucideIcon } from "lucide-react";
 import { useEffect, useState, type ReactNode } from "react";
 import { api, pickFolder } from "./api";
-import type { Environment, Friend, MicInfo, QueueToggles, Settings, ShareInfo, UpdateInfo } from "./types";
+import { bytes } from "./format";
+import type { Environment, Friend, KeySlot, LeagueBackup, MicInfo, QueueToggles, Settings, ShareInfo, UpdateInfo } from "./types";
 
 const QUEUES: [keyof QueueToggles, string][] = [
   ["rankedSolo", "Ranked Solo/Duo"],
@@ -10,6 +11,29 @@ const QUEUES: [keyof QueueToggles, string][] = [
   ["aram", "ARAM"],
   ["custom", "Custom and Practice Tool"],
   ["other", "Other modes"],
+];
+
+const DEFAULT_KEY_SLOTS: KeySlot[] = [
+  { vk: "Q", label: "Q", row: 0 },
+  { vk: "W", label: "W", row: 0 },
+  { vk: "E", label: "E", row: 0 },
+  { vk: "R", label: "R", row: 0 },
+  { vk: "D", label: "D", row: 0 },
+  { vk: "F", label: "F", row: 0 },
+  { vk: "1", label: "1", row: 1 },
+  { vk: "2", label: "2", row: 1 },
+  { vk: "3", label: "3", row: 1 },
+  { vk: "4", label: "4", row: 1 },
+  { vk: "5", label: "5", row: 1 },
+  { vk: "6", label: "6", row: 1 },
+  { vk: "7", label: "7", row: 1 },
+  { vk: "B", label: "B", row: 1 },
+  { vk: "Shift", label: "Shift", row: 2 },
+  { vk: "Ctrl", label: "Ctrl", row: 2 },
+  { vk: "A", label: "A", row: 2 },
+  { vk: "S", label: "S", row: 2 },
+  { vk: "Tab", label: "Tab", row: 2 },
+  { vk: "Space", label: "Space", row: 2 },
 ];
 
 function Switch({ checked, onChange, label, disabled }: { checked: boolean; onChange: (v: boolean) => void; label: string; disabled?: boolean }) {
@@ -76,10 +100,18 @@ export function SettingsPage({ settings, onSave }: { settings: Settings; onSave:
   const [copied, setCopied] = useState(false);
   const [update, setUpdate] = useState<UpdateInfo | null>(null);
   const [checking, setChecking] = useState(false);
+  const [backups, setBackups] = useState<LeagueBackup[]>([]);
+  const [backupLabel, setBackupLabel] = useState("");
+  const [backupBusy, setBackupBusy] = useState(false);
+  const [backupMsg, setBackupMsg] = useState<{ ok: boolean; text: string } | null>(null);
+
+  const loadBackups = () => api.listLeagueBackups().then(setBackups).catch(() => setBackups([]));
+
   useEffect(() => {
     api.environment().then(setEnv);
     api.listMicrophones().then(setMics);
     api.updateInfo().then(setUpdate).catch(() => {});
+    loadBackups();
   }, []);
   // What to hand a teammate changes whenever sharing settings are saved, and people
   // asking to connect can turn up at any time while this page is open.
@@ -93,8 +125,52 @@ export function SettingsPage({ settings, onSave }: { settings: Settings; onSave:
 
   const set = <K extends keyof Settings>(key: K, value: Settings[K]) => setS((cur) => ({ ...cur, [key]: value }));
   const dirty = JSON.stringify(s) !== JSON.stringify(settings);
-  // Rough size of an hour of 1440p60 H.264 at this quality, to make the slider meaningful.
-  const perHour = Math.round(18 * Math.pow(2, (23 - s.quality) / 6) * (s.fps / 60) * (s.codec === "h264" ? 1 : 0.65));
+  const resFactor = s.resolution === "720" ? 0.25 : s.resolution === "1080" ? 0.56 : 1;
+  // Rough size of an hour of H.264 at this quality and resolution, to make the slider meaningful.
+  const perHour = Math.max(1, Math.round(18 * Math.pow(2, (23 - s.quality) / 6) * (s.fps / 60) * (s.codec === "h264" ? 1 : 0.65) * resFactor));
+
+  const createBackup = async () => {
+    setBackupBusy(true);
+    setBackupMsg(null);
+    try {
+      const b = await api.createLeagueBackup(backupLabel.trim());
+      setBackupLabel("");
+      setBackupMsg({ ok: true, text: `Saved backup "${b.label || "Manual"}" (${b.files.join(", ")}).` });
+      await loadBackups();
+    } catch (e) {
+      setBackupMsg({ ok: false, text: String(e) });
+    } finally {
+      setBackupBusy(false);
+    }
+  };
+
+  const restoreBackup = async (b: LeagueBackup) => {
+    if (!window.confirm(`Restore League settings from "${b.label || "backup"}"? Your current Config files will be overwritten.`)) return;
+    setBackupBusy(true);
+    setBackupMsg(null);
+    try {
+      const restored = await api.restoreLeagueBackup(b.id);
+      setBackupMsg({ ok: true, text: `Restored ${restored.files.join(", ")} to your League Config folder.` });
+      // Restoring first saves the current files as a "Before restore" backup.
+      await loadBackups();
+    } catch (e) {
+      setBackupMsg({ ok: false, text: String(e) });
+    } finally {
+      setBackupBusy(false);
+    }
+  };
+
+  const removeBackup = async (id: string) => {
+    setBackupBusy(true);
+    try {
+      await api.deleteLeagueBackup(id);
+      await loadBackups();
+    } catch (e) {
+      setBackupMsg({ ok: false, text: String(e) });
+    } finally {
+      setBackupBusy(false);
+    }
+  };
 
   return (
     <div className="page">
@@ -122,6 +198,9 @@ export function SettingsPage({ settings, onSave }: { settings: Settings; onSave:
           <Opt title="Save highlights as clips" hint="Multikills, aces, fights over Baron and dragons, and team fights won clearly are saved by themselves as short 1080p clips with game sound, Discord and your microphone, next to the recording. At most six a game, made after the game ends. They count towards the size limit and go when the game is deleted.">
             <Switch label="Save highlights as clips" checked={s.autoHighlights} onChange={(v) => set("autoHighlights", v)} />
           </Opt>
+          <Opt title="Highlights-only mode" hint="After a game ends, stitch its highlights into one reel. A day later the full recording is deleted to save disk space, unless you starred (kept) the game by then.">
+            <Switch label="Highlights-only mode" checked={s.highlightsOnly} onChange={(v) => set("highlightsOnly", v)} />
+          </Opt>
           <Opt title="Bookmark key" hint="Press it in game to mark a moment for later, for example F8 or Ctrl+Shift+B. The key still reaches the game, so pick one League does not use. Leave empty to turn it off.">
             <input className="field-input" type="text" style={{ width: 90 }} value={s.bookmarkHotkey} aria-label="Bookmark key" onChange={(e) => set("bookmarkHotkey", e.target.value)} />
           </Opt>
@@ -143,7 +222,14 @@ export function SettingsPage({ settings, onSave }: { settings: Settings; onSave:
         </Section>
 
         <Section icon={Video} title="Video">
-          <Opt title="Frame rate" hint="Recorded at your screen's own resolution.">
+          <Opt title="Resolution" hint="Downscale directly on your graphics card while recording to cut file size and disk I/O.">
+            <div className="seg" role="group" aria-label="Resolution">
+              {([["native", "Native"], ["1440", "1440p"], ["1080", "1080p"], ["720", "720p"]] as const).map(([v, label]) => (
+                <button key={v} aria-pressed={s.resolution === v} onClick={() => set("resolution", v)}>{label}</button>
+              ))}
+            </div>
+          </Opt>
+          <Opt title="Frame rate" hint="Higher frame rates make frame-stepping smoother but use more disk space.">
             <div className="seg" role="group" aria-label="Frame rate">
               {[30, 60, 120].map((f) => <button key={f} aria-pressed={s.fps === f} onClick={() => set("fps", f)}>{f} fps</button>)}
             </div>
@@ -164,7 +250,7 @@ export function SettingsPage({ settings, onSave }: { settings: Settings; onSave:
               <option value="cpu">Processor (slow)</option>
             </select>
           </Opt>
-          <Opt title="Quality" hint={`A lower number is sharper and bigger. About ${perHour} GB an hour at 1440p.`}>
+          <Opt title="Quality" hint={`A lower number is sharper and bigger. About ${perHour} GB an hour at ${s.resolution === "native" ? "1440p" : `${s.resolution}p`}.`}>
             <input type="range" min={18} max={32} value={s.quality} aria-label="Quality" onChange={(e) => set("quality", Number(e.target.value))} />
             <span className="num" style={{ fontSize: 19, width: 24, textAlign: "right" }}>{s.quality}</span>
           </Opt>
@@ -184,9 +270,120 @@ export function SettingsPage({ settings, onSave }: { settings: Settings; onSave:
           <Opt title="Record the mouse" hint="Cursor path and clicks, for the trail and the clicks-per-minute graph.">
             <Switch label="Record the mouse" checked={s.mouseTracking} onChange={(v) => set("mouseTracking", v)} />
           </Opt>
-          <Opt title="Record game keys" hint="Which of Q W E R D F, 1 to 7, B, A, S, Tab, Space, Ctrl and Shift were held, for the key overlay. Only while League is in front, and nothing while the chat is open. Stays on this PC.">
+          <Opt title="Record game keys" hint="Which keys were held while League is in front (nothing while chat is open). Stays on this PC.">
             <Switch label="Record game keys" checked={s.keyTracking} onChange={(v) => set("keyTracking", v)} />
           </Opt>
+          {s.keyTracking && (
+            <div className="keymap">
+              <div className="keymap-head">
+                <div>
+                  <b>Key overlay bindings</b>
+                  <small>
+                    {s.keyMap.length === 0
+                      ? "Using the standard 20 League keys (Q W E R D F, 1–7 B, Shift Ctrl A S Tab Space)."
+                      : `${s.keyMap.length} custom keys (e.g. T, C, Mouse4, Mouse5, Space, F1). Max 32.`}
+                  </small>
+                </div>
+                {s.keyMap.length === 0 ? (
+                  <button className="btn" onClick={() => set("keyMap", DEFAULT_KEY_SLOTS.map((k) => ({ ...k })))}>Customize keys</button>
+                ) : (
+                  <div className="ctl">
+                    <button
+                      className="btn"
+                      disabled={s.keyMap.length >= 32}
+                      onClick={() => set("keyMap", [...s.keyMap, { vk: "T", label: "T", row: 0 }])}
+                    >
+                      <Plus size={14} aria-hidden />Add key
+                    </button>
+                    <button className="btn quiet" onClick={() => set("keyMap", [])}>Reset defaults</button>
+                  </div>
+                )}
+              </div>
+              {s.keyMap.length > 0 && (
+                <div className="keymap-grid">
+                  {s.keyMap.map((slot, i) => (
+                    <div className="keymap-row" key={i}>
+                      <input
+                        className="field-input"
+                        type="text"
+                        value={slot.vk}
+                        placeholder="Key (e.g. T, Mouse4)"
+                        aria-label="Key input"
+                        onChange={(e) => set("keyMap", s.keyMap.map((x, j) => (j === i ? { ...x, vk: e.target.value } : x)))}
+                      />
+                      <input
+                        className="field-input"
+                        type="text"
+                        value={slot.label}
+                        placeholder="Label"
+                        aria-label="Key label"
+                        onChange={(e) => set("keyMap", s.keyMap.map((x, j) => (j === i ? { ...x, label: e.target.value } : x)))}
+                      />
+                      <select
+                        className="field-input"
+                        value={slot.row}
+                        aria-label="Overlay row"
+                        onChange={(e) => set("keyMap", s.keyMap.map((x, j) => (j === i ? { ...x, row: Number(e.target.value) } : x)))}
+                      >
+                        <option value={0}>Row 1</option>
+                        <option value={1}>Row 2</option>
+                        <option value={2}>Row 3</option>
+                      </select>
+                      <button
+                        className="btn sq quiet danger"
+                        aria-label={`Remove ${slot.label || slot.vk}`}
+                        onClick={() => set("keyMap", s.keyMap.filter((_, j) => j !== i))}
+                      >
+                        <X size={15} />
+                      </button>
+                    </div>
+                  ))}
+                </div>
+              )}
+            </div>
+          )}
+        </Section>
+
+        <Section icon={Archive} title="League settings backup">
+          <Opt title="Back up automatically when a game starts" hint="Saves PersistedSettings.json, input.ini and game.cfg from your League Config folder when a game starts and they changed since the last backup (keeps the last 20 automatic backups). Helpful for alt accounts or Riot patch resets.">
+            <Switch label="Back up automatically when a game starts" checked={s.autoBackupLeague} onChange={(v) => set("autoBackupLeague", v)} />
+          </Opt>
+          <Opt title="Manual backup" wide>
+            <input
+              className="field-input"
+              type="text"
+              placeholder="Label (e.g. Main account before patch)"
+              value={backupLabel}
+              onChange={(e) => setBackupLabel(e.target.value)}
+              aria-label="Backup label"
+            />
+            <button className="btn mark" disabled={backupBusy} onClick={createBackup}>
+              {backupBusy ? "Working…" : "Backup now"}
+            </button>
+          </Opt>
+          {backupMsg && (
+            <p className={`backup-msg ${backupMsg.ok ? "ally" : "enemy"}`} role="status">{backupMsg.text}</p>
+          )}
+          <div className="backups">
+            {backups.length === 0 ? (
+              <p className="muted">No League settings backups saved yet.</p>
+            ) : (
+              backups.map((b) => (
+                <div className="backup-row" key={b.id}>
+                  <div className="backup-info">
+                    <b>{b.label || (b.auto ? "Automatic backup" : "Backup")}{b.auto && <span className="badge">Auto</span>}</b>
+                    <small>{new Date(b.createdAt).toLocaleString()} · {b.files.join(", ")} · {bytes(b.sizeBytes)}</small>
+                  </div>
+                  <button className="btn" disabled={backupBusy} onClick={() => restoreBackup(b)} title="Copy these files back into League's Config folder">
+                    <RotateCcw size={13} aria-hidden />Restore
+                  </button>
+                  <button className="btn sq quiet danger" disabled={backupBusy} aria-label="Delete backup" onClick={() => removeBackup(b.id)}>
+                    <X size={15} />
+                  </button>
+                </div>
+              ))
+            )}
+          </div>
         </Section>
 
         <Section icon={Users} title="Teammates">

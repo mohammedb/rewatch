@@ -1,11 +1,13 @@
 // What sits under the timeline and in the Review tab: who was talking when, the
 // numbers of the game as lines, and the lists of deaths and team fights to walk through.
 
-import { ArrowDownWideNarrow, Bookmark, ChevronLeft, ChevronRight, Clapperboard, FolderOpen, Play, RotateCcw, Skull, Sparkles, Swords, Trophy, Users, X } from "lucide-react";
-import { useMemo, useRef, useState } from "react";
+import { ArrowDownWideNarrow, Bookmark, ChevronLeft, ChevronRight, Clapperboard, Film, FolderOpen, Play, Repeat, RotateCcw, Skull, Sparkles, Swords, Trophy, Users, X, Zap } from "lucide-react";
+import { useEffect, useMemo, useRef, useState } from "react";
+import { api } from "./api";
 import { Portrait } from "./ChampIcon";
-import { clock, laneName } from "./format";
-import type { Coach, DeathInsight, GameEvent, Highlight, Insights, PlayerRow, Span, Stats, TeamReview } from "./types";
+import { clock, gameClockAt, laneName } from "./format";
+import type { Coach, DeathInsight, GameEvent, Highlight, Insights, MatchFull, MatchSummary, PlayerRow, Span, Stats, TeamReview } from "./types";
+import type { KeyLog } from "./Views";
 
 // ------------------------------------------------------------------- fights
 
@@ -97,6 +99,13 @@ export function hintDetail(d: DeathInsight): string {
   ].join("\n");
 }
 
+function valueAt(ts: number[], vs: number[], t: number): number | null {
+  if (!ts.length || !vs.length) return null;
+  let i = 0;
+  while (i + 1 < ts.length && ts[i + 1] <= t) i++;
+  return vs[Math.min(i, vs.length - 1)];
+}
+
 interface ReviewTabProps {
   events: GameEvent[];
   fights: Fight[];
@@ -117,6 +126,9 @@ interface ReviewTabProps {
   savingClips: boolean;
   onSaveClips: () => void;
   onShowClip: (file: string) => void;
+  reel?: string | null;
+  buildingReel?: boolean;
+  onBuildReel?: () => void;
   /** Team reviews of fights, mine and teammates'. */
   team: TeamReview[];
   /** How many screens a team review would use (mine plus teammates' views that are ready). */
@@ -124,10 +136,43 @@ interface ReviewTabProps {
   /** The fight being reviewed right now, by its start time. */
   teamBusy: number | null;
   onTeamReview: (fight: Fight) => void;
+  stats?: Stats | null;
+  players?: PlayerRow[];
+  keys?: KeyLog | null;
+  cpm?: number[];
+  duration?: number;
 }
 
 /** Side-panel tab with the things worth walking through after a game. */
-export function ReviewTab({ events, fights, bookmarks, queue, champKey, onStart, insights, coach, hintState, hintError, onAskHints, highlights, savingClips, onSaveClips, onShowClip, team, teamViews, teamBusy, onTeamReview }: ReviewTabProps) {
+export function ReviewTab({
+  events,
+  fights,
+  bookmarks,
+  queue,
+  champKey,
+  onStart,
+  insights,
+  coach,
+  hintState,
+  hintError,
+  onAskHints,
+  highlights,
+  savingClips,
+  onSaveClips,
+  onShowClip,
+  reel: reelFile,
+  buildingReel,
+  onBuildReel,
+  team,
+  teamViews,
+  teamBusy,
+  onTeamReview,
+  stats,
+  players = [],
+  keys,
+  cpm = [],
+  duration = 0,
+}: ReviewTabProps) {
   const reel = useMemo<QueueItem[]>(() => highlights.map((h) => ({ t: h.t, start: h.start, end: h.end, label: h.label })), [highlights]);
   const unsaved = highlights.some((h) => !h.file);
   const [worstFirst, setWorstFirst] = useState(false);
@@ -146,8 +191,105 @@ export function ReviewTab({ events, fights, bookmarks, queue, champKey, onStart,
   const active = (title: string, i: number) => queue?.title === title && queue.idx === i;
   const nothing = deaths.length + fightList.length + marks.length + highlights.length === 0;
   const wanted = !coach || (deaths.length > 0 && !hasHints);
+
+  const me = players.find((p) => p.isMe);
+  const opponent = me?.position ? players.find((p) => p.team !== me.team && p.position === me.position) : undefined;
+
+  const summaryStats = useMemo(() => {
+    const meRow = me && stats ? stats.players.find((p) => p.name === me.name) : undefined;
+    const deadSamples = meRow?.dead?.filter(Boolean).length ?? 0;
+    const deadTotal = meRow?.dead?.length ?? 0;
+    const deadSec = deadSamples * 10;
+    const deadPct = deadTotal > 0 ? Math.round((deadSamples / deadTotal) * 100) : null;
+    const avgGold = stats?.gold.length ? Math.round(stats.gold.reduce((a, b) => a + b, 0) / stats.gold.length) : null;
+    const lastWard = meRow?.wardScore?.length ? meRow.wardScore[meRow.wardScore.length - 1] : null;
+    const avgCpm = cpm.length ? Math.round(cpm.reduce((a, b) => a + b, 0) / cpm.length) : null;
+    const avgKpm = keys && duration > 10 ? Math.round((keys.presses.length / duration) * 60) : null;
+    const avgApm = avgCpm !== null || avgKpm !== null ? (avgCpm ?? 0) + (avgKpm ?? 0) : null;
+    return { deadSec, deadPct, avgGold, lastWard, avgApm };
+  }, [me, stats, cpm, keys, duration]);
+
+  const preFightBits = (at: number, targetPlayerName?: string): string[] => {
+    const t0 = Math.max(0, at - 8);
+    const bits: string[] = [];
+    if (stats && me) {
+      const myRow = stats.players.find((p) => p.name === me.name);
+      const otherRow = targetPlayerName
+        ? stats.players.find((p) => p.name === targetPlayerName)
+        : opponent
+          ? stats.players.find((p) => p.name === opponent.name)
+          : undefined;
+      const myLv = myRow ? valueAt(stats.t, myRow.level, t0) : null;
+      const otherLv = otherRow ? valueAt(stats.t, otherRow.level, t0) : null;
+      if (myLv !== null) bits.push(otherLv !== null ? `Lv ${myLv} vs ${otherLv}` : `Lv ${myLv}`);
+      const unspent = valueAt(stats.t, stats.gold, t0);
+      if (unspent !== null && unspent >= 800) bits.push(`${Math.round(unspent)}g unspent`);
+    }
+    const recentBuy = [...events]
+      .reverse()
+      .find((e) => e.kind === "ItemPurchased" && e.mine && e.t <= at && e.t >= at - 75 && e.detail);
+    if (recentBuy) bits.push(`Bought ${recentBuy.detail}`);
+    if (keys) {
+      const summs = keys.summonerPresses.filter((s) => s.t >= at - 6 && s.t <= at + 0.5);
+      if (summs.length) {
+        const last = summs[summs.length - 1];
+        const dt = at - last.t;
+        bits.push(dt >= 0 ? `Used ${last.key} ${dt.toFixed(1)}s before` : `Used ${last.key} right after`);
+      }
+    }
+    return bits;
+  };
+
+  const hasSummary =
+    summaryStats.deadPct !== null ||
+    summaryStats.avgGold !== null ||
+    summaryStats.lastWard !== null ||
+    summaryStats.avgApm !== null ||
+    keys?.spaceHoldPct !== null && keys?.spaceHoldPct !== undefined;
+
   return (
     <div className="sidebody">
+      {hasSummary && (
+        <section className="statstrip" aria-label="Game mechanics and efficiency">
+          {summaryStats.deadPct !== null && (
+            <div>
+              <span>Grey screen</span>
+              <b>{clock(summaryStats.deadSec)} ({summaryStats.deadPct}%)</b>
+            </div>
+          )}
+          {summaryStats.avgGold !== null && (
+            <div>
+              <span>Avg unspent</span>
+              <b>{summaryStats.avgGold}g</b>
+            </div>
+          )}
+          {summaryStats.lastWard !== null && (
+            <div>
+              <span>Vision score</span>
+              <b>{Math.round(summaryStats.lastWard)}</b>
+            </div>
+          )}
+          {summaryStats.avgApm !== null && (
+            <div>
+              <span>Avg APM</span>
+              <b>{summaryStats.avgApm}</b>
+            </div>
+          )}
+          {keys && keys.spaceHoldPct !== null && (
+            <div>
+              <span>Space camera</span>
+              <b>{keys.spaceHoldPct}%</b>
+            </div>
+          )}
+          {keys && keys.aPresses > 0 && (
+            <div>
+              <span>Attack-move</span>
+              <b>{keys.aPresses}×</b>
+            </div>
+          )}
+        </section>
+      )}
+
       {coach && (
         <section className="coach">
           <h3><Sparkles size={15} aria-hidden />Coach's review</h3>
@@ -171,6 +313,13 @@ export function ReviewTab({ events, fights, bookmarks, queue, champKey, onStart,
           <header>
             <h3><Trophy size={15} aria-hidden />Highlights<span className="num">{highlights.length}</span></h3>
             <span className="grow" />
+            {onBuildReel && (
+              reelFile ? (
+                <button className="btn sq" aria-label="Show highlight reel in folder" title="Show stitched highlight reel in folder" onClick={() => onShowClip(reelFile)}><Film size={14} /></button>
+              ) : (
+                <button className="btn" disabled={buildingReel} onClick={onBuildReel} title="Stitch all highlights into one highlights_reel.mp4 with crossfades"><Film size={13} aria-hidden />{buildingReel ? "Stitching" : "Reel"}</button>
+              )
+            )}
             {unsaved ? (
               <button className="btn" disabled={savingClips} onClick={onSaveClips} title="Saves each highlight as a 1080p clip with game sound, Discord and your microphone, next to the recording"><Clapperboard size={13} aria-hidden />{savingClips ? "Saving" : "Save clips"}</button>
             ) : (
@@ -200,6 +349,8 @@ export function ReviewTab({ events, fights, bookmarks, queue, champKey, onStart,
 
           {deaths.map((d, i) => {
             const e = deathEvents[i];
+            const pre = preFightBits(d.t, e?.killer);
+            const lateSumm = keys?.summonerPresses.find((s) => s.t >= d.t - 3.5 && s.t <= d.t + 0.3);
             return (
               <button key={i} className={`moment ${active("Deaths", i) ? "now" : ""}`} onClick={() => onStart("Deaths", deaths, i)}>
                 <span className="t">{clock(d.t)}</span>
@@ -209,6 +360,8 @@ export function ReviewTab({ events, fights, bookmarks, queue, champKey, onStart,
                 </span>
                 <span className="txt" title={rows[i].hint ? hintDetail(rows[i].hint!) : undefined}>
                   {d.label}
+                  {lateSumm && <small className="hint bad"><Zap size={11} aria-hidden />{lateSumm.key} pressed {(d.t - lateSumm.t).toFixed(1)}s before death</small>}
+                  {pre.length > 0 && <small className="prefight">{pre.join(" · ")}</small>}
                   {rows[i].hint && <small className={`hint ${hintLine(rows[i].hint!).tone}`}><Sparkles size={11} aria-hidden />{hintLine(rows[i].hint!).text}</small>}
                   {(() => {
                     const said = coach?.deaths.find((c) => Math.abs(c.t - rows[i].e.t) < 1.5);
@@ -229,11 +382,15 @@ export function ReviewTab({ events, fights, bookmarks, queue, champKey, onStart,
           {fights.map((f, i) => {
             const won = f.ours > f.theirs;
             const even = f.ours === f.theirs;
+            const pre = preFightBits(f.start);
             const row = (
               <button className={`moment ${active("Fights", i) ? "now" : ""}`} onClick={() => onStart("Fights", fightList, i)}>
                 <span className="t">{clock(f.start)}</span>
                 <span className="pic"><b className={`tally ${even ? "" : won ? "ally" : "enemy"}`}>{f.ours} : {f.theirs}</b></span>
-                <span className="txt">{even ? "Even trade" : won ? "Won" : "Lost"}, {Math.max(1, Math.round(f.end - f.start))} s{f.kills.some((k) => k.role === "death") ? ", you died" : ""}</span>
+                <span className="txt">
+                  {even ? "Even trade" : won ? "Won" : "Lost"}, {Math.max(1, Math.round(f.end - f.start))} s{f.kills.some((k) => k.role === "death") ? ", you died" : ""}
+                  {pre.length > 0 && <small className="prefight">{pre.join(" · ")}</small>}
+                </span>
               </button>
             );
             const said = team.find((r) => Math.abs(r.t - f.start) < 6);
@@ -281,7 +438,21 @@ export function ReviewTab({ events, fights, bookmarks, queue, champKey, onStart,
 }
 
 /** The strip over the video while a walk-through is running. */
-export function QueueBar({ queue, onGo, onReplay, onClose }: { queue: Queue; onGo: (idx: number) => void; onReplay: () => void; onClose: () => void }) {
+export function QueueBar({
+  queue,
+  looping,
+  onToggleLoop,
+  onGo,
+  onReplay,
+  onClose,
+}: {
+  queue: Queue;
+  looping: boolean;
+  onToggleLoop: () => void;
+  onGo: (idx: number) => void;
+  onReplay: () => void;
+  onClose: () => void;
+}) {
   const item = queue.items[queue.idx];
   return (
     <div className="queuebar" role="group" aria-label={`${queue.title} walk-through`}>
@@ -289,6 +460,7 @@ export function QueueBar({ queue, onGo, onReplay, onClose }: { queue: Queue; onG
       <span>{clock(item.t)} · {item.label}</span>
       <button className="btn sq" disabled={queue.idx === 0} onClick={() => onGo(queue.idx - 1)} aria-label="Previous" title="Previous (P)"><ChevronLeft size={16} /></button>
       <button className="btn sq" onClick={onReplay} aria-label="Play this one again" title="Play this one again"><RotateCcw size={14} /></button>
+      <button className={`btn sq ${looping ? "on" : ""}`} aria-pressed={looping} onClick={onToggleLoop} aria-label="Loop this moment" title="Loop this moment (R)"><Repeat size={14} /></button>
       <button className="btn sq" disabled={queue.idx >= queue.items.length - 1} onClick={() => onGo(queue.idx + 1)} aria-label="Next" title="Next (N)"><ChevronRight size={16} /></button>
       <button className="btn sq quiet" onClick={onClose} aria-label="Stop the walk-through" title="Stop (Esc)"><X size={15} /></button>
     </div>
@@ -309,12 +481,17 @@ export interface VoiceRow {
 export const VOICE_COLORS = ["#f2c94c", "#5b8def", "#4fd1a5", "#c084fc", "#f59e6b"];
 export const DISCORD_COLOR = "#8a93a3";
 
-export type Metric = "cs" | "cspm" | "level" | "gold";
+export type Metric = "cs" | "cspm" | "level" | "gold" | "itemGold" | "goldDiff" | "killDiff" | "wards" | "apm";
 const METRICS: { key: Metric; label: string }[] = [
   { key: "cs", label: "CS" },
   { key: "cspm", label: "CS per minute" },
   { key: "level", label: "Level" },
-  { key: "gold", label: "Your gold" },
+  { key: "gold", label: "Unspent gold" },
+  { key: "itemGold", label: "Item gold" },
+  { key: "goldDiff", label: "Team gold diff" },
+  { key: "killDiff", label: "Team kill diff" },
+  { key: "wards", label: "Vision score" },
+  { key: "apm", label: "APM (clicks + keys)" },
 ];
 
 interface LanesProps {
@@ -330,53 +507,202 @@ interface LanesProps {
   versus: string;
   /** In-game seconds at a video time. */
   gameAt: (t: number) => number | null;
+  cpm?: number[];
+  cpmBucket?: number;
+  keys?: KeyLog | null;
+  currentId?: string;
+  compareGames?: MatchSummary[];
   onMetric: (m: Metric) => void;
   onVersus: (name: string) => void;
   onSeek: (t: number) => void;
 }
 
-function valueAt(ts: number[], vs: number[], t: number): number | null {
-  if (!ts.length || !vs.length) return null;
-  let i = 0;
-  while (i + 1 < ts.length && ts[i + 1] <= t) i++;
-  return vs[Math.min(i, vs.length - 1)];
-}
-
 /** Comms rows and the numbers graph, on the same time scale as the timeline above them. */
-export function Lanes({ duration, time, voice, showVoice, stats, showStats, players, metric, versus, gameAt, onMetric, onVersus, onSeek }: LanesProps) {
+export function Lanes({
+  duration,
+  time,
+  voice,
+  showVoice,
+  stats,
+  showStats,
+  players,
+  metric: wantedMetric,
+  versus,
+  gameAt,
+  cpm = [],
+  cpmBucket = 5,
+  keys,
+  currentId,
+  compareGames = [],
+  onMetric,
+  onVersus,
+  onSeek,
+}: LanesProps) {
   const ref = useRef<HTMLDivElement>(null);
   const dragging = useRef(false);
   const [hover, setHover] = useState<{ x: number; t: number } | null>(null);
+  const [compareId, setCompareId] = useState("");
+  const [compareMatch, setCompareMatch] = useState<MatchFull | null>(null);
+  const compareCache = useRef(new Map<string, MatchFull>());
+
+  useEffect(() => {
+    if (!compareId) {
+      setCompareMatch(null);
+      return;
+    }
+    const cached = compareCache.current.get(compareId);
+    if (cached) {
+      setCompareMatch(cached);
+      return;
+    }
+    let live = true;
+    api.getMatch(compareId).then((m) => {
+      compareCache.current.set(compareId, m);
+      if (live) setCompareMatch(m);
+    }).catch(() => {
+      if (live) setCompareMatch(null);
+    });
+    return () => {
+      live = false;
+    };
+  }, [compareId]);
+
   const total = duration || 1;
   const pct = (t: number) => (Math.min(Math.max(t, 0), total) / total) * 100;
 
   const me = players.find((p) => p.isMe);
   const opponent = me?.position ? players.find((p) => p.team !== me.team && p.position === me.position) : undefined;
   const other = players.find((p) => p.name === versus && !p.isMe) ?? opponent;
-  const series = useMemo(() => {
-    if (!stats || !me) return null;
+
+  const hasItemGold = !!stats?.players.some((p) => (p.itemGold?.length ?? 0) > 0);
+  const hasWards = !!stats?.players.some((p) => (p.wardScore?.length ?? 0) > 0);
+  const hasApm = cpm.length > 0 || (keys?.presses.length ?? 0) > 0;
+
+  const availableMetrics = useMemo(
+    () =>
+      METRICS.filter((m) => {
+        if (m.key === "itemGold" || m.key === "goldDiff") return hasItemGold;
+        if (m.key === "wards") return hasWards;
+        if (m.key === "apm") return hasApm;
+        return true;
+      }),
+    [hasItemGold, hasWards, hasApm],
+  );
+  // The chosen metric is remembered across games; older recordings lack some of them.
+  const metric: Metric = availableMetrics.some((m) => m.key === wantedMetric) ? wantedMetric : "cs";
+
+  const extractSeries = (st: Stats, ps: PlayerRow[], m: Metric, targetName: string | undefined, gAt: (t: number) => number | null): number[] | null => {
+    const myPlayer = ps.find((p) => p.isMe);
+    if (!myPlayer) return null;
+    if (m === "gold") return st.gold;
+    if (m === "goldDiff" || m === "killDiff") {
+      return st.t.map((_, i) => {
+        let ours = 0;
+        let theirs = 0;
+        for (const row of st.players) {
+          const pInfo = ps.find((p) => p.name === row.name);
+          const val = m === "goldDiff" ? (row.itemGold?.[i] ?? 0) : (row.kills[i] ?? 0);
+          if (pInfo?.team === myPlayer.team) ours += val;
+          else theirs += val;
+        }
+        return ours - theirs;
+      });
+    }
     const pick = (name: string | undefined): number[] | null => {
-      const row = stats.players.find((p) => p.name === name);
+      const row = st.players.find((p) => p.name === name);
       if (!row) return null;
-      if (metric === "level") return row.level;
-      if (metric === "cs") return row.cs;
-      if (metric === "cspm") {
+      if (m === "level") return row.level;
+      if (m === "cs") return row.cs;
+      if (m === "itemGold") return row.itemGold ?? null;
+      if (m === "wards") return row.wardScore ?? null;
+      if (m === "cspm") {
         return row.cs.map((v, i) => {
-          const g = gameAt(stats.t[i]);
+          const g = gAt(st.t[i]);
           return g !== null && g >= 60 ? Math.round((v / (g / 60)) * 10) / 10 : 0;
         });
       }
       return null;
     };
-    const mine = metric === "gold" ? stats.gold : pick(me.name);
-    const theirs = metric === "gold" ? null : pick(other?.name);
-    if (!mine) return null;
-    const top = Math.max(1, ...mine, ...(theirs ?? []));
-    return { mine, theirs, top };
-  }, [stats, me, other, metric, gameAt]);
+    return pick(targetName);
+  };
+
+  const series = useMemo(() => {
+    const ts = stats?.t ?? (metric === "apm" && hasApm ? Array.from({ length: Math.max(2, cpm.length) }, (_, i) => i * cpmBucket) : null);
+    if (!ts || !ts.length) return null;
+
+    let mine: number[] | null = null;
+    let theirs: number[] | null = null;
+    if (metric === "apm") {
+      if (!hasApm) return null;
+      mine = ts.map((t) => {
+        const b = Math.floor(t / cpmBucket);
+        const clickRate = cpm[b] ?? 0;
+        const keyRate = keys ? keys.presses.filter((p) => p >= b * cpmBucket && p < (b + 1) * cpmBucket).length * (60 / cpmBucket) : 0;
+        return Math.round(clickRate + keyRate);
+      });
+    } else if (stats && me) {
+      mine = extractSeries(stats, players, metric, me.name, gameAt);
+      if (metric !== "gold" && metric !== "goldDiff" && metric !== "killDiff") {
+        theirs = extractSeries(stats, players, metric, other?.name, gameAt);
+      }
+    }
+    if (!mine || !mine.length) return null;
+
+    // Cross-game comparison aligned by in-game clock.
+    let comp: number[] | null = null;
+    if (compareMatch?.stats && metric !== "apm") {
+      const cStats = compareMatch.stats;
+      const cPlayers = compareMatch.game?.players ?? [];
+      const cMe = compareMatch.game?.me;
+      const cGameAt = (t: number) => gameClockAt(compareMatch.clock ?? [], t);
+      const rawComp = extractSeries(cStats, cPlayers, metric, cMe?.name, cGameAt);
+      if (rawComp && rawComp.length) {
+        const cGameTimes = cStats.t.map((t) => cGameAt(t) ?? t);
+        comp = ts.map((t) => {
+          const g = gameAt(t) ?? t;
+          return valueAt(cGameTimes, rawComp, g) ?? rawComp[0];
+        });
+      }
+    }
+
+    const allVals = [...mine, ...(theirs ?? []), ...(comp ?? [])];
+    const minVal = Math.min(0, ...allVals);
+    const maxVal = Math.max(1, ...allVals);
+    let lo = 0;
+    let hi = maxVal;
+    if (minVal < 0) {
+      const span = Math.max(1, Math.abs(minVal), Math.abs(maxVal));
+      lo = -span;
+      hi = span;
+    }
+    return { ts, mine, theirs, comp, lo, hi };
+  }, [stats, me, other, players, metric, gameAt, hasApm, cpm, cpmBucket, keys, compareMatch]);
+
+  // CS@10 and CS@15 benchmarks
+  const benchmarks = useMemo(() => {
+    if (!stats || !me) return null;
+    const myRow = stats.players.find((p) => p.name === me.name);
+    if (!myRow) return null;
+    const oppRow = opponent ? stats.players.find((p) => p.name === opponent.name) : undefined;
+    const atMin = (sec: number) => {
+      for (let i = 0; i < stats.t.length; i++) {
+        const g = gameAt(stats.t[i]);
+        if (g !== null && g >= sec) {
+          const myCs = myRow.cs[i];
+          const oppCs = oppRow?.cs[i];
+          return { cs: myCs, diff: oppCs !== undefined ? myCs - oppCs : null };
+        }
+      }
+      return null;
+    };
+    const cs10 = atMin(600);
+    const cs15 = atMin(900);
+    if (!cs10 && !cs15) return null;
+    return { cs10, cs15 };
+  }, [stats, me, opponent, gameAt]);
 
   const voiceOn = showVoice && voice.length > 0;
-  const statsOn = showStats && !!series && !!stats;
+  const statsOn = showStats && !!series;
   if (!voiceOn && !statsOn) return null;
 
   const at = (clientX: number) => {
@@ -385,9 +711,17 @@ export function Lanes({ duration, time, voice, showVoice, stats, showStats, play
     return { x, t: (x / r.width) * total };
   };
   const shown = hover?.t ?? time;
-  const path = (vs: number[], top: number) => stats!.t.map((t, i) => `${(pct(t) * 10).toFixed(1)},${(58 - (vs[i] / top) * 52).toFixed(1)}`).join(" ");
+  const yOf = (v: number, lo: number, hi: number) => 58 - ((v - lo) / Math.max(1e-6, hi - lo)) * 52;
+  const path = (ts: number[], vs: number[], lo: number, hi: number) => ts.map((t, i) => `${(pct(t) * 10).toFixed(1)},${yOf(vs[i], lo, hi).toFixed(1)}`).join(" ");
   const talking = voiceOn ? voice.filter((r) => r.spans.some((s) => s[0] <= shown && shown <= s[1])).map((r) => r.label) : [];
-  const fmt = (v: number | null) => (v === null ? "–" : metric === "cspm" ? v.toFixed(1) : String(Math.round(v)));
+  const fmt = (v: number | null) => {
+    if (v === null) return "–";
+    if (metric === "cspm") return v.toFixed(1);
+    if ((metric === "goldDiff" || metric === "killDiff") && v > 0) return `+${Math.round(v)}`;
+    return String(Math.round(v));
+  };
+  const zeroY = series ? yOf(0, series.lo, series.hi) : 32;
+  const otherGames = compareGames.filter((g) => g.id !== currentId && g.mode !== "manual" && g.game?.me);
 
   return (
     <div className="lanes">
@@ -399,22 +733,45 @@ export function Lanes({ duration, time, voice, showVoice, stats, showStats, play
             ))}
           </div>
         )}
+        {benchmarks && (
+          <div className="bench" title="CS benchmarks at 10 and 15 in-game minutes">
+            {benchmarks.cs10 && (
+              <span>CS@10 <b>{benchmarks.cs10.cs}</b>{benchmarks.cs10.diff !== null && <i className={benchmarks.cs10.diff >= 0 ? "ally" : "enemy"}> ({benchmarks.cs10.diff >= 0 ? "+" : ""}{benchmarks.cs10.diff})</i>}</span>
+            )}
+            {benchmarks.cs15 && (
+              <span>CS@15 <b>{benchmarks.cs15.cs}</b>{benchmarks.cs15.diff !== null && <i className={benchmarks.cs15.diff >= 0 ? "ally" : "enemy"}> ({benchmarks.cs15.diff >= 0 ? "+" : ""}{benchmarks.cs15.diff})</i>}</span>
+            )}
+          </div>
+        )}
         <span className="grow" />
         {statsOn && (
           <div className="stat-ctl">
             <span className="read">
-              <b style={{ color: "var(--mark)" }}>You {fmt(valueAt(stats!.t, series!.mine, shown))}</b>
-              {series!.theirs && other && <b className={other.team === me?.team ? "ally" : "enemy"}>{other.champion} {fmt(valueAt(stats!.t, series!.theirs, shown))}</b>}
+              <b style={{ color: "var(--mark)" }}>You {fmt(valueAt(series!.ts, series!.mine, shown))}</b>
+              {series!.theirs && other && <b className={other.team === me?.team ? "ally" : "enemy"}>{other.champion} {fmt(valueAt(series!.ts, series!.theirs, shown))}</b>}
+              {series!.comp && compareMatch?.game?.me && (
+                <b style={{ color: "var(--epic)" }}>{compareMatch.game.me.champion} (prev) {fmt(valueAt(series!.ts, series!.comp, shown))}</b>
+              )}
               <span className="muted">at {clock(shown)}</span>
             </span>
             <select className="field-input" value={metric} aria-label="What the graph shows" onChange={(e) => onMetric(e.target.value as Metric)}>
-              {METRICS.map((m) => <option key={m.key} value={m.key}>{m.label}</option>)}
+              {availableMetrics.map((m) => <option key={m.key} value={m.key}>{m.label}</option>)}
             </select>
-            {metric !== "gold" && (
+            {metric !== "gold" && metric !== "goldDiff" && metric !== "killDiff" && metric !== "apm" && (
               <select className="field-input" value={other?.name ?? ""} aria-label="Compare with" onChange={(e) => onVersus(e.target.value)}>
                 {!other && <option value="">Compare with…</option>}
                 {players.filter((p) => !p.isMe).map((p) => (
                   <option key={p.name} value={p.name}>{p.champion}{laneName(p.position) ? ` (${laneName(p.position)})` : ""}{p === opponent ? ", your lane" : ""}</option>
+                ))}
+              </select>
+            )}
+            {otherGames.length > 0 && metric !== "apm" && (
+              <select className="field-input" value={compareId} aria-label="Compare with another game" onChange={(e) => setCompareId(e.target.value)}>
+                <option value="">vs Game…</option>
+                {otherGames.slice(0, 20).map((g) => (
+                  <option key={g.id} value={g.id}>
+                    {g.game.me?.champion} {g.game.result ? `(${g.game.result})` : ""} · {new Date(g.startedEpochMs).toLocaleDateString([], { month: "short", day: "numeric" })}
+                  </option>
                 ))}
               </select>
             )}
@@ -454,12 +811,13 @@ export function Lanes({ duration, time, voice, showVoice, stats, showStats, play
         )}
         {statsOn && (
           <svg className="statgraph" viewBox="0 0 1000 60" preserveAspectRatio="none" role="img" aria-label={`${METRICS.find((m) => m.key === metric)?.label} over the game`}>
-            <line x1="0" x2="1000" y1="32" y2="32" stroke="var(--line)" strokeWidth="1" vectorEffect="non-scaling-stroke" />
-            {series!.theirs && <polyline points={path(series!.theirs, series!.top)} fill="none" stroke={other?.team === me?.team ? "var(--ally)" : "var(--enemy)"} strokeWidth="2" vectorEffect="non-scaling-stroke" />}
-            <polyline points={path(series!.mine, series!.top)} fill="none" stroke="var(--mark)" strokeWidth="2" vectorEffect="non-scaling-stroke" />
+            <line x1="0" x2="1000" y1={zeroY} y2={zeroY} stroke="var(--line)" strokeWidth="1" vectorEffect="non-scaling-stroke" />
+            {series!.theirs && <polyline points={path(series!.ts, series!.theirs, series!.lo, series!.hi)} fill="none" stroke={other?.team === me?.team ? "var(--ally)" : "var(--enemy)"} strokeWidth="2" vectorEffect="non-scaling-stroke" />}
+            {series!.comp && <polyline points={path(series!.ts, series!.comp, series!.lo, series!.hi)} fill="none" stroke="var(--epic)" strokeWidth="2" strokeDasharray="5 3" vectorEffect="non-scaling-stroke" />}
+            <polyline points={path(series!.ts, series!.mine, series!.lo, series!.hi)} fill="none" stroke="var(--mark)" strokeWidth="2" vectorEffect="non-scaling-stroke" />
           </svg>
         )}
-        {statsOn && <span className="ymax">{fmt(series!.top)}</span>}
+        {statsOn && <span className="ymax">{fmt(series!.hi)}</span>}
         {hover && <div className="ghost" style={{ left: hover.x }} />}
         <div className="head" style={{ left: `${pct(time)}%` }} />
       </div>

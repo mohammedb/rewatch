@@ -44,6 +44,36 @@ fn read_review(dir: &Path) -> Value {
     read_json(&dir.join("review.json")).unwrap_or_else(default_review)
 }
 
+fn source_video(dir: &Path) -> PathBuf {
+    if let Some(doc) = read_json(&dir.join("match.json")) {
+        if let Some(name) = doc.get("video").and_then(|v| v.as_str()) {
+            let p = dir.join(name);
+            if p.exists() {
+                return p;
+            }
+        }
+    }
+    let game = dir.join("game.mp4");
+    if game.exists() {
+        return game;
+    }
+    let reel = dir.join(crate::highlights::REEL_FILE);
+    if reel.exists() {
+        return reel;
+    }
+    game
+}
+
+/// `discord.m4a` or `mic.m4a`, if it exists and still lines up with the video. A game
+/// trimmed to its highlight reel has those voices mixed into the reel instead.
+fn side_track(dir: &Path, name: &str) -> Option<PathBuf> {
+    let trimmed = read_json(&dir.join("match.json"))
+        .and_then(|d| d.get("trimmedToHighlights").and_then(|v| v.as_bool()))
+        .unwrap_or(false);
+    let file = dir.join(format!("{name}.m4a"));
+    (!trimmed && file.exists()).then_some(file)
+}
+
 /// All recordings, newest first, without the heavy per-event data.
 pub fn list(settings: &Settings) -> Vec<Value> {
     let mut out = Vec::new();
@@ -73,12 +103,26 @@ pub fn list(settings: &Settings) -> Vec<Value> {
             o.insert("dir".into(), json!(dir.to_string_lossy()));
             o.insert("sizeBytes".into(), json!(dir_size(&dir)));
             o.insert("keep".into(), review.get("keep").cloned().unwrap_or(json!(false)));
+            o.insert("tags".into(), review.get("tags").cloned().unwrap_or_else(|| json!([])));
+            let notes_text: String = review
+                .get("notes")
+                .and_then(|v| v.as_array())
+                .map(|arr| {
+                    arr.iter()
+                        .filter_map(|n| n.get("text").and_then(|t| t.as_str()))
+                        .collect::<Vec<_>>()
+                        .join("\n")
+                })
+                .unwrap_or_default();
+            o.insert("notesText".into(), json!(notes_text));
             o.insert(
                 "noteCount".into(),
                 json!(review.get("notes").and_then(|v| v.as_array()).map(|a| a.len()).unwrap_or(0)),
             );
             let thumb = dir.join("thumb.jpg");
             o.insert("thumb".into(), if thumb.exists() { json!(thumb.to_string_lossy()) } else { Value::Null });
+            let reel = dir.join(crate::highlights::REEL_FILE);
+            o.insert("reel".into(), if reel.exists() { json!(reel.to_string_lossy()) } else { Value::Null });
         }
         out.push(doc);
     }
@@ -105,6 +149,8 @@ pub fn get(settings: &Settings, id: &str) -> Result<Value> {
         o.insert("team".into(), json!(crate::team::load(&dir)));
         let highlights = crate::highlights::list(&Value::Object(o.clone()), &dir);
         o.insert("highlights".into(), json!(highlights));
+        let reel = dir.join(crate::highlights::REEL_FILE);
+        o.insert("reel".into(), if reel.exists() { json!(reel.to_string_lossy()) } else { Value::Null });
     }
     Ok(doc)
 }
@@ -123,6 +169,155 @@ pub fn highlights(settings: &Settings, id: &str, save: bool, stop: &dyn Fn() -> 
     }
     let doc = read_json(&dir.join("match.json")).ok_or_else(|| anyhow!("match.json is unreadable"))?;
     Ok(crate::highlights::list(&doc, &dir))
+}
+
+/// Stitch a game's highlights into `highlights_reel.mp4`. In Highlights-only mode the
+/// full recording is removed later, by `highlights::trim_due`.
+pub fn build_highlight_reel(settings: &Settings, id: &str, stop: &dyn Fn() -> bool) -> Result<String> {
+    let dir = match_dir(settings, id)?;
+    let out = crate::highlights::build_reel(settings, &dir, stop)?;
+    Ok(out.to_string_lossy().to_string())
+}
+
+/// Compact cross-game metrics for the library Trends view.
+pub fn trends(settings: &Settings) -> Vec<Value> {
+    let mut out = Vec::new();
+    let Some(root) = settings.recordings_path() else { return out };
+    let Ok(entries) = fs::read_dir(&root) else { return out };
+    for entry in entries.flatten() {
+        let dir = entry.path();
+        let Some(doc) = read_json(&dir.join("match.json")) else { continue };
+        let Some(id) = doc.get("id").and_then(|v| v.as_str()) else { continue };
+        let game = doc.get("game").cloned().unwrap_or(Value::Null);
+        let me = game.get("me").cloned().unwrap_or(Value::Null);
+        let champion = me.get("champion").and_then(|v| v.as_str()).unwrap_or("").to_string();
+        if champion.is_empty() {
+            continue;
+        }
+        let my_name = me.get("name").and_then(|v| v.as_str()).unwrap_or("").to_string();
+        let my_team = me.get("team").and_then(|v| v.as_str()).unwrap_or("").to_string();
+        let position = me.get("position").and_then(|v| v.as_str()).unwrap_or("").to_string();
+        let kills = me.get("kills").and_then(|v| v.as_i64()).unwrap_or(0);
+        let deaths = me.get("deaths").and_then(|v| v.as_i64()).unwrap_or(0);
+        let assists = me.get("assists").and_then(|v| v.as_i64()).unwrap_or(0);
+        let cs = me.get("cs").and_then(|v| v.as_i64()).unwrap_or(0);
+        let wards = me.get("wards").and_then(|v| v.as_f64());
+        let length = game
+            .get("length")
+            .and_then(|v| v.as_f64())
+            .or_else(|| doc.get("duration").and_then(|v| v.as_f64()))
+            .unwrap_or(0.0);
+
+        let allies: Vec<Value> = game
+            .get("players")
+            .and_then(|v| v.as_array())
+            .map(|ps| {
+                ps.iter()
+                    .filter(|p| {
+                        p.get("isMe").and_then(|v| v.as_bool()) != Some(true)
+                            && !my_team.is_empty()
+                            && p.get("team").and_then(|v| v.as_str()) == Some(my_team.as_str())
+                    })
+                    .filter_map(|p| {
+                        let name = p.get("name").and_then(|v| v.as_str()).unwrap_or("").trim();
+                        (!name.is_empty()).then(|| {
+                            json!({
+                                "name": name,
+                                "champion": p.get("champion").and_then(|v| v.as_str()).unwrap_or(""),
+                            })
+                        })
+                    })
+                    .collect()
+            })
+            .unwrap_or_default();
+
+        // CS@10 / CS@15 and dead-time % from stats + clock if present.
+        let (mut cs10, mut cs15, mut dead_pct) = (None::<i64>, None::<i64>, None::<f64>);
+        if let (Some(stats), Some(clock)) = (doc.get("stats"), doc.get("clock").and_then(|c| c.as_array())) {
+            let t_arr = stats.get("t").and_then(|v| v.as_array());
+            let my_row = stats.get("players").and_then(|v| v.as_array()).and_then(|ps| {
+                ps.iter().find(|p| p.get("name").and_then(|n| n.as_str()) == Some(my_name.as_str()))
+            });
+            if let (Some(ts), Some(row)) = (t_arr, my_row) {
+                let to_game = |vt: f64| -> f64 {
+                    if clock.is_empty() {
+                        return vt;
+                    }
+                    let mut best_i = 0;
+                    for (idx, c) in clock.iter().enumerate() {
+                        if c.get(0).and_then(|x| x.as_f64()).unwrap_or(0.0) <= vt {
+                            best_i = idx;
+                        }
+                    }
+                    let c0 = clock[best_i].get(0).and_then(|x| x.as_f64()).unwrap_or(0.0);
+                    let g0 = clock[best_i].get(1).and_then(|x| x.as_f64()).unwrap_or(0.0);
+                    g0 + (vt - c0)
+                };
+                if let Some(cs_arr) = row.get("cs").and_then(|v| v.as_array()) {
+                    for (i, t) in ts.iter().enumerate() {
+                        let Some(vt) = t.as_f64() else { continue };
+                        let gt = to_game(vt);
+                        let val = cs_arr.get(i).and_then(|x| x.as_i64());
+                        if gt >= 600.0 && cs10.is_none() {
+                            cs10 = val;
+                        }
+                        if gt >= 900.0 && cs15.is_none() {
+                            cs15 = val;
+                        }
+                    }
+                }
+                if let Some(dead_arr) = row.get("dead").and_then(|v| v.as_array()) {
+                    if !dead_arr.is_empty() {
+                        let d = dead_arr.iter().filter(|x| x.as_bool() == Some(true)).count();
+                        dead_pct = Some((d as f64 / dead_arr.len() as f64) * 100.0);
+                    }
+                }
+            }
+        }
+
+        let insights = crate::insight::load(&dir);
+        let mut death_causes: Vec<String> = Vec::new();
+        let mut avoid_vals: Vec<f64> = Vec::new();
+        if let Some(deaths_arr) = insights.as_ref().and_then(|v| v.get("deaths")).and_then(|v| v.as_array()) {
+            for d in deaths_arr {
+                if let Some(c) = d.get("cause").and_then(|x| x.as_str()).filter(|s| !s.is_empty()) {
+                    death_causes.push(c.to_string());
+                }
+                if let Some(a) = d.get("avoidable").and_then(|x| x.as_f64()) {
+                    avoid_vals.push(a);
+                }
+            }
+        }
+        let avg_avoidable = (!avoid_vals.is_empty()).then(|| avoid_vals.iter().sum::<f64>() / avoid_vals.len() as f64);
+
+        let review = read_review(&dir);
+        out.push(json!({
+            "id": id,
+            "startedEpochMs": doc.get("startedEpochMs"),
+            "queueId": game.get("queueId"),
+            "queueName": game.get("queueName"),
+            "result": game.get("result"),
+            "champion": champion,
+            "championKey": me.get("championKey"),
+            "position": position,
+            "kills": kills,
+            "deaths": deaths,
+            "assists": assists,
+            "cs": cs,
+            "wards": wards,
+            "length": length,
+            "cs10": cs10,
+            "cs15": cs15,
+            "deadPct": dead_pct,
+            "allies": allies,
+            "tags": review.get("tags").cloned().unwrap_or_else(|| json!([])),
+            "keep": review.get("keep").cloned().unwrap_or(json!(false)),
+            "deathCauses": death_causes,
+            "avgAvoidable": avg_avoidable,
+        }));
+    }
+    out.sort_by(|a, b| b["id"].as_str().cmp(&a["id"].as_str()));
+    out
 }
 
 /// Review one team fight of a recording from every view given.
@@ -185,53 +380,124 @@ pub fn enforce_quota(settings: &Settings, protect: Option<&str>) -> Vec<String> 
     removed
 }
 
+/// Compute a video bitrate (in kbps) so a clip of `len_secs` with `audio_kbps` audio
+/// stays safely under `max_mb` MB (with ~7% margin for MP4 container overhead).
+pub fn target_video_kbps(len_secs: f64, max_mb: f64, audio_kbps: u32) -> u32 {
+    let total_bits = max_mb.max(0.5) * 1_000_000.0 * 8.0 * 0.93;
+    let total_kbps = total_bits / len_secs.max(1.0) / 1000.0;
+    (total_kbps - audio_kbps as f64).max(180.0).round() as u32
+}
+
+/// Video and audio bitrates (kbps) for a clip that must fit in `max_mb`, or an error
+/// saying how long the clip may be when even the lowest usable bitrate would not fit.
+fn capped_rates(len_secs: f64, max_mb: f64, has_audio: bool) -> Result<(u32, u32)> {
+    const MIN_VIDEO_KBPS: f64 = 180.0;
+    let budget_kbps = max_mb.max(0.5) * 8000.0 * 0.93 / len_secs.max(1.0);
+    let audio = if !has_audio { 0 } else if budget_kbps < 1028.0 { 96 } else { 128 };
+    if budget_kbps - (audio as f64) < MIN_VIDEO_KBPS {
+        let longest = (max_mb.max(0.5) * 8000.0 * 0.93 / (MIN_VIDEO_KBPS + audio as f64)).floor();
+        return Err(anyhow!("A clip under {max_mb:.0} MB can be at most {longest:.0} seconds long. Mark a shorter stretch."));
+    }
+    Ok((target_video_kbps(len_secs, max_mb, audio), audio))
+}
+
 /// Cut `start..end` (video seconds) into a standalone MP4 with the chosen sound
-/// tracks mixed together. Video is copied, not re-encoded, so this is fast.
-pub fn export_clip(settings: &Settings, id: &str, start: f64, end: f64, tracks: &[String]) -> Result<String> {
+/// tracks mixed together. Without `max_mb`, video is stream-copied (fast). With
+/// `max_mb` (e.g. 10 MB or 50 MB for Discord), video is bitrate-capped to fit.
+pub fn export_clip(
+    settings: &Settings,
+    id: &str,
+    start: f64,
+    end: f64,
+    tracks: &[String],
+    max_mb: Option<f64>,
+) -> Result<String> {
     let dir = match_dir(settings, id)?;
     let (ffmpeg, _) = settings.ffmpeg_tools();
     let len = (end - start).max(0.5);
     let clips = dir.parent().unwrap_or(&dir).join("Clips");
     fs::create_dir_all(&clips)?;
     let s = start.max(0.0) as u64;
-    let out = clips.join(format!("{id}_{:02}m{:02}s_{:.0}s.mp4", s / 60, s % 60, len));
+    let suffix = max_mb.map(|mb| format!("_{}mb", mb.round() as u32)).unwrap_or_default();
+    let out = clips.join(format!("{id}_{:02}m{:02}s_{:.0}s{suffix}.mp4", s / 60, s % 60, len));
     let p = |x: &Path| x.to_string_lossy().to_string();
     let seek = |args: &mut Vec<String>, file: &Path| {
         args.extend(["-ss".into(), format!("{:.3}", start.max(0.0)), "-t".into(), format!("{len:.3}"), "-i".into(), p(file)]);
     };
 
-    let mut args: Vec<String> = ["-y", "-hide_banner", "-loglevel", "error"].map(String::from).to_vec();
-    seek(&mut args, &dir.join("game.mp4"));
+    let mut inputs: Vec<String> = ["-y", "-hide_banner", "-loglevel", "error"].map(String::from).to_vec();
+    seek(&mut inputs, &source_video(&dir));
     let mut labels: Vec<String> = Vec::new();
     if tracks.iter().any(|t| t == "game") {
         labels.push("[0:a]".into());
     }
     let mut next_input = 1;
     for name in ["discord", "mic"] {
-        let file = dir.join(format!("{name}.m4a"));
-        if tracks.iter().any(|t| t == name) && file.exists() {
-            seek(&mut args, &file);
+        let Some(file) = side_track(&dir, name) else { continue };
+        if tracks.iter().any(|t| t == name) {
+            seek(&mut inputs, &file);
             labels.push(format!("[{next_input}:a]"));
             next_input += 1;
         }
     }
-    args.extend(["-map".into(), "0:v".into(), "-c:v".into(), "copy".into()]);
-    match labels.len() {
-        0 => args.push("-an".into()),
-        1 => args.extend(["-map".into(), labels[0].trim_matches(|c| c == '[' || c == ']').to_string()]),
-        n => args.extend([
-            "-filter_complex".into(),
-            format!("{}amix=inputs={n}:normalize=0[a]", labels.join("")),
-            "-map".into(),
-            "[a]".into(),
-        ]),
+
+    let Some(mb) = max_mb.filter(|m| *m > 0.0) else {
+        let mut args = inputs;
+        args.extend(["-map".into(), "0:v".into(), "-c:v".into(), "copy".into()]);
+        match labels.len() {
+            0 => args.push("-an".into()),
+            1 => args.extend(["-map".into(), labels[0].trim_matches(|c| c == '[' || c == ']').to_string()]),
+            n => args.extend([
+                "-filter_complex".into(),
+                format!("{}amix=inputs={n}:normalize=0[a]", labels.join("")),
+                "-map".into(),
+                "[a]".into(),
+            ]),
+        }
+        if !labels.is_empty() {
+            args.extend(["-c:a".into(), "aac".into(), "-b:a".into(), "192k".into()]);
+        }
+        args.extend(["-movflags".into(), "+faststart".into(), p(&out)]);
+        run_tool(&ffmpeg, &args)?;
+        return Ok(p(&out));
+    };
+
+    // Target-size Discord encode: bitrate-capped H.264.
+    let (v_kbps, audio_kbps) = capped_rates(len, mb, !labels.is_empty())?;
+    let max_h = if v_kbps < 1800 { 720 } else { 1080 };
+    let v_rate = format!("{v_kbps}k");
+    let v_buf = format!("{}k", v_kbps * 2);
+
+    let mut graph = format!("[0:v]scale=-2:'min({max_h},ih)',format=yuv420p[v]");
+    if labels.len() > 1 {
+        graph += &format!(";{}amix=inputs={}:normalize=0[a]", labels.join(""), labels.len());
     }
-    if !labels.is_empty() {
-        args.extend(["-c:a".into(), "aac".into(), "-b:a".into(), "192k".into()]);
+
+    let mut last = anyhow!("no encoder");
+    for enc in [
+        vec!["-c:v", "h264_nvenc", "-preset", "p5", "-rc", "vbr", "-b:v", &v_rate, "-maxrate", &v_rate, "-bufsize", &v_buf],
+        vec!["-c:v", "h264_amf", "-quality", "balanced", "-rc", "vbr_peak", "-b:v", &v_rate, "-maxrate", &v_rate, "-bufsize", &v_buf],
+        vec!["-c:v", "h264_qsv", "-b:v", &v_rate, "-maxrate", &v_rate, "-bufsize", &v_buf],
+        vec!["-c:v", "libx264", "-preset", "medium", "-b:v", &v_rate, "-maxrate", &v_rate, "-bufsize", &v_buf],
+    ] {
+        let mut args = inputs.clone();
+        args.extend(["-filter_complex".into(), graph.clone(), "-map".into(), "[v]".into()]);
+        match labels.len() {
+            0 => args.push("-an".into()),
+            1 => args.extend(["-map".into(), labels[0].trim_matches(|c| c == '[' || c == ']').to_string()]),
+            _ => args.extend(["-map".into(), "[a]".into()]),
+        }
+        if !labels.is_empty() {
+            args.extend(["-c:a".into(), "aac".into(), "-b:a".into(), format!("{audio_kbps}k")]);
+        }
+        args.extend(enc.into_iter().map(String::from));
+        args.extend(["-movflags".into(), "+faststart".into(), p(&out)]);
+        match run_tool(&ffmpeg, &args) {
+            Ok(_) => return Ok(p(&out)),
+            Err(e) => last = e,
+        }
     }
-    args.push(p(&out));
-    run_tool(&ffmpeg, &args)?;
-    Ok(p(&out))
+    Err(last)
 }
 
 /// One MP4 holding the video and every sound track as separate, named tracks, for
@@ -242,11 +508,10 @@ pub fn export_full(settings: &Settings, id: &str) -> Result<String> {
     let p = |x: &Path| x.to_string_lossy().to_string();
     let out = dir.join(format!("{id}_all-tracks.mp4"));
     let mut args: Vec<String> = ["-y", "-hide_banner", "-loglevel", "error", "-i"].map(String::from).to_vec();
-    args.push(p(&dir.join("game.mp4")));
+    args.push(p(&source_video(&dir)));
     let mut titles = vec!["Game"];
     for (name, title) in [("discord", "Discord"), ("mic", "Microphone (raw)")] {
-        let file = dir.join(format!("{name}.m4a"));
-        if file.exists() {
+        if let Some(file) = side_track(&dir, name) {
             args.extend(["-i".into(), p(&file)]);
             titles.push(title);
         }
@@ -291,6 +556,7 @@ pub fn split_layout(n: usize) -> (u32, u32, u32, u32, String) {
 /// Cut `start..end` (my video's seconds) into one MP4 showing my view and up to four
 /// teammates' views side by side, each on the same game moment and labelled.
 /// `listen` picks whose game sound is used: None for mine, or an index into `views`.
+#[allow(clippy::too_many_arguments)]
 pub fn export_split(
     settings: &Settings,
     id: &str,
@@ -300,6 +566,7 @@ pub fn export_split(
     tracks: &[String],
     listen: Option<usize>,
     my_label: &str,
+    max_mb: Option<f64>,
 ) -> Result<String> {
     let dir = match_dir(settings, id)?;
     if views.is_empty() || views.len() > 4 {
@@ -318,14 +585,15 @@ pub fn export_split(
     let clips = dir.parent().unwrap_or(&dir).join("Clips");
     fs::create_dir_all(&clips)?;
     let s0 = start as u64;
-    let out = clips.join(format!("{id}_{:02}m{:02}s_{:.0}s_split.mp4", s0 / 60, s0 % 60, len));
+    let suffix = max_mb.map(|mb| format!("_{}mb", mb.round() as u32)).unwrap_or_default();
+    let out = clips.join(format!("{id}_{:02}m{:02}s_{:.0}s_split{suffix}.mp4", s0 / 60, s0 % 60, len));
     let p = |x: &Path| x.to_string_lossy().to_string();
 
     let mut inputs: Vec<String> = Vec::new();
     let mut add = |at: f64, source: String| {
         inputs.extend(["-ss".into(), format!("{:.3}", at.max(0.0)), "-t".into(), format!("{len:.3}"), "-i".into(), source]);
     };
-    add(start, p(&dir.join("game.mp4")));
+    add(start, p(&source_video(&dir)));
     for v in views {
         add(start + v.shift, v.source.clone());
     }
@@ -336,8 +604,8 @@ pub fn export_split(
     }
     let mut next = n;
     for name in ["discord", "mic"] {
-        let file = dir.join(format!("{name}.m4a"));
-        if tracks.iter().any(|t| t == name) && file.exists() {
+        let Some(file) = side_track(&dir, name) else { continue };
+        if tracks.iter().any(|t| t == name) {
             add(start, p(&file));
             sound.push(format!("[{next}:a]"));
             next += 1;
@@ -371,13 +639,32 @@ pub fn export_split(
     }
 
     let mut last = anyhow!("no encoder");
+    let capped = match max_mb.filter(|m| *m > 0.0) {
+        Some(mb) => Some(capped_rates(len, mb, !sound.is_empty())?),
+        None => None,
+    };
+
+    let encoders: Vec<Vec<String>> = if let Some((vk, _)) = capped {
+        let vr = format!("{vk}k");
+        let vb = format!("{}k", vk * 2);
+        vec![
+            ["-c:v", "h264_nvenc", "-preset", "p5", "-rc", "vbr", "-b:v", &vr, "-maxrate", &vr, "-bufsize", &vb].map(String::from).to_vec(),
+            ["-c:v", "h264_amf", "-quality", "balanced", "-rc", "vbr_peak", "-b:v", &vr, "-maxrate", &vr, "-bufsize", &vb].map(String::from).to_vec(),
+            ["-c:v", "h264_qsv", "-b:v", &vr, "-maxrate", &vr, "-bufsize", &vb].map(String::from).to_vec(),
+            ["-c:v", "libx264", "-preset", "medium", "-b:v", &vr, "-maxrate", &vr, "-bufsize", &vb, "-pix_fmt", "yuv420p"].map(String::from).to_vec(),
+        ]
+    } else {
+        vec![
+            ["-c:v", "h264_nvenc", "-preset", "p5", "-rc", "vbr", "-cq", "23", "-b:v", "0"].map(String::from).to_vec(),
+            ["-c:v", "h264_amf", "-quality", "balanced", "-rc", "cqp", "-qp_i", "23", "-qp_p", "23"].map(String::from).to_vec(),
+            ["-c:v", "h264_qsv", "-global_quality", "23"].map(String::from).to_vec(),
+            ["-c:v", "libx264", "-preset", "veryfast", "-crf", "21", "-pix_fmt", "yuv420p"].map(String::from).to_vec(),
+        ]
+    };
+    let audio_kbps = capped.map(|(_, a)| a).unwrap_or(192);
+
     // The graphics card's encoder if there is one, the processor otherwise.
-    for enc in [
-        &["-c:v", "h264_nvenc", "-preset", "p5", "-rc", "vbr", "-cq", "23", "-b:v", "0"][..],
-        &["-c:v", "h264_amf", "-quality", "balanced", "-rc", "cqp", "-qp_i", "23", "-qp_p", "23"][..],
-        &["-c:v", "h264_qsv", "-global_quality", "23"][..],
-        &["-c:v", "libx264", "-preset", "veryfast", "-crf", "21", "-pix_fmt", "yuv420p"][..],
-    ] {
+    for enc in encoders {
         let mut args: Vec<String> = ["-y", "-hide_banner", "-loglevel", "error"].map(String::from).to_vec();
         args.extend(inputs.iter().cloned());
         args.extend(["-filter_complex".into(), graph.clone(), "-map".into(), "[v]".into()]);
@@ -387,9 +674,9 @@ pub fn export_split(
             _ => args.extend(["-map".into(), "[a]".into()]),
         }
         if !sound.is_empty() {
-            args.extend(["-c:a".into(), "aac".into(), "-b:a".into(), "192k".into()]);
+            args.extend(["-c:a".into(), "aac".into(), "-b:a".into(), format!("{audio_kbps}k")]);
         }
-        args.extend(enc.iter().map(|x| x.to_string()));
+        args.extend(enc);
         args.extend(["-movflags".into(), "+faststart".into(), p(&out)]);
         match run_tool(&ffmpeg, &args) {
             Ok(_) => return Ok(p(&out)),
@@ -401,7 +688,7 @@ pub fn export_split(
 
 #[cfg(test)]
 mod tests {
-    use super::split_layout;
+    use super::{capped_rates, split_layout, target_video_kbps};
 
     #[test]
     fn every_view_gets_a_place() {
@@ -421,5 +708,25 @@ mod tests {
                 assert!(spots.iter().skip(i + 1).all(|b| b != a));
             }
         }
+    }
+
+    #[test]
+    fn discord_target_bitrate_fits_budget() {
+        let kbps = target_video_kbps(30.0, 10.0, 128);
+        // 30s at (kbps + 128) kbps should stay below 10 MB.
+        let bytes = ((kbps + 128) as f64 * 1000.0 / 8.0) * 30.0;
+        assert!(bytes < 9_600_000.0 && kbps > 1500, "kbps={kbps}, bytes={bytes}");
+        assert_eq!(target_video_kbps(600.0, 10.0, 128), 180);
+    }
+
+    #[test]
+    fn a_clip_too_long_for_the_size_is_refused() {
+        let (v, a) = capped_rates(30.0, 10.0, true).unwrap();
+        assert_eq!(a, 128);
+        assert!(((v + a) as f64 * 1000.0 / 8.0) * 30.0 < 10_000_000.0);
+        // 10 minutes cannot fit in 10 MB at a watchable bitrate.
+        let err = capped_rates(600.0, 10.0, true).unwrap_err().to_string();
+        assert!(err.contains("at most"), "{err}");
+        assert!(capped_rates(600.0, 50.0, true).is_ok());
     }
 }

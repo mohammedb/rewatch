@@ -61,7 +61,25 @@ pub fn effective_codec(s: &Settings, family: Family) -> &'static str {
     }
 }
 
-fn capture_chain(target: &CaptureTarget, fps: u32, family: Family, stamp_epoch_us: Option<i64>) -> String {
+/// Target output height when downscaling is enabled and the display is taller.
+pub fn target_height(s: &Settings, target: &CaptureTarget) -> Option<u32> {
+    let h: u32 = match s.resolution.as_str() {
+        "1440" => 1440,
+        "1080" => 1080,
+        "720" => 720,
+        _ => return None,
+    };
+    (target.h as u32 > h).then_some(h)
+}
+
+fn capture_chain(
+    target: &CaptureTarget,
+    fps: u32,
+    family: Family,
+    stamp_epoch_us: Option<i64>,
+    scale_h: Option<u32>,
+    gpu_scale: bool,
+) -> String {
     let mut g = format!("ddagrab=output_idx={}:framerate={}:draw_mouse=1", target.output_idx, fps);
     if let Some(x) = stamp_epoch_us {
         g += &format!(",setpts=(RTCTIME-{x})/(TB*1000000)");
@@ -72,10 +90,26 @@ fn capture_chain(target: &CaptureTarget, fps: u32, family: Family, stamp_epoch_u
         // not affected). This also makes the file constant frame rate.
         g += &format!(",fps={fps}");
     }
-    match family {
-        Family::Qsv => g += ",hwmap=derive_device=qsv,format=qsv",
-        Family::Cpu => g += ",hwdownload,format=bgra",
-        Family::Nvenc | Family::Amf => {}
+    match (family, scale_h, gpu_scale) {
+        (Family::Nvenc, Some(h), true) => {
+            g += &format!(",hwmap=derive_device=cuda,scale_cuda=w=-2:h={h}:force_original_aspect_ratio=decrease:force_divisible_by=2:format=nv12");
+        }
+        (Family::Qsv, Some(h), true) => {
+            g += &format!(",hwmap=derive_device=qsv,format=qsv,scale_qsv=w=-2:h={h}");
+        }
+        (Family::Qsv, None, _) => g += ",hwmap=derive_device=qsv,format=qsv",
+        (Family::Cpu, Some(h), _) => {
+            g += &format!(",hwdownload,format=bgra,scale=-2:{h}:flags=fast_bilinear");
+        }
+        (Family::Cpu, None, _) => g += ",hwdownload,format=bgra",
+        // QSV encoders take nv12, not yuv420p.
+        (Family::Qsv, Some(h), _) => {
+            g += &format!(",hwdownload,format=bgra,scale=-2:{h}:flags=fast_bilinear,format=nv12");
+        }
+        (Family::Nvenc | Family::Amf, Some(h), _) => {
+            g += &format!(",hwdownload,format=bgra,scale=-2:{h}:flags=fast_bilinear,format=yuv420p");
+        }
+        (Family::Nvenc | Family::Amf, None, _) => {}
     }
     g
 }
@@ -112,6 +146,18 @@ fn device_args(target: &CaptureTarget) -> Vec<String> {
 }
 
 static CHOSEN: std::sync::Mutex<Option<Family>> = std::sync::Mutex::new(None);
+/// The last on-card scaling probe: (encoder, output height, display, worked).
+static GPU_SCALE_WORKS: std::sync::Mutex<Option<(Family, u32, u32, bool)>> = std::sync::Mutex::new(None);
+
+fn probe_chain(ffmpeg: &Path, target: &CaptureTarget, settings: &Settings, family: Family, scale_h: Option<u32>, gpu_scale: bool) -> bool {
+    let mut args: Vec<String> = ["-hide_banner", "-loglevel", "error", "-y"].map(String::from).to_vec();
+    args.extend(device_args(target));
+    args.extend(["-f".into(), "lavfi".into(), "-i".into(), capture_chain(target, 30, family, None, scale_h, gpu_scale)]);
+    args.extend(["-frames:v".into(), "2".into()]);
+    args.extend(encoder_args(settings, family));
+    args.extend(["-an".into(), "-f".into(), "null".into(), "-".into()]);
+    run_tool(ffmpeg, &args).is_ok()
+}
 
 /// The encoder to use. With the setting on automatic, each graphics-card encoder is
 /// tried once with a two-frame capture (about a second each) and the first that
@@ -125,13 +171,7 @@ pub fn resolve_family(ffmpeg: &Path, target: &CaptureTarget, settings: &Settings
     }
     let mut chosen = Family::Cpu;
     for family in [Family::Nvenc, Family::Amf, Family::Qsv] {
-        let mut args: Vec<String> = ["-hide_banner", "-loglevel", "error", "-y"].map(String::from).to_vec();
-        args.extend(device_args(target));
-        args.extend(["-f".into(), "lavfi".into(), "-i".into(), capture_chain(target, 30, family, None)]);
-        args.extend(["-frames:v".into(), "2".into()]);
-        args.extend(encoder_args(settings, family));
-        args.extend(["-an".into(), "-f".into(), "null".into(), "-".into()]);
-        if run_tool(ffmpeg, &args).is_ok() {
+        if probe_chain(ffmpeg, target, settings, family, None, false) {
             chosen = family;
             break;
         }
@@ -139,6 +179,25 @@ pub fn resolve_family(ffmpeg: &Path, target: &CaptureTarget, settings: &Settings
     crate::settings::log(format!("[video] encoder chosen automatically: {}", chosen.label()));
     *CHOSEN.lock().unwrap() = Some(chosen);
     chosen
+}
+
+fn can_gpu_scale(ffmpeg: &Path, target: &CaptureTarget, settings: &Settings, family: Family, h: u32) -> bool {
+    if !matches!(family, Family::Nvenc | Family::Qsv) {
+        return false;
+    }
+    if let Some((f, fh, out, ok)) = *GPU_SCALE_WORKS.lock().unwrap() {
+        if f == family && fh == h && out == target.output_idx {
+            return ok;
+        }
+    }
+    let ok = probe_chain(ffmpeg, target, settings, family, Some(h), true);
+    crate::settings::log(format!(
+        "[video] on-card downscale ({}) {}",
+        family.label(),
+        if ok { "ready" } else { "unavailable, using fallback" }
+    ));
+    *GPU_SCALE_WORKS.lock().unwrap() = Some((family, h, target.output_idx, ok));
+    ok
 }
 
 impl VideoRecorder {
@@ -154,7 +213,9 @@ impl VideoRecorder {
         out: &Path,
     ) -> Result<VideoRecorder> {
         let fps = settings.fps.clamp(15, 240);
-        let graph = capture_chain(target, fps, family, Some(ref_epoch_us));
+        let scale_h = target_height(settings, target);
+        let gpu_scale = scale_h.map(|h| can_gpu_scale(ffmpeg, target, settings, family, h)).unwrap_or(false);
+        let graph = capture_chain(target, fps, family, Some(ref_epoch_us), scale_h, gpu_scale);
         let log_path = out.with_extension("log");
         let log = File::create(&log_path)?;
 
@@ -322,12 +383,23 @@ mod tests {
         assert_eq!(effective_codec(&s, Family::Qsv), "hevc");
         assert_eq!(effective_codec(&s, Family::Cpu), "h264");
         let target = CaptureTarget { adapter_idx: 0, output_idx: 1, x: 0, y: 0, w: 1920, h: 1080 };
-        assert!(capture_chain(&target, 60, Family::Cpu, Some(5)).ends_with(",hwdownload,format=bgra"));
+        assert!(capture_chain(&target, 60, Family::Cpu, Some(5), None, false).ends_with(",hwdownload,format=bgra"));
         // The frame rate is stated right after the wall-clock stamp, for every encoder.
         for family in [Family::Nvenc, Family::Amf, Family::Qsv, Family::Cpu] {
-            assert!(capture_chain(&target, 60, family, Some(5)).contains("setpts=(RTCTIME-5)/(TB*1000000),fps=60"));
+            assert!(capture_chain(&target, 60, family, Some(5), None, false).contains("setpts=(RTCTIME-5)/(TB*1000000),fps=60"));
         }
-        assert!(!capture_chain(&target, 60, Family::Nvenc, None).contains("fps="));
-        assert!(capture_chain(&target, 60, Family::Nvenc, None).starts_with("ddagrab=output_idx=1:framerate=60"));
+        assert!(!capture_chain(&target, 60, Family::Nvenc, None, None, false).contains("fps="));
+        assert!(capture_chain(&target, 60, Family::Nvenc, None, None, false).starts_with("ddagrab=output_idx=1:framerate=60"));
+
+        // Downscaling: only triggers when display height exceeds target height.
+        s.resolution = "1080".into();
+        let uhd = CaptureTarget { adapter_idx: 0, output_idx: 0, x: 0, y: 0, w: 3840, h: 2160 };
+        assert_eq!(target_height(&s, &uhd), Some(1080));
+        assert_eq!(target_height(&s, &target), None);
+        assert!(capture_chain(&uhd, 60, Family::Nvenc, Some(5), Some(1080), true).contains("scale_cuda=w=-2:h=1080"));
+        assert!(capture_chain(&uhd, 60, Family::Qsv, Some(5), Some(1080), true).contains("scale_qsv=w=-2:h=1080"));
+        assert!(capture_chain(&uhd, 60, Family::Nvenc, Some(5), Some(1080), false).contains("hwdownload,format=bgra,scale=-2:1080"));
+        // Without on-card scaling, QSV still gets a pixel format its encoder accepts.
+        assert!(capture_chain(&uhd, 60, Family::Qsv, Some(5), Some(1080), false).ends_with("format=nv12"));
     }
 }

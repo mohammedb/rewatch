@@ -404,9 +404,43 @@ Enter or Esc), and whether polling every 8 ms misses very short taps.
   (`branding/logo/`, drawn by `build_logo.py`; `src-tauri/icons/` made from
   `rewatch-icon-small-1024.png` with `tauri icon`). No other changes from 0.2.4.
 
+## Version 0.3.0 (2026-11-13)
+
+- **Highlight reel** (`highlights.rs`). The Review tab's Reel button stitches a game's
+  highlight clips into `highlights_reel.mp4` with short crossfades and a title on each.
+- **Highlights-only mode** (Settings, off by default). After a game the reel is made;
+  a day after the game started the full `game.mp4` is deleted unless the game was
+  starred by then. A trimmed game plays its reel, whose sound already holds Discord and
+  the microphone; the full game's markers, graph, comms rows and teammates' views are
+  hidden for it, since they run on the full game's clock.
+- **League settings backup** (`league_cfg.rs`). `PersistedSettings.json`, `input.ini`
+  and `game.cfg` are copied to `%APPDATA%\Rewatch\league-backups\` when a game starts
+  and they changed (last 20 kept), or by hand in Settings. Restoring first saves the
+  current files as "Before restore", and is refused while a game runs.
+- **Recording resolution** (Native, 1440p, 1080p, 720p). Scaled on the graphics card
+  with NVIDIA and Intel when the card can, otherwise just before encoding.
+- **Player**: A-B loop (`[`, `]`, `R`, also on walk-throughs), clips sized for
+  Discord (10 MB) or Nitro (50 MB; a stretch too long for the size is refused with the
+  longest that fits), per-game sound levels with optional ducking of game sound while
+  someone talks, drawings on teammates' tiles in split view, game tags.
+- **Keys**: a custom key list for the overlay (up to 32, mouse buttons too); Space
+  camera share, attack-move count and summoner presses (D, F) on the timeline.
+- **Numbers**: item gold, vision score and whether each player is dead are sampled with
+  the other stats; new graph lines (item gold, team gold and kill difference, vision
+  score, APM), CS at 10 and 15 minutes, comparison with another game by game clock, a
+  strip of grey-screen time, unspent gold, vision, APM, Space and attack-move, and the
+  state 8 s before each death and fight.
+- **Trends** tab: results over many games by queue, role, champion and tag, champion
+  table, recurring death causes, duos, recent games. The library search also finds
+  tags, note text and player names.
+
+Checked: the unit tests (52), a full build check, and a code review of the whole
+change (fixed: the Intel downscale fallback used a pixel format QSV refuses, trimmed
+games played the full-length Discord and mic over the reel, an old game hid the graph
+when a new graph line was chosen, clips longer than the size allowed came out too
+big). Not checked: a real game, the reel and downscaling on real hardware.
+
 ## Not built yet
 
-One reel of all highlights, League settings backup, on-card
-downscaling (recordings are at the screen's own resolution), teammates' drawings in
-the side views of split view (they show in the main view only), code signing (so
-Windows stops warning about the installer).
+Code signing (so Windows stops warning about the installer). The Trends tab reads
+every recording each time it opens; with hundreds of games it will want a cache.

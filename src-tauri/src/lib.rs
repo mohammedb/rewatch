@@ -6,6 +6,7 @@ mod copies;
 mod highlights;
 mod insight;
 mod keys;
+mod league_cfg;
 mod library;
 mod liveclient;
 mod session;
@@ -356,6 +357,7 @@ fn watcher(app: AppHandle) {
     // The recordings folder that has been checked for interrupted recordings.
     let mut checked_root: Option<std::path::PathBuf> = None;
     let mut attempts: (u32, u32) = (0, 0); // (pid, tries)
+    let mut backed_pid: Option<u32> = None;
     loop {
         std::thread::sleep(Duration::from_secs(2));
         let game_pid = winutil::find_pid_by_name(&winutil::game_exe());
@@ -407,8 +409,13 @@ fn watcher(app: AppHandle) {
         // No recording: should one start?
         let Some(pid) = game_pid else {
             *st.skip_pid.lock().unwrap() = None;
+            backed_pid = None;
             continue;
         };
+        if backed_pid != Some(pid) {
+            backed_pid = Some(pid);
+            league_cfg::auto_backup(&settings);
+        }
         let skipped = *st.skip_pid.lock().unwrap() == Some(pid);
         if !settings.auto_record || settings.recordings_path().is_none() || skipped {
             continue;
@@ -577,7 +584,51 @@ fn highlights(app: AppHandle, state: State<AppState>, id: String, save: bool) ->
         return Err("Not while a game is running. Try again afterwards.".into());
     }
     let handle = app.clone();
-    library::highlights(&s, &id, save, &move || !quiet(&handle)).map_err(err)
+    let res = library::highlights(&s, &id, save, &move || !quiet(&handle)).map_err(err)?;
+    if save {
+        let _ = app.emit("library-changed", ());
+    }
+    Ok(res)
+}
+
+#[tauri::command(async)]
+fn build_highlight_reel(app: AppHandle, state: State<AppState>, id: String) -> CmdResult<String> {
+    let s = state.settings.lock().unwrap().clone();
+    if !quiet(&app) {
+        return Err("Not while a game is running. Try again afterwards.".into());
+    }
+    let handle = app.clone();
+    let path = library::build_highlight_reel(&s, &id, &move || !quiet(&handle)).map_err(err)?;
+    let _ = app.emit("library-changed", ());
+    Ok(path)
+}
+
+#[tauri::command(async)]
+fn library_trends(state: State<AppState>) -> Vec<Value> {
+    let s = state.settings.lock().unwrap().clone();
+    library::trends(&s)
+}
+
+#[tauri::command(async)]
+fn list_league_backups() -> Vec<league_cfg::LeagueBackup> {
+    league_cfg::list()
+}
+
+#[tauri::command(async)]
+fn create_league_backup(state: State<AppState>, label: String) -> CmdResult<league_cfg::LeagueBackup> {
+    let s = state.settings.lock().unwrap().clone();
+    league_cfg::create(&s, &label).map_err(err)
+}
+
+#[tauri::command(async)]
+fn restore_league_backup(state: State<AppState>, id: String) -> CmdResult<league_cfg::LeagueBackup> {
+    let s = state.settings.lock().unwrap().clone();
+    league_cfg::restore(&s, &id).map_err(err)
+}
+
+#[tauri::command(async)]
+fn delete_league_backup(id: String) -> CmdResult<()> {
+    league_cfg::delete(&id).map_err(err)
 }
 
 /// A review of one team fight from my view and the teammates' views given.
@@ -697,9 +748,9 @@ fn add_bookmark(app: AppHandle, state: State<AppState>) -> usize {
 }
 
 #[tauri::command(async)]
-fn export_clip(state: State<AppState>, id: String, start: f64, end: f64, tracks: Vec<String>) -> CmdResult<String> {
+fn export_clip(state: State<AppState>, id: String, start: f64, end: f64, tracks: Vec<String>, max_mb: Option<f64>) -> CmdResult<String> {
     let s = state.settings.lock().unwrap().clone();
-    library::export_clip(&s, &id, start, end, &tracks).map_err(err)
+    library::export_clip(&s, &id, start, end, &tracks, max_mb).map_err(err)
 }
 
 #[tauri::command(async)]
@@ -713,9 +764,10 @@ fn export_split(
     tracks: Vec<String>,
     listen: Option<usize>,
     label: String,
+    max_mb: Option<f64>,
 ) -> CmdResult<String> {
     let s = state.settings.lock().unwrap().clone();
-    library::export_split(&s, &id, start, end, &views, &tracks, listen, &label).map_err(err)
+    library::export_split(&s, &id, start, end, &views, &tracks, listen, &label, max_mb).map_err(err)
 }
 
 #[tauri::command(async)]
@@ -839,11 +891,20 @@ pub fn run() {
                         } else {
                             None
                         };
+                        // Highlights-only: drop full recordings whose grace period is over.
+                        if s.highlights_only && quiet(&handle) {
+                            if let Some(root) = s.recordings_path() {
+                                if highlights::trim_due(&s, &root) > 0 {
+                                    let _ = handle.emit("library-changed", ());
+                                }
+                            }
+                        }
                         if let Some(dir) = job {
                             let h = handle.clone();
                             match highlights::save(&s, &dir, &move || !quiet(&h)) {
                                 Ok(_) => {
                                     let _ = handle.emit("highlights", dir.file_name().map(|n| n.to_string_lossy().to_string()));
+                                    let _ = handle.emit("library-changed", ());
                                     continue;
                                 }
                                 Err(e) => {
@@ -956,6 +1017,12 @@ pub fn run() {
             pov_extras,
             insights,
             highlights,
+            build_highlight_reel,
+            library_trends,
+            list_league_backups,
+            create_league_backup,
+            restore_league_backup,
+            delete_league_backup,
             team_review,
             coach,
             voice,
@@ -1263,7 +1330,7 @@ pub fn cli_split_clip(root: String, id: String, start: f64, end: f64, source: St
     let mut s = Settings::load();
     s.recordings_dir = root;
     let views = vec![library::SplitView { source, shift, label: "Teammate".into() }];
-    match library::export_split(&s, &id, start, end, &views, &["game".to_string()], None, "You") {
+    match library::export_split(&s, &id, start, end, &views, &["game".to_string()], None, "You", None) {
         Ok(path) => {
             println!("RESULT {path}");
             0

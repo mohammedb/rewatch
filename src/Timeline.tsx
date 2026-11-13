@@ -1,4 +1,4 @@
-import { Bookmark, MessageSquare, Skull } from "lucide-react";
+import { Bookmark, MessageSquare, Skull, Zap } from "lucide-react";
 import { useRef, useState } from "react";
 import { ItemIcon, Portrait, type Side } from "./ChampIcon";
 import { clock, gameClockAt } from "./format";
@@ -24,6 +24,7 @@ interface Props {
   cpmBucket: number;
   inPt: number | null;
   outPt: number | null;
+  looping?: boolean;
   clockSamples: [number, number][];
   champKey: (name?: string) => string | undefined;
   onSeek: (t: number) => void;
@@ -37,7 +38,7 @@ function tickPlan(duration: number): { minor: number; major: number } {
   return { minor: 60, major: 600 };
 }
 
-export function Timeline({ duration, time, markers, bands = [], cpm, cpmBucket, inPt, outPt, clockSamples, champKey, onSeek }: Props) {
+export function Timeline({ duration, time, markers, bands = [], cpm, cpmBucket, inPt, outPt, looping, clockSamples, champKey, onSeek }: Props) {
   const ref = useRef<HTMLDivElement>(null);
   const [hover, setHover] = useState<{ x: number; t: number } | null>(null);
   const dragging = useRef(false);
@@ -71,6 +72,7 @@ export function Timeline({ duration, time, markers, bands = [], cpm, cpmBucket, 
   const fights = markers.filter((m) => ["kill", "death", "assist", "fight"].includes(m.cat));
   const objectives = markers.filter((m) => m.cat === "objective" || m.cat === "structure");
   const items = markers.filter((m) => m.cat === "item");
+  const summoners = markers.filter((m) => m.cat === "summoner");
   const flags = markers.filter((m) => m.cat === "bookmark" || m.cat === "note" || m.cat === "tnote");
 
   return (
@@ -116,7 +118,7 @@ export function Timeline({ duration, time, markers, bands = [], cpm, cpmBucket, 
         </div>
         <div className="played" style={{ width: pct(time) }} />
         {inPt !== null && outPt !== null && outPt > inPt && (
-          <div className="range" style={{ left: pct(inPt), width: `${((outPt - inPt) / total) * 100}%` }} />
+          <div className={`range ${looping ? "loop" : ""}`} style={{ left: pct(inPt), width: `${((outPt - inPt) / total) * 100}%` }} />
         )}
         {cpm.length > 1 && (
           <svg className="cpm" viewBox="0 0 1000 34" preserveAspectRatio="none" aria-hidden>
@@ -161,6 +163,11 @@ export function Timeline({ duration, time, markers, bands = [], cpm, cpmBucket, 
           {items.map((m, i) => (
             <span key={i} style={{ left: pct(m.t) }}>
               <ItemIcon id={m.e?.itemId ?? 0} name={m.e?.detail ?? "Item"} size={21} />
+            </span>
+          ))}
+          {summoners.map((m, i) => (
+            <span key={`s-${i}`} className="glyph summ" style={{ left: pct(m.t), width: 16, height: 16, top: 3 }} title={m.label}>
+              <Zap size={10} fill="currentColor" />
             </span>
           ))}
         </div>
