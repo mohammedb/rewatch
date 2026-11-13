@@ -1,6 +1,6 @@
 [package]
 name = "rewatch"
-version = "0.4.0"
+version = "0.4.1"
 description = "Personal League of Legends recorder and review tool"
 authors = ["you"]
 license = "MIT"

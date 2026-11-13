@@ -233,9 +233,7 @@ pub fn review(settings: &Settings, dir: &Path, stop: &dyn Fn() -> bool) -> Resul
 
     use base64::Engine;
     let (ffmpeg, _) = settings.ffmpeg_tools();
-    let tmp = std::env::temp_dir().join("rewatch-insight");
-    std::fs::create_dir_all(&tmp)?;
-    let clip = tmp.join(format!("coach-{}.mp4", std::process::id()));
+    let clip = insight::temp_clip("coach")?;
     let mut blocks = vec![json!({ "type": "text", "text": format!(
         "Game facts (JSON):\n{}\n\nClips of the player's deaths follow. Each shows the 14 seconds before the death and 3 after.\n",
         facts(&doc)

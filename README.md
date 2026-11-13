@@ -484,6 +484,21 @@ back, leaving Trends while a walk-through loaded pulled the player into it). Not
 checked: a real game, pasting a copied clip into Discord, the focus in the "Recording"
 notice.
 
+## Version 0.4.1 (2026-11-13)
+
+- **AI review**: the written review, the death hints and the team review each cut their
+  clips into a file of their own (`insight::temp_clip`). The review the app writes after
+  a game and one asked for with "Get the AI review" could run at once and shared one
+  file; each ffmpeg run wrote over the clip the other was about to send, and Google
+  refused the broken video ("Google answered 400: Request contains an invalid
+  argument."). No other changes from 0.4.0.
+
+Checked: the unit tests (55, one new: jobs running at once never share a clip file), a
+full build, the clips of two reviews cut at the same time from a real recording (one
+shared file: 9 of 12 clips did not decode; a file each: all 12 fine), and that an empty
+or half-written clip gets exactly that 400 from both models. Not checked: two reviews
+of one game running at once in the installed app.
+
 ## Not built yet
 
 Code signing (so Windows stops warning about the installer). A sample game for the

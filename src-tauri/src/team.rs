@@ -186,9 +186,7 @@ pub fn review(settings: &Settings, dir: &Path, start: f64, end: f64, views: &[Vi
 
     use base64::Engine;
     let (ffmpeg, _) = settings.ffmpeg_tools();
-    let tmp = std::env::temp_dir().join("rewatch-insight");
-    std::fs::create_dir_all(&tmp)?;
-    let clip = tmp.join(format!("team-{}.mp4", std::process::id()));
+    let clip = insight::temp_clip("team")?;
     let mut blocks = vec![json!({ "type": "text", "text": format!(
         "Facts of the fight (JSON):\n{}\n\nEach clip below shows the same {len:.0} seconds of the game, from a different friend's screen.\n",
         facts(&doc, start, end)

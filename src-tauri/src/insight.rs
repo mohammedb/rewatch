@@ -123,6 +123,18 @@ pub fn deaths(doc: &Value) -> Vec<Value> {
         .unwrap_or_default()
 }
 
+/// A file for one job's clips that no other job uses. The review the app writes after
+/// a game and the one "Get the AI review" asks for can run at once; when they shared a
+/// file, each ffmpeg run wrote over the clip the other was about to send, and Google
+/// turned the broken video down ("400: Request contains an invalid argument").
+pub fn temp_clip(kind: &str) -> Result<std::path::PathBuf> {
+    static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    let dir = std::env::temp_dir().join("rewatch-insight");
+    std::fs::create_dir_all(&dir)?;
+    let n = NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    Ok(dir.join(format!("{kind}-{}-{n}.mp4", std::process::id())))
+}
+
 /// Cut the stretch around a death (14 seconds before, 3 after) at 720p.
 pub fn cut_clip(ffmpeg: &Path, src: &Path, at: f64, out: &Path, fps: u32, sound: bool) -> Result<()> {
     cut_range(ffmpeg, &src.to_string_lossy(), (at - LEAD).max(0.0), LEAD + TAIL, out, fps, sound)
@@ -230,9 +242,7 @@ pub fn analyze(settings: &Settings, dir: &Path, stop: &dyn Fn() -> bool) -> Resu
     let doc: Value = serde_json::from_str(&std::fs::read_to_string(dir.join("match.json"))?)?;
     let champion = doc.pointer("/game/me/champion").and_then(|c| c.as_str()).unwrap_or("the player").to_string();
     let (ffmpeg, _) = settings.ffmpeg_tools();
-    let tmp = std::env::temp_dir().join("rewatch-insight");
-    std::fs::create_dir_all(&tmp)?;
-    let clip = tmp.join(format!("clip-{}.mp4", std::process::id()));
+    let clip = temp_clip("clip")?;
     let mut out = Vec::new();
     let mut failed = 0;
     for death in deaths(&doc) {
@@ -329,5 +339,25 @@ mod tests {
         assert!(text.contains("Allies: Xayah. Enemies: Caitlyn, Alistar."), "{text}");
         assert!(text.contains("at 7:04 on the game clock, killed by Caitlyn.\n"), "{text}");
         assert!(!text.contains("took part"), "{text}");
+    }
+
+    #[test]
+    fn jobs_at_the_same_time_never_share_a_clip_file() {
+        // The review the app writes after a game and the one "Get the AI review" asks
+        // for can run at once. With one file between them, each ffmpeg run wrote over
+        // the clip the other was about to send, and Google refused the broken video
+        // ("400: Request contains an invalid argument").
+        let paths: Vec<std::path::PathBuf> = std::thread::scope(|s| {
+            let jobs: Vec<_> = (0..8).map(|_| s.spawn(|| temp_clip("coach").unwrap())).collect();
+            jobs.into_iter().map(|j| j.join().unwrap()).collect()
+        });
+        let distinct: std::collections::HashSet<_> = paths.iter().collect();
+        assert_eq!(distinct.len(), paths.len(), "{paths:?}");
+        for p in &paths {
+            assert!(p.parent().is_some_and(|d| d.is_dir()), "{p:?}");
+            assert!(p.file_name().unwrap().to_string_lossy().starts_with("coach-"), "{p:?}");
+        }
+        // One job's own clips may reuse its file, but a second job asking gets another.
+        assert_ne!(temp_clip("clip").unwrap(), temp_clip("clip").unwrap());
     }
 }
