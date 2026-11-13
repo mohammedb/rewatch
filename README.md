@@ -397,6 +397,13 @@ minute). Not checked: a real game. Points to look at then: whether the chat rule
 in step (pressing Enter for anything other than chat would hide keys until the next
 Enter or Esc), and whether polling every 8 ms misses very short taps.
 
+## Version 0.2.5 (2026-11-13)
+
+- **New icon.** The app, taskbar, tray and installer use the new Rewatch mark: an R
+  built from a ring, a stem and a leg, in the brand red on a dark square
+  (`branding/logo/`, drawn by `build_logo.py`; `src-tauri/icons/` made from
+  `rewatch-icon-small-1024.png` with `tauri icon`). No other changes from 0.2.4.
+
 ## Not built yet
 
 One reel of all highlights, League settings backup, on-card
