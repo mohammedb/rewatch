@@ -1,12 +1,13 @@
 // What sits under the timeline and in the Review tab: who was talking when, the
 // numbers of the game as lines, and the lists of deaths and team fights to walk through.
 
-import { ArrowDownWideNarrow, Bookmark, ChevronLeft, ChevronRight, Clapperboard, Film, FolderOpen, Play, Repeat, RotateCcw, Skull, Sparkles, Swords, Trophy, Users, X, Zap } from "lucide-react";
+import { ArrowDownWideNarrow, Bookmark, Check, ChevronLeft, ChevronRight, Clapperboard, Crosshair, Film, FolderOpen, MoreHorizontal, Play, Repeat, RotateCcw, Skull, Sparkles, Swords, Trophy, Users, X, Zap } from "lucide-react";
 import { useEffect, useMemo, useRef, useState } from "react";
 import { api } from "./api";
 import { Portrait } from "./ChampIcon";
 import { clock, gameClockAt, laneName } from "./format";
-import type { Coach, DeathInsight, GameEvent, Highlight, Insights, MatchFull, MatchSummary, PlayerRow, Span, Stats, TeamReview } from "./types";
+import type { Coach, DeathInsight, FocusCheck, GameEvent, Highlight, Insights, MatchFull, MatchSummary, NextFocus, PlayerRow, Span, Stats, TeamReview } from "./types";
+import { humanError, Menu, Select } from "./ui";
 import type { KeyLog } from "./Views";
 
 // ------------------------------------------------------------------- fights
@@ -52,6 +53,8 @@ export interface Queue {
   title: string;
   items: QueueItem[];
   idx: number;
+  /** A walk-through across games: where this game's stops sit in the whole list. */
+  across?: { base: number; total: number; go: (index: number) => void };
 }
 
 export function deathItems(events: GameEvent[]): QueueItem[] {
@@ -141,7 +144,34 @@ interface ReviewTabProps {
   keys?: KeyLog | null;
   cpm?: number[];
   duration?: number;
+  /** In-game length in seconds, for per-minute numbers. */
+  gameLength?: number | null;
+  /** What the player wanted to work on going into this game. */
+  focus?: NextFocus | null;
+  focusCheck?: FocusCheck | null;
+  onFocusCheck?: (answer: FocusCheck["answer"] | null) => void;
+  /** Marked as reviewed, and the focus chosen for the next games then. */
+  reviewedAt?: number | null;
+  nextFocus?: NextFocus | null;
+  onFinish?: (nextFocus: string | null) => void;
+  onReopen?: () => void;
+  /** The player's usual numbers over recent games, to compare this one with. */
+  usual?: Usual | null;
 }
+
+/** Averages over recent games, for context next to this game's numbers. */
+export interface Usual {
+  games: number;
+  deadPct: number | null;
+  csm: number | null;
+  visionPm: number | null;
+}
+
+const ANSWERS: { key: FocusCheck["answer"]; label: string }[] = [
+  { key: "yes", label: "Did it" },
+  { key: "partly", label: "Partly" },
+  { key: "no", label: "Not really" },
+];
 
 /** Side-panel tab with the things worth walking through after a game. */
 export function ReviewTab({
@@ -172,7 +202,17 @@ export function ReviewTab({
   keys,
   cpm = [],
   duration = 0,
+  gameLength,
+  focus,
+  focusCheck,
+  onFocusCheck,
+  reviewedAt,
+  nextFocus,
+  onFinish,
+  onReopen,
+  usual,
 }: ReviewTabProps) {
+  const [focusDraft, setFocusDraft] = useState<string | null>(null);
   const reel = useMemo<QueueItem[]>(() => highlights.map((h) => ({ t: h.t, start: h.start, end: h.end, label: h.label })), [highlights]);
   const unsaved = highlights.some((h) => !h.file);
   const [worstFirst, setWorstFirst] = useState(false);
@@ -208,6 +248,16 @@ export function ReviewTab({
     const avgApm = avgCpm !== null || avgKpm !== null ? (avgCpm ?? 0) + (avgKpm ?? 0) : null;
     return { deadSec, deadPct, avgGold, lastWard, avgApm };
   }, [me, stats, cpm, keys, duration]);
+  const minutes = (gameLength ?? 0) / 60;
+  const csm = me && minutes > 1 ? me.cs / minutes : null;
+  const visionPm = summaryStats.lastWard !== null && minutes > 1 ? summaryStats.lastWard / minutes : null;
+  /** "8% · usually 12%" with a colour for better or worse; lower is better when `lowGood`. */
+  const versus = (now: number | null, was: number | null | undefined, fmt: (v: number) => string, lowGood = false) => {
+    if (now === null || was === null || was === undefined || !usual || usual.games < 3) return null;
+    const better = lowGood ? now < was * 0.92 : now > was * 1.08;
+    const worse = lowGood ? now > was * 1.08 : now < was * 0.92;
+    return <small className={better ? "up" : worse ? "down" : ""}>usually {fmt(was)}</small>;
+  };
 
   const preFightBits = (at: number, targetPlayerName?: string): string[] => {
     const t0 = Math.max(0, at - 8);
@@ -243,48 +293,124 @@ export function ReviewTab({
   const hasSummary =
     summaryStats.deadPct !== null ||
     summaryStats.avgGold !== null ||
-    summaryStats.lastWard !== null ||
+    csm !== null ||
+    visionPm !== null ||
     summaryStats.avgApm !== null ||
-    keys?.spaceHoldPct !== null && keys?.spaceHoldPct !== undefined;
+    (keys?.spaceHoldPct !== null && keys?.spaceHoldPct !== undefined);
+
+  const watchTime = (items: QueueItem[]) => clock(items.reduce((s, d) => s + (d.end - d.start), 0));
+  const startHere =
+    deaths.length > 0
+      ? { label: `Watch your ${deaths.length} ${deaths.length === 1 ? "death" : "deaths"}`, sub: `${watchTime(deaths)} in all`, run: () => onStart("Deaths", deaths, 0) }
+      : fightList.length > 0
+        ? { label: `Watch the ${fightList.length} team ${fightList.length === 1 ? "fight" : "fights"}`, sub: `${watchTime(fightList)} in all`, run: () => onStart("Fights", fightList, 0) }
+        : highlights.length > 0
+          ? { label: "Watch the highlights", sub: `${watchTime(reel)} in all`, run: () => onStart("Highlights", reel, 0) }
+          : null;
+  const suggested = focusDraft ?? nextFocus?.text ?? coach?.nextGame ?? "";
+  const highlightMenu = [
+    unsaved
+      ? { label: savingClips ? "Saving the clips" : "Save each as a clip", hint: "1080p, with game sound, Discord and your mic", icon: <Clapperboard size={15} />, disabled: savingClips, onSelect: onSaveClips }
+      : { label: "Show the clips", icon: <FolderOpen size={15} />, onSelect: () => onShowClip(highlights[0].file!) },
+    ...(onBuildReel
+      ? [
+          reelFile
+            ? { label: "Show the highlight reel", icon: <Film size={15} />, onSelect: () => onShowClip(reelFile) }
+            : { label: buildingReel ? "Making the reel" : "Make a highlight reel", hint: "Every highlight in one video", icon: <Film size={15} />, disabled: !!buildingReel, onSelect: onBuildReel },
+        ]
+      : []),
+  ];
 
   return (
-    <div className="sidebody">
+    <div className="sidebody review">
+      {(focus || startHere) && (
+        <section className="recap">
+          {focus && (
+            <div className="focuscheck">
+              <span className="fl">
+                <Crosshair size={14} aria-hidden />
+                Your focus going into this game
+              </span>
+              <p className="ft">{focus.text}</p>
+              {onFocusCheck && (
+                <div className="answers" role="group" aria-label="How did it go?">
+                  {ANSWERS.map((a) => (
+                    <button
+                      key={a.key}
+                      className={`btn sm ${focusCheck?.answer === a.key ? `picked ${a.key}` : ""}`}
+                      aria-pressed={focusCheck?.answer === a.key}
+                      onClick={() => onFocusCheck(focusCheck?.answer === a.key ? null : a.key)}
+                    >
+                      {a.label}
+                    </button>
+                  ))}
+                </div>
+              )}
+            </div>
+          )}
+          {startHere && (
+            <button className="starthere" onClick={startHere.run}>
+              <span className="sh-ic">
+                <Play size={15} fill="currentColor" />
+              </span>
+              <span className="sh-t">
+                <b>{startHere.label}</b>
+                <small>{startHere.sub}. It stops after each one so you can think about it.</small>
+              </span>
+            </button>
+          )}
+        </section>
+      )}
+
       {hasSummary && (
-        <section className="statstrip" aria-label="Game mechanics and efficiency">
+        <section className="statstrip" aria-label="This game's numbers">
           {summaryStats.deadPct !== null && (
+            <div title={`${clock(summaryStats.deadSec)} on the grey screen`}>
+              <span>Time dead</span>
+              <b>{summaryStats.deadPct}%</b>
+              {versus(summaryStats.deadPct, usual?.deadPct, (v) => `${Math.round(v)}%`, true) ?? <small>{clock(summaryStats.deadSec)} in all</small>}
+            </div>
+          )}
+          {csm !== null && (
             <div>
-              <span>Grey screen</span>
-              <b>{clock(summaryStats.deadSec)} ({summaryStats.deadPct}%)</b>
+              <span>CS a minute</span>
+              <b>{csm.toFixed(1)}</b>
+              {versus(csm, usual?.csm, (v) => v.toFixed(1)) ?? <small>{me?.cs} in all</small>}
+            </div>
+          )}
+          {visionPm !== null && (
+            <div>
+              <span>Vision a minute</span>
+              <b>{visionPm.toFixed(2)}</b>
+              {versus(visionPm, usual?.visionPm, (v) => v.toFixed(2)) ?? <small>score {Math.round(summaryStats.lastWard!)}</small>}
             </div>
           )}
           {summaryStats.avgGold !== null && (
             <div>
-              <span>Avg unspent</span>
+              <span>Gold left unspent</span>
               <b>{summaryStats.avgGold}g</b>
-            </div>
-          )}
-          {summaryStats.lastWard !== null && (
-            <div>
-              <span>Vision score</span>
-              <b>{Math.round(summaryStats.lastWard)}</b>
+              <small className={summaryStats.avgGold > 1200 ? "down" : ""}>{summaryStats.avgGold > 1200 ? "on average: shop sooner" : "on average"}</small>
             </div>
           )}
           {summaryStats.avgApm !== null && (
             <div>
-              <span>Avg APM</span>
+              <span>Actions a minute</span>
               <b>{summaryStats.avgApm}</b>
+              <small>clicks and key presses</small>
             </div>
           )}
           {keys && keys.spaceHoldPct !== null && (
             <div>
-              <span>Space camera</span>
+              <span>Camera locked</span>
               <b>{keys.spaceHoldPct}%</b>
+              <small>of the game, holding Space</small>
             </div>
           )}
           {keys && keys.aPresses > 0 && (
             <div>
               <span>Attack-move</span>
               <b>{keys.aPresses}×</b>
+              <small>presses of A</small>
             </div>
           )}
         </section>
@@ -292,59 +418,74 @@ export function ReviewTab({
 
       {coach && (
         <section className="coach">
-          <h3><Sparkles size={15} aria-hidden />Coach's review</h3>
+          <h3>
+            <Sparkles size={15} aria-hidden />
+            Coach's review
+          </h3>
           <p className="headline">{coach.headline}</p>
-          {coach.wentWell.length > 0 && <><h4>Went well</h4><ul>{coach.wentWell.map((s, i) => <li key={i}>{s}</li>)}</ul></>}
-          {coach.workOn.length > 0 && <><h4>Work on</h4><ul>{coach.workOn.map((s, i) => <li key={i}>{s}</li>)}</ul></>}
-          {coach.nextGame && <p className="next"><b>Next game</b>{coach.nextGame}</p>}
+          {coach.wentWell.length > 0 && (
+            <>
+              <h4>Went well</h4>
+              <ul>
+                {coach.wentWell.map((s, i) => (
+                  <li key={i}>{s}</li>
+                ))}
+              </ul>
+            </>
+          )}
+          {coach.workOn.length > 0 && (
+            <>
+              <h4>Work on</h4>
+              <ul>
+                {coach.workOn.map((s, i) => (
+                  <li key={i}>{s}</li>
+                ))}
+              </ul>
+            </>
+          )}
+          {coach.nextGame && (
+            <p className="next">
+              <b>Next game</b>
+              {coach.nextGame}
+            </p>
+          )}
           <small>Written by Gemini from the scoreboard and clips of your deaths. It can be wrong about what it saw.</small>
         </section>
       )}
       {wanted && hintState !== "off" && (
         <div className="ai-bar">
-          <button className="btn" disabled={hintState === "busy"} onClick={onAskHints} title="Sends the scoreboard and a 17-second clip of each death to Google's Gemini. You get a written review, a hint on each death and a title for every player."><Sparkles size={13} aria-hidden />{hintState === "busy" ? "Reviewing, about half a minute" : "Get the AI review"}</button>
+          <button
+            className="btn"
+            disabled={hintState === "busy"}
+            onClick={onAskHints}
+            title="Sends the scoreboard and a 17-second clip of each death to Google's Gemini. You get a written review, a hint on each death and a title for every player."
+          >
+            <Sparkles size={13} aria-hidden className={hintState === "busy" ? "spin" : ""} />
+            {hintState === "busy" ? "Reviewing, about half a minute" : "Get the AI review"}
+          </button>
         </div>
       )}
       {wanted && hintState === "off" && <p className="hint-note">A written review of the game and hints on each death can be switched on in Settings, under AI review.</p>}
-      {hintError && <p className="enemy hint-note">{hintError}</p>}
-      {nothing && !coach && <p>No deaths, team fights or bookmarks in this recording.</p>}
-      {highlights.length > 0 && (
-        <section className="rv">
-          <header>
-            <h3><Trophy size={15} aria-hidden />Highlights<span className="num">{highlights.length}</span></h3>
-            <span className="grow" />
-            {onBuildReel && (
-              reelFile ? (
-                <button className="btn sq" aria-label="Show highlight reel in folder" title="Show stitched highlight reel in folder" onClick={() => onShowClip(reelFile)}><Film size={14} /></button>
-              ) : (
-                <button className="btn" disabled={buildingReel} onClick={onBuildReel} title="Stitch all highlights into one highlights_reel.mp4 with crossfades"><Film size={13} aria-hidden />{buildingReel ? "Stitching" : "Reel"}</button>
-              )
-            )}
-            {unsaved ? (
-              <button className="btn" disabled={savingClips} onClick={onSaveClips} title="Saves each highlight as a 1080p clip with game sound, Discord and your microphone, next to the recording"><Clapperboard size={13} aria-hidden />{savingClips ? "Saving" : "Save clips"}</button>
-            ) : (
-              <button className="btn sq" aria-label="Show the clips in their folder" title="Show the clips in their folder" onClick={() => onShowClip(highlights[0].file!)}><FolderOpen size={14} /></button>
-            )}
-            <button className="btn" onClick={() => onStart("Highlights", reel, 0)}><Play size={13} fill="currentColor" aria-hidden />Play all</button>
-          </header>
-          {highlights.map((h, i) => (
-            <button key={i} className={`moment ${active("Highlights", i) ? "now" : ""}`} onClick={() => onStart("Highlights", reel, i)}>
-              <span className="t">{clock(h.t)}</span>
-              <span className="pic"><span className="glyph mark" style={{ width: 26, height: 26 }}>{h.kind === "fight" || h.kind === "objective" ? <Swords size={14} /> : <Trophy size={14} />}</span></span>
-              <span className="txt">{h.label}<small className="hint">{Math.round(h.end - h.start)} s{h.file ? ", clip saved" : ""}</small></span>
-            </button>
-          ))}
-        </section>
-      )}
+      {hintError && <p className="down hint-note">{humanError(hintError)}</p>}
+      {nothing && !coach && <p className="hint-note">No deaths, team fights or bookmarks in this recording.</p>}
+
       {deaths.length > 0 && (
         <section className="rv">
           <header>
-            <h3><Skull size={15} aria-hidden />Your deaths<span className="num">{deaths.length}</span></h3>
+            <h3>
+              <Skull size={15} aria-hidden />
+              Your deaths<span className="num">{deaths.length}</span>
+            </h3>
             <span className="grow" />
             {hasHints && (
-              <button className={`btn sq ${worstFirst ? "on" : ""}`} aria-pressed={worstFirst} aria-label="Most avoidable first" title="Most avoidable first" onClick={() => setWorstFirst((v) => !v)}><ArrowDownWideNarrow size={14} /></button>
+              <button className={`btn sm sq ${worstFirst ? "on" : ""}`} aria-pressed={worstFirst} aria-label="Most avoidable first" title="Most avoidable first" onClick={() => setWorstFirst((v) => !v)}>
+                <ArrowDownWideNarrow size={14} />
+              </button>
             )}
-            <button className="btn" onClick={() => onStart("Deaths", deaths, 0)} title="Plays the 12 seconds before each death, then stops so you can think"><Play size={13} fill="currentColor" aria-hidden />Play all</button>
+            <button className="btn sm" onClick={() => onStart("Deaths", deaths, 0)} title="Plays the 12 seconds before each death, then stops so you can think">
+              <Play size={12} fill="currentColor" aria-hidden />
+              Play all
+            </button>
           </header>
 
           {deaths.map((d, i) => {
@@ -355,17 +496,43 @@ export function ReviewTab({
               <button key={i} className={`moment ${active("Deaths", i) ? "now" : ""}`} onClick={() => onStart("Deaths", deaths, i)}>
                 <span className="t">{clock(d.t)}</span>
                 <span className="pic">
-                  {e?.killerChamp ? <Portrait championKey={champKey(e.killerChamp)} name={e.killerChamp} size={26} side="enemy" /> : <span className="glyph enemy" style={{ width: 26, height: 26 }}><Skull size={14} /></span>}
+                  {e?.killerChamp ? (
+                    <Portrait championKey={champKey(e.killerChamp)} name={e.killerChamp} size={26} side="enemy" />
+                  ) : (
+                    <span className="glyph enemy" style={{ width: 26, height: 26 }}>
+                      <Skull size={14} />
+                    </span>
+                  )}
                   {(e?.assisters?.length ?? 0) > 0 && <small>+{e!.assisters!.length}</small>}
                 </span>
                 <span className="txt" title={rows[i].hint ? hintDetail(rows[i].hint!) : undefined}>
                   {d.label}
-                  {lateSumm && <small className="hint bad"><Zap size={11} aria-hidden />{lateSumm.key} pressed {(d.t - lateSumm.t).toFixed(1)}s before death</small>}
+                  {lateSumm && (
+                    <small className="hint bad">
+                      <Zap size={11} aria-hidden />
+                      {lateSumm.key} pressed {(d.t - lateSumm.t).toFixed(1)}s before death
+                    </small>
+                  )}
                   {pre.length > 0 && <small className="prefight">{pre.join(" · ")}</small>}
-                  {rows[i].hint && <small className={`hint ${hintLine(rows[i].hint!).tone}`}><Sparkles size={11} aria-hidden />{hintLine(rows[i].hint!).text}</small>}
+                  {rows[i].hint && (
+                    <small className={`hint ${hintLine(rows[i].hint!).tone}`}>
+                      <Sparkles size={11} aria-hidden />
+                      {hintLine(rows[i].hint!).text}
+                    </small>
+                  )}
                   {(() => {
                     const said = coach?.deaths.find((c) => Math.abs(c.t - rows[i].e.t) < 1.5);
-                    return said ? <small className="said">{said.whatHappened}{said.better && <><br /><b>Better:</b> {said.better}</>}</small> : null;
+                    return said ? (
+                      <small className="said">
+                        {said.whatHappened}
+                        {said.better && (
+                          <>
+                            <br />
+                            <b>Better:</b> {said.better}
+                          </>
+                        )}
+                      </small>
+                    ) : null;
                   })()}
                 </span>
               </button>
@@ -376,41 +543,76 @@ export function ReviewTab({
       {fightList.length > 0 && (
         <section className="rv">
           <header>
-            <h3><Swords size={15} aria-hidden />Team fights<span className="num">{fightList.length}</span></h3>
-            <button className="btn" onClick={() => onStart("Fights", fightList, 0)}><Play size={13} fill="currentColor" aria-hidden />Play all</button>
+            <h3>
+              <Swords size={15} aria-hidden />
+              Team fights<span className="num">{fightList.length}</span>
+            </h3>
+            <span className="grow" />
+            <button className="btn sm" onClick={() => onStart("Fights", fightList, 0)}>
+              <Play size={12} fill="currentColor" aria-hidden />
+              Play all
+            </button>
           </header>
           {fights.map((f, i) => {
             const won = f.ours > f.theirs;
             const even = f.ours === f.theirs;
             const pre = preFightBits(f.start);
-            const row = (
-              <button className={`moment ${active("Fights", i) ? "now" : ""}`} onClick={() => onStart("Fights", fightList, i)}>
-                <span className="t">{clock(f.start)}</span>
-                <span className="pic"><b className={`tally ${even ? "" : won ? "ally" : "enemy"}`}>{f.ours} : {f.theirs}</b></span>
-                <span className="txt">
-                  {even ? "Even trade" : won ? "Won" : "Lost"}, {Math.max(1, Math.round(f.end - f.start))} s{f.kills.some((k) => k.role === "death") ? ", you died" : ""}
-                  {pre.length > 0 && <small className="prefight">{pre.join(" · ")}</small>}
-                </span>
-              </button>
-            );
             const said = team.find((r) => Math.abs(r.t - f.start) < 6);
             return (
               <div key={i}>
-                {row}
+                <button className={`moment ${active("Fights", i) ? "now" : ""}`} onClick={() => onStart("Fights", fightList, i)}>
+                  <span className="t">{clock(f.start)}</span>
+                  <span className="pic">
+                    <b className={`tally ${even ? "" : won ? "ally" : "enemy"}`}>
+                      {f.ours} : {f.theirs}
+                    </b>
+                  </span>
+                  <span className="txt">
+                    {even ? "Even trade" : won ? "Won" : "Lost"}, {Math.max(1, Math.round(f.end - f.start))} s{f.kills.some((k) => k.role === "death") ? ", you died" : ""}
+                    {pre.length > 0 && <small className="prefight">{pre.join(" · ")}</small>}
+                  </span>
+                </button>
                 {said ? (
                   <div className="teamrev">
-                    <h4><Users size={13} aria-hidden />Team review<small>from {said.views.length} {said.views.length === 1 ? "screen" : "screens"}: {said.views.join(", ")}</small></h4>
+                    <h4>
+                      <Users size={13} aria-hidden />
+                      Team review
+                      <small>
+                        from {said.views.length} {said.views.length === 1 ? "screen" : "screens"}: {said.views.join(", ")}
+                      </small>
+                    </h4>
                     <p>{said.summary}</p>
-                    {said.turningPoint && <p><b>Turning point:</b> {said.turningPoint}</p>}
-                    {said.shouldHave.length > 0 && <ul>{said.shouldHave.map((s, k) => <li key={k}>{s}</li>)}</ul>}
+                    {said.turningPoint && (
+                      <p>
+                        <b>Turning point:</b> {said.turningPoint}
+                      </p>
+                    )}
+                    {said.shouldHave.length > 0 && (
+                      <ul>
+                        {said.shouldHave.map((s, k) => (
+                          <li key={k}>{s}</li>
+                        ))}
+                      </ul>
+                    )}
                     {said.players.map((p, k) => (
-                      <p key={k} className="who"><Portrait championKey={champKey(p.champion)} name={p.champion} size={20} side="ally" /><span><b>{p.champion}:</b> {p.did} <i>{p.better}</i></span></p>
+                      <p key={k} className="who">
+                        <Portrait championKey={champKey(p.champion)} name={p.champion} size={20} side="ally" />
+                        <span>
+                          <b>{p.champion}:</b> {p.did} <i>{p.better}</i>
+                        </span>
+                      </p>
                     ))}
                     {said.call && <p className="call">“{said.call}”</p>}
                   </div>
                 ) : hintState !== "off" ? (
-                  <button className="btn teamask" disabled={teamBusy !== null} onClick={() => onTeamReview(f)} title="Sends this fight from your screen and every teammate's view that is ready to Google's Gemini, and asks what the team should have done. Pictures only: no Discord, no microphone.">
-                    <Users size={13} aria-hidden />{teamBusy === f.start ? "Reviewing, about half a minute" : `Team review from ${teamViews} ${teamViews === 1 ? "screen" : "screens"}`}
+                  <button
+                    className="btn sm quiet teamask"
+                    disabled={teamBusy !== null}
+                    onClick={() => onTeamReview(f)}
+                    title="Sends this fight from your screen and every teammate's view that is ready to Google's Gemini, and asks what the team should have done. Pictures only: no Discord, no microphone."
+                  >
+                    <Users size={13} aria-hidden />
+                    {teamBusy === f.start ? "Reviewing, about half a minute" : `Team review from ${teamViews} ${teamViews === 1 ? "screen" : "screens"}`}
                   </button>
                 ) : null}
               </div>
@@ -418,19 +620,109 @@ export function ReviewTab({
           })}
         </section>
       )}
+      {highlights.length > 0 && (
+        <section className="rv">
+          <header>
+            <h3>
+              <Trophy size={15} aria-hidden />
+              Highlights<span className="num">{highlights.length}</span>
+            </h3>
+            <span className="grow" />
+            <button className="btn sm" onClick={() => onStart("Highlights", reel, 0)}>
+              <Play size={12} fill="currentColor" aria-hidden />
+              Play all
+            </button>
+            <Menu label="More for highlights" className="btn sm sq quiet" items={highlightMenu}>
+              <MoreHorizontal size={15} />
+            </Menu>
+          </header>
+          {highlights.map((h, i) => (
+            <button key={i} className={`moment ${active("Highlights", i) ? "now" : ""}`} onClick={() => onStart("Highlights", reel, i)}>
+              <span className="t">{clock(h.t)}</span>
+              <span className="pic">
+                <span className="glyph mark" style={{ width: 26, height: 26 }}>
+                  {h.kind === "fight" || h.kind === "objective" ? <Swords size={14} /> : <Trophy size={14} />}
+                </span>
+              </span>
+              <span className="txt">
+                {h.label}
+                <small className="hint">
+                  {Math.round(h.end - h.start)} s{h.file ? ", clip saved" : ""}
+                </small>
+              </span>
+            </button>
+          ))}
+        </section>
+      )}
       {marks.length > 0 && (
         <section className="rv">
           <header>
-            <h3><Bookmark size={15} aria-hidden />Bookmarks<span className="num">{marks.length}</span></h3>
-            <button className="btn" onClick={() => onStart("Bookmarks", marks, 0)}><Play size={13} fill="currentColor" aria-hidden />Play all</button>
+            <h3>
+              <Bookmark size={15} aria-hidden />
+              Bookmarks<span className="num">{marks.length}</span>
+            </h3>
+            <span className="grow" />
+            <button className="btn sm" onClick={() => onStart("Bookmarks", marks, 0)}>
+              <Play size={12} fill="currentColor" aria-hidden />
+              Play all
+            </button>
           </header>
           {marks.map((m, i) => (
             <button key={i} className={`moment ${active("Bookmarks", i) ? "now" : ""}`} onClick={() => onStart("Bookmarks", marks, i)}>
               <span className="t">{clock(m.t)}</span>
-              <span className="pic"><span className="glyph mark" style={{ width: 26, height: 26 }}><Bookmark size={14} fill="currentColor" /></span></span>
+              <span className="pic">
+                <span className="glyph mark" style={{ width: 26, height: 26 }}>
+                  <Bookmark size={14} fill="currentColor" />
+                </span>
+              </span>
               <span className="txt">Bookmark</span>
             </button>
           ))}
+        </section>
+      )}
+
+      {onFinish && (
+        <section className="finish">
+          {reviewedAt ? (
+            <div className="done">
+              <span className="okmark">
+                <Check size={15} aria-hidden />
+              </span>
+              <div className="dt">
+                <b>Reviewed</b>
+                {nextFocus?.text ? (
+                  <p>
+                    Next games, work on: <i>{nextFocus.text}</i>
+                  </p>
+                ) : (
+                  <p>No focus set for the next games.</p>
+                )}
+              </div>
+              <button className="btn sm quiet" onClick={onReopen}>
+                Change
+              </button>
+            </div>
+          ) : (
+            <>
+              <h3>Finish the review</h3>
+              <label className="fl" htmlFor="nextfocus">
+                One thing to work on next game
+              </label>
+              <textarea
+                id="nextfocus"
+                className="field-input"
+                rows={2}
+                value={suggested}
+                placeholder="For example: ward the river before crossing it"
+                onChange={(e) => setFocusDraft(e.target.value)}
+              />
+              <small className="muted">Rewatch reminds you of it when your next game starts, then asks how it went.</small>
+              <button className="btn primary" onClick={() => onFinish(suggested.trim() || null)}>
+                <Check size={15} aria-hidden />
+                Mark as reviewed
+              </button>
+            </>
+          )}
         </section>
       )}
     </div>
@@ -454,15 +746,34 @@ export function QueueBar({
   onClose: () => void;
 }) {
   const item = queue.items[queue.idx];
+  const total = queue.across?.total ?? queue.items.length;
+  const at = (queue.across?.base ?? 0) + queue.idx;
   return (
     <div className="queuebar" role="group" aria-label={`${queue.title} walk-through`}>
-      <b>{queue.title} {queue.idx + 1} of {queue.items.length}</b>
-      <span>{clock(item.t)} · {item.label}</span>
-      <button className="btn sq" disabled={queue.idx === 0} onClick={() => onGo(queue.idx - 1)} aria-label="Previous" title="Previous (P)"><ChevronLeft size={16} /></button>
-      <button className="btn sq" onClick={onReplay} aria-label="Play this one again" title="Play this one again"><RotateCcw size={14} /></button>
-      <button className={`btn sq ${looping ? "on" : ""}`} aria-pressed={looping} onClick={onToggleLoop} aria-label="Loop this moment" title="Loop this moment (R)"><Repeat size={14} /></button>
-      <button className="btn sq" disabled={queue.idx >= queue.items.length - 1} onClick={() => onGo(queue.idx + 1)} aria-label="Next" title="Next (N)"><ChevronRight size={16} /></button>
-      <button className="btn sq quiet" onClick={onClose} aria-label="Stop the walk-through" title="Stop (Esc)"><X size={15} /></button>
+      <span className="qprog" aria-hidden>
+        <i style={{ width: `${((at + 1) / total) * 100}%` }} />
+      </span>
+      <b>
+        {queue.title} <span className="num">{at + 1}</span> of <span className="num">{total}</span>
+      </b>
+      <span className="ql">
+        {clock(item.t)} · {item.label}
+      </span>
+      <button className="btn sm sq" disabled={at === 0} onClick={() => onGo(queue.idx - 1)} aria-label="Previous" title="Previous (P)">
+        <ChevronLeft size={16} />
+      </button>
+      <button className="btn sm sq" onClick={onReplay} aria-label="Play this one again" title="Play this one again">
+        <RotateCcw size={14} />
+      </button>
+      <button className={`btn sm sq ${looping ? "on" : ""}`} aria-pressed={looping} onClick={onToggleLoop} aria-label="Loop this moment" title="Loop this moment (R)">
+        <Repeat size={14} />
+      </button>
+      <button className="btn sm sq" disabled={at >= total - 1} onClick={() => onGo(queue.idx + 1)} aria-label="Next" title="Next (N)">
+        <ChevronRight size={16} />
+      </button>
+      <button className="btn sm sq quiet" onClick={onClose} aria-label="Stop the walk-through" title="Stop (Esc)">
+        <X size={15} />
+      </button>
     </div>
   );
 }
@@ -754,26 +1065,41 @@ export function Lanes({
               )}
               <span className="muted">at {clock(shown)}</span>
             </span>
-            <select className="field-input" value={metric} aria-label="What the graph shows" onChange={(e) => onMetric(e.target.value as Metric)}>
-              {availableMetrics.map((m) => <option key={m.key} value={m.key}>{m.label}</option>)}
-            </select>
+            <Select small className="ghost" label="What the graph shows" value={metric} onChange={onMetric} placement="top-end" options={availableMetrics.map((m) => ({ value: m.key, label: m.label }))} />
             {metric !== "gold" && metric !== "goldDiff" && metric !== "killDiff" && metric !== "apm" && (
-              <select className="field-input" value={other?.name ?? ""} aria-label="Compare with" onChange={(e) => onVersus(e.target.value)}>
-                {!other && <option value="">Compare with…</option>}
-                {players.filter((p) => !p.isMe).map((p) => (
-                  <option key={p.name} value={p.name}>{p.champion}{laneName(p.position) ? ` (${laneName(p.position)})` : ""}{p === opponent ? ", your lane" : ""}</option>
-                ))}
-              </select>
+              <Select
+                small
+                className="ghost"
+                label="Compare with"
+                prefix="vs"
+                value={other?.name ?? ""}
+                onChange={onVersus}
+                placement="top-end"
+                options={[
+                  ...(!other ? [{ value: "", label: "Nobody" }] : []),
+                  ...players
+                    .filter((p) => !p.isMe)
+                    .map((p) => ({ value: p.name, label: p.champion, hint: [laneName(p.position), p === opponent ? "your lane" : "", p.team === me?.team ? "your team" : "enemy"].filter(Boolean).join(", ") })),
+                ]}
+              />
             )}
             {otherGames.length > 0 && metric !== "apm" && (
-              <select className="field-input" value={compareId} aria-label="Compare with another game" onChange={(e) => setCompareId(e.target.value)}>
-                <option value="">vs Game…</option>
-                {otherGames.slice(0, 20).map((g) => (
-                  <option key={g.id} value={g.id}>
-                    {g.game.me?.champion} {g.game.result ? `(${g.game.result})` : ""} · {new Date(g.startedEpochMs).toLocaleDateString([], { month: "short", day: "numeric" })}
-                  </option>
-                ))}
-              </select>
+              <Select
+                small
+                className="ghost"
+                label="Compare with another of your games"
+                value={compareId}
+                onChange={setCompareId}
+                placement="top-end"
+                options={[
+                  { value: "", label: "No other game" },
+                  ...otherGames.slice(0, 20).map((g) => ({
+                    value: g.id,
+                    label: `${g.game.me?.champion ?? "Game"}, ${new Date(g.startedEpochMs).toLocaleDateString([], { month: "short", day: "numeric" })}`,
+                    hint: g.game.result === "Win" ? "Victory" : g.game.result === "Lose" ? "Defeat" : undefined,
+                  })),
+                ]}
+              />
             )}
           </div>
         )}

@@ -278,7 +278,11 @@ fn start_session(app: &AppHandle, game_pid: Option<u32>, client: liveclient::Cli
     match &out {
         Ok(what) => {
             set_tray_tip(app, &format!("Rewatch: recording {what}"));
-            notify(app, &format!("Recording {what}"));
+            // The one thing the player chose to work on, while it can still help.
+            match library::latest_focus(&settings) {
+                Some(focus) => notify(app, &format!("Recording {what}. Your focus: {focus}")),
+                None => notify(app, &format!("Recording {what}")),
+            }
         }
         Err(e) => notify(app, &format!("Could not start recording: {e}")),
     }
@@ -485,13 +489,24 @@ fn environment(state: State<AppState>) -> Value {
         .ok()
         .and_then(|o| o.lines().next().map(String::from));
     let videos = std::env::var("USERPROFILE").map(|p| format!("{p}\\Videos\\Rewatch")).unwrap_or_default();
+    let free = s
+        .recordings_path()
+        .or_else(|| (!videos.is_empty()).then(|| std::path::PathBuf::from(&videos)))
+        .and_then(|p| winutil::free_bytes(&p));
     json!({
         "ffmpeg": ffmpeg.to_string_lossy(),
         "ffmpegVersion": version,
         "ffprobeFound": video::run_tool(&ffprobe, &["-version".to_string()]).is_ok(),
         "leagueDir": s.league_path().map(|p| p.to_string_lossy().to_string()),
         "suggestedRecordingsDir": videos,
+        "freeBytes": free,
     })
+}
+
+/// Put a saved clip or export on the clipboard as a file, ready to paste into Discord.
+#[tauri::command(async)]
+fn copy_file(path: String) -> CmdResult<()> {
+    winutil::copy_files_to_clipboard(&[std::path::PathBuf::from(path)]).map_err(err)
 }
 
 #[tauri::command(async)]
@@ -1009,6 +1024,7 @@ pub fn run() {
             save_settings,
             get_status,
             environment,
+            copy_file,
             list_microphones,
             share_info,
             friend_ping,

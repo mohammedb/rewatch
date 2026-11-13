@@ -440,13 +440,53 @@ games played the full-length Discord and mic over the reel, an old game hid the 
 when a new graph line was chosen, clips longer than the size allowed came out too
 big). Not checked: a real game, the reel and downscaling on real hardware.
 
-## Not built yet
+## Version 0.4.0 (2026-11-13)
 
-Code signing (so Windows stops warning about the installer).
+The interface is reworked around reviewing a game and taking one lesson into the next.
 
-## After 0.3.0 (not released yet)
-
+- **Library**: hovering a game plays a preview, a list view sits next to the grid,
+  several games can be selected to keep, tag or delete at once, and a storage meter
+  shows the space used against the limit. A first-run checklist covers the setup, and
+  the To review filter lists the games not yet marked reviewed.
+- **Focus**: while reviewing, pick one thing to work on. The next game's "Recording"
+  notice repeats it, and that game's review asks whether you did it (yes, partly, no).
+- **Trends**, rebuilt: date range, queue, role, champion and tag in one row; headline
+  numbers against the period before; game-by-game charts (time dead, CS at 10, CS per
+  minute, vision per minute) with a rolling average and one shared hover; "Why you
+  died", where a cause plays every such death in the games shown as one walk-through;
+  how the focus went; champion, teammate and every-game tables.
+- **Walk-throughs** can span games. Previous and next move between them, and a game
+  trimmed to its highlights or deleted since is skipped, with a note saying so.
+- **Reviewing with teammates**: share mode (`Shift+P`), a clean, large view for sharing
+  the window in Discord; a laser pointer that is never saved; undo for drawings; replies
+  to notes, which reach teammates' copies too.
+- **Clips** can be copied to the clipboard as a file, ready to paste into Discord.
+- **Settings** save themselves. A Status panel at the top checks FFmpeg, auto-record,
+  the League folder, free disk space, the microphone and sharing, each with a button to
+  fix it, and a list on the left jumps between sections. Lowering the storage limit
+  asks first when it would delete games.
+- **Everywhere**: Archivo for headings and Geist for text (bundled, replacing Inter),
+  the app's own dropdowns, menus and confirm dialogs, loading placeholders, errors in
+  plain words, and toasts that follow long jobs (clips, the reel, exports). Deleting
+  games, notes and teammates can be undone for a few seconds.
 - The Trends tab keeps each recording's row and reads it again only when its match,
   review or insights file changes.
 - Clips, highlight clips, the reel and split-view clips share one list of encoders to
   try (`video::h264_ladder`), in a quality or a bitrate mode.
+
+Checked: the unit tests (54), a full build, the interface with sample data in a browser
+from 1100 to 1920 px wide, and a code review of the whole change (fixed: a walk-through
+stopped at a game trimmed to its highlights or deleted, notes changed just before
+leaving a game were not saved, deleted games could flash back after the Undo, popovers
+could not be reached with Tab, a walk-through could end itself when the app refreshed,
+Settings reopened during a save showed old values, a deleted note could not be brought
+back, leaving Trends while a walk-through loaded pulled the player into it). Not
+checked: a real game, pasting a copied clip into Discord, the focus in the "Recording"
+notice.
+
+## Not built yet
+
+Code signing (so Windows stops warning about the installer). A sample game for the
+first launch. A percentage for FFmpeg jobs (their toasts show the time so far). Still
+frames for the library's hover preview (it plays the video). A live microphone level in
+Settings (Windows reports one only while some app has the microphone open).

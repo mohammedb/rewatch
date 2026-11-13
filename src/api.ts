@@ -19,6 +19,8 @@ export const api = {
   saveSettings: (settings: Settings) => call<Settings>("save_settings", { settings }),
   getStatus: () => call<Status>("get_status"),
   environment: () => call<Environment>("environment"),
+  /** Put a file on the clipboard, ready to paste into Discord or a folder. */
+  copyFile: (path: string) => call<void>("copy_file", { path }),
   listMicrophones: () => call<MicInfo[]>("list_microphones"),
   listMatches: () => call<MatchSummary[]>("list_matches"),
   getMatch: (id: string) => call<MatchFull>("get_match", { id }),

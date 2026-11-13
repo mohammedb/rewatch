@@ -556,16 +556,18 @@ export function SideView({
   };
 
   const lane = laneName(pov.position);
+  // The laser pointer only works over your own view; it is never saved.
+  const drawTool = tool === "laser" ? null : tool;
   return (
     <div className={`tile ${listening ? "listening" : ""} ${big ? "big" : ""}`}>
-      <ZoomPane panDisabled={!!tool}>
+      <ZoomPane panDisabled={!!drawTool}>
         <div className="frame" style={{ aspectRatio: ratio, width: `min(100cqw, calc(100cqh * ${ratio}))` }}>
           <video
             ref={ref}
             src={pov.video ?? undefined}
             preload="auto"
             muted
-            onClick={() => !tool && onToggle()}
+            onClick={() => !drawTool && onToggle()}
             onError={onFail}
             onWaiting={() => setState((s) => (s === "outside" ? s : "loading"))}
             onCanPlay={() => setState((s) => (s === "outside" ? s : "ok"))}
@@ -573,13 +575,13 @@ export function SideView({
           <canvas ref={canvasRef} />
           <svg
             ref={svgRef}
-            className={`draw ${tool ? "active" : ""}`}
+            className={`draw ${drawTool ? "active" : ""}`}
             viewBox={`0 0 1000 ${drawH}`}
             onPointerDown={(e) => {
-              if (!tool) return;
+              if (!drawTool) return;
               masterRef.current?.pause();
               e.currentTarget.setPointerCapture(e.pointerId);
-              setDraft({ tool, color: ink, pts: [pointIn(e)] });
+              setDraft({ tool: drawTool, color: ink, pts: [pointIn(e)] });
             }}
             onPointerMove={(e) => {
               if (!draft) return;

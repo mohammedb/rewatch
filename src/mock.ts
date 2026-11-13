@@ -125,8 +125,6 @@ const teamReview: TeamReview = {
   call: "Wait for Lee, then hook, and everything on Kai'Sa.",
 };
 
-let watchPeers: WatchPeer[] = [{ code: "kaja", name: "Kaja", playing: false, rate: 1, matchId: "2026-11-12_20-14-03", t: 61 }];
-
 const update: UpdateInfo = { current: "0.2.4", available: { version: "0.2.5", notes: "Highlight reels, trends, and per-match audio.", url: "" }, checked: true, installing: false, error: null };
 
 const base = (id: string, ms: number, result: "Win" | "Lose", champ: PlayerRow, tags: string[] = []): MatchSummary => ({
@@ -141,19 +139,72 @@ const base = (id: string, ms: number, result: "Win" | "Lose", champ: PlayerRow, 
   bookmarks: [{ t: 45 }, { t: 90 }],
   mouse: { file: "mouse.csv", offset: 0, w: 1280, h: 720 },
   keys: { file: "keys.csv", offset: 0, names: ["Q", "W", "E", "R", "D", "F", "1", "2", "3", "4", "5", "6", "7", "B", "A", "S", "Tab", "Space", "Ctrl", "Shift"] },
-  dir: "/mock", sizeBytes: 6.4 * 1024 ** 3, keep: false, tags, notesText: "Walked up without vision of Zed.\nBaron call was late.", noteCount: 2, thumb: null, reel: null,
-  summary: { deaths: 3, bookmarks: 2 },
+  dir: "/mock", sizeBytes: 6.4 * 1024 ** 3, keep: false, tags, notesText: "", noteCount: 0, thumb: null, reel: null,
+  summary: { deaths: champ.deaths, bookmarks: 2 },
 });
 
-const now = Date.now();
-const matches: MatchSummary[] = [
-  base("2026-11-12_20-14-03", now - 2 * 3600e3, "Win", players[0], ["roaming", "vision"]),
-  { ...base("2026-11-11_22-40-51", now - 26 * 3600e3, "Lose", { ...players[0], champion: "Orianna", championKey: "Orianna", kills: 2, deaths: 7, assists: 5, cs: 187 }, ["laning"]), keep: true, sizeBytes: 5.1 * 1024 ** 3 },
-  { ...base("2026-11-10_19-02-17", now - 50 * 3600e3, "Win", { ...players[0], champion: "Syndra", championKey: "Syndra", kills: 11, deaths: 2, assists: 4, cs: 260 }, ["carry"]), game: { ...base("x", 0, "Win", players[0]).game, queueName: "Ranked Flex", queueId: 440 }, noteCount: 0, notesText: "" },
-  { ...base("2026-11-10_17-30-00", now - 52 * 3600e3, "Win", players[0]), mode: "manual", game: { result: null }, noteCount: 0, notesText: "", summary: { deaths: 0, bookmarks: 0 } },
-];
+/** A recording folder's name: its local start time, like 2026-11-12_20-14-03. */
+const idOf = (ms: number) => {
+  const d = new Date(ms);
+  const p = (n: number) => String(n).padStart(2, "0");
+  return `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())}_${p(d.getHours())}-${p(d.getMinutes())}-${p(d.getSeconds())}`;
+};
 
-let review: Review = {
+const CHAMPS: [string, string][] = [["Ahri", "Ahri"], ["Orianna", "Orianna"], ["Syndra", "Syndra"], ["Viktor", "Viktor"], ["Taliyah", "Taliyah"], ["Akali", "Akali"]];
+const QUEUES: [number, string][] = [[420, "Ranked Solo/Duo"], [440, "Ranked Flex"], [400, "Normal Draft"]];
+// Hours ago, champion, result, kills, deaths, assists, CS, minutes, queue, tags. Newest first.
+const SPEC: [number, number, "Win" | "Lose", number, number, number, number, number, number, string[]][] = [
+  [2, 0, "Win", 7, 3, 9, 212, 33, 0, ["roaming", "vision"]],
+  [26, 1, "Lose", 2, 7, 5, 187, 31, 0, ["laning"]],
+  [27.5, 0, "Win", 9, 4, 8, 231, 29, 0, []],
+  [50, 2, "Win", 11, 2, 4, 260, 34, 1, ["carry"]],
+  [75, 3, "Lose", 3, 6, 6, 198, 36, 0, ["vision"]],
+  [77, 0, "Lose", 4, 8, 7, 176, 28, 0, ["laning", "tilt"]],
+  [100, 4, "Win", 6, 2, 12, 205, 30, 2, []],
+  [124, 0, "Win", 8, 5, 10, 224, 35, 0, ["teamfight"]],
+  [170, 2, "Lose", 5, 6, 3, 201, 32, 0, []],
+  [196, 1, "Win", 4, 1, 14, 244, 37, 1, ["carry"]],
+  [250, 5, "Lose", 6, 9, 2, 158, 27, 0, ["laning"]],
+  [340, 0, "Win", 10, 3, 6, 239, 31, 0, []],
+  [420, 3, "Win", 5, 4, 9, 217, 33, 0, ["vision"]],
+  [500, 0, "Lose", 3, 5, 8, 190, 30, 0, []],
+  [600, 2, "Win", 12, 4, 7, 270, 38, 1, ["teamfight"]],
+  [700, 4, "Lose", 2, 6, 11, 172, 29, 2, []],
+];
+const FOCUS = ["Ward the river before crossing it when Zed's ultimate is up", "Shop before Baron spawns, not during it", "Hold charm for their carry, not the tank in front"];
+// Which games set a focus, and how the games after them went.
+const SET_FOCUS: Record<number, number> = { 2: 0, 6: 1, 11: 2 };
+const CHECK: Record<number, [number, "yes" | "partly" | "no"]> = { 1: [0, "partly"], 3: [1, "yes"], 4: [1, "no"], 7: [2, "yes"], 8: [2, "partly"], 9: [2, "yes"], 10: [2, "no"] };
+const UNREVIEWED = new Set([0, 1, 5]);
+const KEPT = new Set([1, 3, 9]);
+const ROTATE = ["no_vision", "overextended", "no_vision", "outnumbered", "tower_dive", "overextended", "engage_no_followup", "no_vision", "lost_even_fight"];
+
+let watchPeers: WatchPeer[] = [{ code: "kaja", name: "Kaja", playing: false, rate: 1, matchId: null, t: 61 }];
+
+const now = Date.now();
+const reviews: Record<string, Review> = {};
+const matches: MatchSummary[] = SPEC.map(([h, c, result, k, d, a, cs, min, q, tags], i) => {
+  const ms = now - h * 3600e3 - (i % 3) * 37 * 60e3;
+  const me = { ...players[0], champion: CHAMPS[c][0], championKey: CHAMPS[c][1], kills: k, deaths: d, assists: a, cs };
+  const m = base(idOf(ms), ms, result, me, tags);
+  m.game = { ...m.game, queueId: QUEUES[q][0], queueName: QUEUES[q][1], length: min * 60 + 17 * (i % 4) };
+  m.sizeBytes = (4.2 + ((i * 37) % 36) / 10) * 1024 ** 3;
+  const done = !UNREVIEWED.has(i);
+  const setAt = ms + (min + 25) * 60e3;
+  const review: Review = {
+    keep: KEPT.has(i),
+    tags,
+    notes: i % 3 === 0 && i > 0 ? [{ id: `n${i}`, t: 39, text: "Walked up without vision. Ward first next time." }] : [],
+    drawings: [],
+    reviewedAt: done ? setAt : null,
+    nextFocus: i in SET_FOCUS ? { text: FOCUS[SET_FOCUS[i]], setAt } : null,
+    focusCheck: i in CHECK ? { text: FOCUS[CHECK[i][0]], answer: CHECK[i][1] } : null,
+  };
+  reviews[m.id] = review;
+  return { ...m, keep: review.keep, reviewed: done, nextFocus: review.nextFocus, focusCheck: review.focusCheck, noteCount: review.notes.length, notesText: review.notes.map((n) => n.text).join("\n") };
+});
+// The newest game has the full sample review: notes, a drawing and tags.
+reviews[matches[0].id] = {
   keep: false,
   tags: ["roaming", "vision"],
   notes: [
@@ -164,6 +215,25 @@ let review: Review = {
     { id: "d1", t: 40, shapes: [{ tool: "circle", color: "#ffb347", pts: [[0.42, 0.38], [0.56, 0.6]] }, { tool: "arrow", color: "#ff5d5d", pts: [[0.7, 0.3], [0.52, 0.47]] }] },
   ],
 };
+matches[0] = { ...matches[0], noteCount: 2, notesText: "Walked up without vision of Zed.\nBaron call was late." };
+watchPeers[0].matchId = matches[0].id;
+// One screen recording, between games.
+{
+  const ms = now - 52 * 3600e3;
+  matches.splice(4, 0, { ...base(idOf(ms), ms, "Win", players[0]), mode: "manual", game: { result: null } as unknown as MatchSummary["game"], noteCount: 0, summary: { deaths: 0, bookmarks: 0 }, sizeBytes: 0.4 * 1024 ** 3 });
+}
+
+/** Causes for the deaths in a game, as the hints would give them. */
+const causesOf = (i: number, deaths: number) => Array.from({ length: Math.min(deaths, 3) }, (_, j) => ROTATE[(i * 2 + j) % ROTATE.length]);
+function insightsFor(id: string): Insights | null {
+  const games = matches.filter((m) => m.mode === "game");
+  const i = games.findIndex((m) => m.id === id);
+  if (i < 0) return null;
+  return {
+    model: "gemini-decision-1",
+    deaths: causesOf(i, games[i].game.me!.deaths).map((cause, j) => ({ t: 22 + j * 31, avoidable: 0.55 + (j % 3) * 0.12, sawItComing: 0.3, allyClose: 0.3, cause, causeP: 0.6, fight: "caught_alone", fightP: 0.5, positioning: 0.4 })),
+  };
+}
 
 let backups: LeagueBackup[] = [
   { id: "2026-11-12_19-50-00", createdAt: new Date(now - 3 * 3600e3).toISOString(), label: "Auto before game", files: ["PersistedSettings.json", "input.ini", "game.cfg"], sizeBytes: 18420, auto: true },
@@ -193,48 +263,71 @@ export async function mock<T>(cmd: string, args?: Record<string, unknown>): Prom
       case "get_settings": return settings;
       case "save_settings": settings = args!.settings as Settings; return settings;
       case "get_status": return status;
-      case "environment": return { ffmpeg: "C:\\ffmpeg\\bin\\ffmpeg.exe", ffmpegVersion: "ffmpeg version 7.1.1", ffprobeFound: true, leagueDir: "D:\\Riot Games\\League of Legends", suggestedRecordingsDir: "C:\\Users\\you\\Videos\\Rewatch" };
+      case "environment": return { ffmpeg: "C:\\ffmpeg\\bin\\ffmpeg.exe", ffmpegVersion: "ffmpeg version 7.1.1", ffprobeFound: true, leagueDir: "D:\\Riot Games\\League of Legends", suggestedRecordingsDir: "C:\\Users\\you\\Videos\\Rewatch", freeBytes: 412 * 1024 ** 3 };
+      case "copy_file": return null;
+      case "delete_match": {
+        const i = matches.findIndex((m) => m.id === args!.id);
+        if (i >= 0) matches.splice(i, 1);
+        return null;
+      }
       case "list_microphones": return [{ id: "a", name: "Headset Microphone", isDefault: true, isDefaultComms: true, level: 0.2 }, { id: "b", name: "Webcam Microphone", isDefault: false, isDefaultComms: false, level: 0 }];
       case "list_matches": return matches;
       case "get_match": {
         const m = matches.find((x) => x.id === args!.id) ?? matches[0];
         const game = m.mode !== "manual";
+        const review = reviews[m.id] ?? { keep: m.keep, notes: [], drawings: [], tags: m.tags ?? [] };
         const full: MatchFull = { ...m, events: game ? events : [], clock: game ? [[0, 600]] : [], review, stats: game ? stats : null, voice: game ? voice : null, titles: game ? builtInTitles : [], highlights: game ? highlights : [], team: [] };
         return full;
       }
-      case "save_review": review = args!.review as Review; return null;
+      case "save_review": {
+        const r = args!.review as Review;
+        reviews[args!.id as string] = r;
+        const i = matches.findIndex((m) => m.id === args!.id);
+        if (i >= 0) matches[i] = { ...matches[i], keep: r.keep, tags: r.tags ?? [], reviewed: !!r.reviewedAt, nextFocus: r.nextFocus ?? null, focusCheck: r.focusCheck ?? null, noteCount: r.notes.length, notesText: r.notes.map((n) => n.text).join("\n") };
+        return null;
+      }
       case "start_manual_recording": status.state = "recording"; status.mode = "manual"; status.startedEpochMs = Date.now(); return null;
       case "stop_recording": status.state = "idle"; status.mode = null; return matches[0].id;
       case "export_clip": return args?.maxMb ? `E:\\Rewatch\\Clips\\clip_${args.maxMb}mb.mp4` : "E:\\Rewatch\\Clips\\clip.mp4";
       case "export_full": return "E:\\Rewatch\\all-tracks.mp4";
       case "build_highlight_reel": return "E:\\Rewatch\\2026-11-12_20-14-03\\highlights_reel.mp4";
       case "library_trends": {
-        const list: TrendMatch[] = matches
-          .filter((m) => m.mode !== "manual" && m.game.me)
-          .map((m, idx) => ({
+        const games = matches.filter((m) => m.mode !== "manual" && m.game.me);
+        const list: TrendMatch[] = games.map((m, idx) => {
+          const me = m.game.me!;
+          const len = m.game.length ?? m.duration;
+          // Older games a little worse, so the trend lines have somewhere to go.
+          const age = idx / games.length;
+          const wob = ((idx * 7919) % 11) / 10;
+          const causes = causesOf(idx, me.deaths);
+          const r = reviews[m.id];
+          return {
             id: m.id,
             startedEpochMs: m.startedEpochMs,
             queueId: m.game.queueId,
             queueName: m.game.queueName,
             result: m.game.result ?? null,
-            champion: m.game.me!.champion,
-            championKey: m.game.me!.championKey,
-            position: m.game.me!.position ?? "MIDDLE",
-            kills: m.game.me!.kills,
-            deaths: m.game.me!.deaths,
-            assists: m.game.me!.assists,
-            cs: m.game.me!.cs,
-            wards: 24 + idx * 3,
-            length: m.game.length ?? m.duration,
-            cs10: 78 - idx * 4,
-            cs15: 128 - idx * 6,
-            deadPct: 8 + idx * 4,
-            allies: (m.game.players ?? []).filter((p) => !p.isMe && p.team === m.game.me!.team).map((p) => ({ name: p.name, champion: p.champion })),
+            champion: me.champion,
+            championKey: me.championKey,
+            position: me.position ?? "MIDDLE",
+            kills: me.kills,
+            deaths: me.deaths,
+            assists: me.assists,
+            cs: me.cs,
+            wards: Math.round((len / 60) * (0.62 + 0.25 * (1 - age) + wob * 0.12)),
+            length: len,
+            cs10: Math.round(62 + 14 * (1 - age) + wob * 6),
+            cs15: Math.round(101 + 22 * (1 - age) + wob * 9),
+            deadPct: Math.round(Math.max(3, me.deaths * 1.7 + 6 * age + wob * 2)),
+            allies: (m.game.players ?? []).filter((p) => !p.isMe && p.team === me.team).map((p) => ({ name: p.name, champion: p.champion })),
             tags: m.tags ?? [],
             keep: m.keep,
-            deathCauses: idx === 0 ? ["no_vision"] : idx === 1 ? ["overextended", "outnumbered"] : [],
-            avgAvoidable: idx === 0 ? 0.81 : idx === 1 ? 0.65 : 0.25,
-          }));
+            reviewed: !!r?.reviewedAt,
+            focus: r?.focusCheck ?? null,
+            deathCauses: causes,
+            avgAvoidable: causes.length ? 0.45 + wob * 0.4 : null,
+          };
+        });
         return list;
       }
       case "list_league_backups": return backups;
@@ -256,7 +349,7 @@ export async function mock<T>(cmd: string, args?: Record<string, unknown>): Prom
       case "pov_saving": return { sindre: [310000000, 1000000000] };
       case "pov_extras": return extras;
       case "voice": return voice;
-      case "insights": return args!.run ? insights : null;
+      case "insights": return args!.run ? insights : insightsFor(args!.id as string);
       case "coach": return args!.run ? coach : null;
       case "highlights": if (args!.save) highlights = highlights.map((h) => ({ ...h, file: `E:\\Rewatch\\game\\highlight_${Math.round(h.t)}.mp4` })); return highlights;
       case "team_review": return { ...teamReview, t: args!.start as number, end: args!.end as number };

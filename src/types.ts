@@ -119,6 +119,8 @@ export interface Environment {
   ffprobeFound: boolean;
   leagueDir: string | null;
   suggestedRecordingsDir: string;
+  /** Free space on the drive that holds the recordings. */
+  freeBytes?: number | null;
 }
 
 export interface MicInfo {
@@ -219,6 +221,12 @@ export interface MatchSummary {
   sizeBytes: number;
   keep: boolean;
   tags?: string[];
+  /** Marked as reviewed in the app. */
+  reviewed?: boolean;
+  /** What the player chose to work on after reviewing this game. */
+  nextFocus?: NextFocus | null;
+  /** How the focus that was set before this game went. */
+  focusCheck?: FocusCheck | null;
   notesText?: string;
   noteCount: number;
   thumb: string | null;
@@ -232,9 +240,24 @@ export interface Note {
   id: string;
   t: number;
   text: string;
+  /** The note this one answers, for a thread. */
+  replyTo?: string;
 }
 
-export type Tool = "pen" | "arrow" | "circle";
+/** One thing to work on in the next games, chosen while reviewing. */
+export interface NextFocus {
+  text: string;
+  /** When it was chosen, in epoch ms. */
+  setAt: number;
+}
+
+/** The player's own verdict on the focus they had going into a game. */
+export interface FocusCheck {
+  text: string;
+  answer: "yes" | "partly" | "no";
+}
+
+export type Tool = "pen" | "arrow" | "circle" | "laser";
 
 export interface Shape {
   tool: Tool;
@@ -401,6 +424,10 @@ export interface Review {
   drawings: Drawing[];
   tags?: string[];
   audio?: AudioPrefs;
+  /** When the player marked the game as reviewed, in epoch ms. */
+  reviewedAt?: number | null;
+  nextFocus?: NextFocus | null;
+  focusCheck?: FocusCheck | null;
 }
 
 export interface TrendMatch {
@@ -424,11 +451,14 @@ export interface TrendMatch {
   allies: { name: string; champion: string }[];
   tags: string[];
   keep: boolean;
+  reviewed?: boolean;
+  /** The player's verdict on their focus for this game. */
+  focus?: FocusCheck | null;
   deathCauses: string[];
   avgAvoidable?: number | null;
 }
 
-export interface MatchFull extends Omit<MatchSummary, "keep" | "noteCount" | "thumb" | "summary"> {
+export interface MatchFull extends Omit<MatchSummary, "keep" | "noteCount" | "thumb" | "summary" | "reviewed" | "nextFocus" | "focusCheck"> {
   events: GameEvent[];
   clock: [number, number][];
   review: Review;

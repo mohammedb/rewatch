@@ -337,6 +337,81 @@ pub fn hotkey_down(key: &Hotkey) -> bool {
     down(key.vk) && down(0x11) == key.ctrl && down(0x10) == key.shift && down(0x12) == key.alt
 }
 
+/// Bytes free for this user on the drive holding `path`. The folder itself need not
+/// exist yet: the nearest folder above it that does is asked instead.
+pub fn free_bytes(path: &std::path::Path) -> Option<u64> {
+    use windows::core::HSTRING;
+    use windows::Win32::Storage::FileSystem::GetDiskFreeSpaceExW;
+    let existing = path.ancestors().find(|p| !p.as_os_str().is_empty() && p.exists())?;
+    let mut free = 0u64;
+    unsafe { GetDiskFreeSpaceExW(&HSTRING::from(existing.as_os_str()), Some(&mut free), None, None) }.ok()?;
+    Some(free)
+}
+
+/// The clipboard's "files" format (CF_HDROP): a DROPFILES header, then every path as
+/// UTF-16 with its own terminator, then one more terminator.
+fn drop_list(paths: &[std::path::PathBuf]) -> Vec<u8> {
+    use std::os::windows::ffi::OsStrExt;
+    const HEADER: u32 = 20; // DROPFILES: pFiles, pt.x, pt.y, fNC, fWide
+    let mut out = Vec::new();
+    out.extend_from_slice(&HEADER.to_le_bytes());
+    out.extend_from_slice(&[0u8; 12]); // drop point and fNC
+    out.extend_from_slice(&1u32.to_le_bytes()); // fWide: the paths are UTF-16
+    for p in paths {
+        for unit in p.as_os_str().encode_wide().chain([0]) {
+            out.extend_from_slice(&unit.to_le_bytes());
+        }
+    }
+    out.extend_from_slice(&[0, 0]);
+    out
+}
+
+/// Put files on the clipboard the way Explorer's Copy does, so they can be pasted
+/// into Discord or a folder.
+pub fn copy_files_to_clipboard(paths: &[std::path::PathBuf]) -> anyhow::Result<()> {
+    use windows::Win32::Foundation::{GlobalFree, HANDLE};
+    use windows::Win32::System::DataExchange::{CloseClipboard, EmptyClipboard, OpenClipboard, SetClipboardData};
+    use windows::Win32::System::Memory::{GlobalAlloc, GlobalLock, GlobalUnlock, GMEM_MOVEABLE};
+    const CF_HDROP: u32 = 15;
+    anyhow::ensure!(!paths.is_empty(), "nothing to copy");
+    for p in paths {
+        anyhow::ensure!(p.exists(), "{} no longer exists", p.display());
+    }
+    let bytes = drop_list(paths);
+    unsafe {
+        let mem = GlobalAlloc(GMEM_MOVEABLE, bytes.len())?;
+        let dst = GlobalLock(mem) as *mut u8;
+        if dst.is_null() {
+            let _ = GlobalFree(Some(mem));
+            anyhow::bail!("could not prepare the clipboard");
+        }
+        std::ptr::copy_nonoverlapping(bytes.as_ptr(), dst, bytes.len());
+        let _ = GlobalUnlock(mem);
+        // Another program may hold the clipboard for a moment; try a few times.
+        let mut opened = false;
+        for _ in 0..10 {
+            if OpenClipboard(None).is_ok() {
+                opened = true;
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(30));
+        }
+        if !opened {
+            let _ = GlobalFree(Some(mem));
+            anyhow::bail!("the clipboard is busy; try again");
+        }
+        let _ = EmptyClipboard();
+        // Once handed over, the clipboard owns the memory.
+        let set = SetClipboardData(CF_HDROP, Some(HANDLE(mem.0)));
+        let _ = CloseClipboard();
+        if set.is_err() {
+            let _ = GlobalFree(Some(mem));
+            anyhow::bail!("could not put the file on the clipboard");
+        }
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -352,6 +427,23 @@ mod tests {
         assert_eq!(parse_hotkey("Ctrl"), None);
         assert_eq!(parse_hotkey("F99"), None);
         assert_eq!(parse_hotkey("banana"), None);
+    }
+
+    #[test]
+    fn drop_list_is_a_wide_double_terminated_list() {
+        let paths = [std::path::PathBuf::from(r"C:\a.mp4"), std::path::PathBuf::from(r"D:\b c.mp4")];
+        let bytes = drop_list(&paths);
+        assert_eq!(&bytes[0..4], &20u32.to_le_bytes(), "pFiles points past the header");
+        assert_eq!(&bytes[16..20], &1u32.to_le_bytes(), "fWide is set");
+        let units: Vec<u16> = bytes[20..].chunks(2).map(|c| u16::from_le_bytes([c[0], c[1]])).collect();
+        let text = String::from_utf16(&units).unwrap();
+        assert_eq!(text, "C:\\a.mp4\0D:\\b c.mp4\0\0");
+    }
+
+    #[test]
+    fn free_bytes_finds_an_existing_folder_above() {
+        let missing = std::env::temp_dir().join("rewatch-not-made-yet").join("deeper");
+        assert!(free_bytes(&missing).unwrap_or(0) > 0);
     }
 }
 

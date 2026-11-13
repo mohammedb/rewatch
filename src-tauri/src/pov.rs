@@ -209,7 +209,15 @@ pub fn extras_from_reply(reply: &Value, friend: &str, code: &str, my_offset: f64
     let notes = list("notes")
         .iter()
         .take(500)
-        .filter_map(|n| Some(json!({ "id": text(n, "id", 40), "t": n.get("t")?.as_f64()? - shift, "text": text(n, "text", 2000) })))
+        .filter_map(|n| {
+            let mut note = json!({ "id": text(n, "id", 40), "t": n.get("t")?.as_f64()? - shift, "text": text(n, "text", 2000) });
+            // A reply names the note it answers, so the thread reads the same on both PCs.
+            let parent = text(n, "replyTo", 40);
+            if !parent.is_empty() {
+                note["replyTo"] = json!(parent);
+            }
+            Some(note)
+        })
         .collect();
     let drawings = list("drawings")
         .iter()
@@ -1602,7 +1610,7 @@ mod tests {
         // Their recording began 15 s before mine, so their times are 15 s larger.
         let reply = json!({
             "ok": true, "offset": 55.0, "player": "Kaja", "champion": "Jinx", "championKey": "Jinx",
-            "notes": [ { "id": "n1", "t": 175.0, "text": "Late rotate" }, { "id": "bad" } ],
+            "notes": [ { "id": "n1", "t": 175.0, "text": "Late rotate" }, { "id": "bad" }, { "id": "n2", "t": 176.0, "text": "Agreed", "replyTo": "m7" } ],
             "drawings": [
                 { "id": "d1", "t": 100.0, "shapes": [ { "tool": "arrow", "color": "#ff5d5d", "pts": [[0.1, 0.2], [0.3, 0.4]] }, { "tool": "bomb", "color": "red", "pts": [] } ] },
                 { "id": "d2", "t": 30.0, "view": "Rin", "shapes": [] }
@@ -1610,8 +1618,10 @@ mod tests {
             "voice": [[20.0, 22.5]]
         });
         let e = extras_from_reply(&reply, "Kaja", "code", 40.0);
-        assert_eq!(e.notes.len(), 1);
+        assert_eq!(e.notes.len(), 2);
         assert_eq!(e.notes[0]["t"], json!(160.0));
+        assert!(e.notes[0].get("replyTo").is_none());
+        assert_eq!(e.notes[1]["replyTo"], json!("m7"), "a reply keeps the note it answers");
         assert_eq!(e.drawings.len(), 2);
         assert_eq!(e.drawings[0]["view"], json!("Kaja"));
         assert_eq!(e.drawings[0]["shapes"].as_array().unwrap().len(), 1);

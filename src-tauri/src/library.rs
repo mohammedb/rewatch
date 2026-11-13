@@ -44,6 +44,28 @@ fn read_review(dir: &Path) -> Value {
     read_json(&dir.join("review.json")).unwrap_or_else(default_review)
 }
 
+/// A game counts as reviewed once the player marked it so in the app.
+fn is_reviewed(review: &Value) -> bool {
+    review.get("reviewedAt").and_then(|v| v.as_i64()).is_some()
+}
+
+/// The thing the player chose to work on in their next games: the newest "next focus"
+/// written into any review, if it is still worded.
+pub fn latest_focus(settings: &Settings) -> Option<String> {
+    let root = settings.recordings_path()?;
+    let mut best: Option<(i64, String)> = None;
+    for entry in fs::read_dir(&root).ok()?.flatten() {
+        let Some(review) = read_json(&entry.path().join("review.json")) else { continue };
+        let Some(focus) = review.get("nextFocus") else { continue };
+        let text = focus.get("text").and_then(|v| v.as_str()).map(str::trim).unwrap_or("");
+        let set_at = focus.get("setAt").and_then(|v| v.as_i64()).unwrap_or(0);
+        if !text.is_empty() && best.as_ref().is_none_or(|(at, _)| set_at > *at) {
+            best = Some((set_at, text.to_string()));
+        }
+    }
+    best.map(|(_, text)| text)
+}
+
 fn source_video(dir: &Path) -> PathBuf {
     if let Some(doc) = read_json(&dir.join("match.json")) {
         if let Some(name) = doc.get("video").and_then(|v| v.as_str()) {
@@ -104,6 +126,9 @@ pub fn list(settings: &Settings) -> Vec<Value> {
             o.insert("sizeBytes".into(), json!(dir_size(&dir)));
             o.insert("keep".into(), review.get("keep").cloned().unwrap_or(json!(false)));
             o.insert("tags".into(), review.get("tags").cloned().unwrap_or_else(|| json!([])));
+            o.insert("reviewed".into(), json!(is_reviewed(&review)));
+            o.insert("nextFocus".into(), review.get("nextFocus").cloned().unwrap_or(Value::Null));
+            o.insert("focusCheck".into(), review.get("focusCheck").cloned().unwrap_or(Value::Null));
             let notes_text: String = review
                 .get("notes")
                 .and_then(|v| v.as_array())
@@ -334,6 +359,8 @@ pub fn trends(settings: &Settings) -> Vec<Value> {
             "allies": allies,
             "tags": review.get("tags").cloned().unwrap_or_else(|| json!([])),
             "keep": review.get("keep").cloned().unwrap_or(json!(false)),
+            "reviewed": is_reviewed(&review),
+            "focus": review.get("focusCheck").cloned().unwrap_or(Value::Null),
             "deathCauses": death_causes,
             "avgAvoidable": avg_avoidable,
         });

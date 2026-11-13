@@ -1,4 +1,4 @@
-import type { GameEvent } from "./types";
+import type { GameEvent, MatchSummary } from "./types";
 
 export function clock(sec: number): string {
   const s = Math.max(0, Math.floor(sec));
@@ -130,4 +130,37 @@ const LANES: Record<string, string> = { TOP: "Top", JUNGLE: "Jungle", MIDDLE: "M
 /** "MIDDLE" -> "Mid". Empty when the game assigned no lane. */
 export function laneName(position?: string | null): string {
   return LANES[(position ?? "").toUpperCase()] ?? "";
+}
+
+/** Games recorded in the last week that nobody has marked as reviewed yet. */
+export function toReview(matches: MatchSummary[] | null): MatchSummary[] {
+  const since = Date.now() - 7 * 86400e3;
+  return (matches ?? []).filter((m) => m.mode === "game" && !m.reviewed && m.startedEpochMs >= since && !!m.game?.me);
+}
+
+/** "12 minutes ago", "3 hours ago", "2 days ago". */
+export function ago(epochMs: number): string {
+  const min = Math.max(0, Math.round((Date.now() - epochMs) / 60000));
+  if (min < 1) return "just now";
+  if (min < 60) return `${min} ${min === 1 ? "minute" : "minutes"} ago`;
+  const h = Math.round(min / 60);
+  if (h < 24) return `${h} ${h === 1 ? "hour" : "hours"} ago`;
+  const d = Math.round(h / 24);
+  return `${d} ${d === 1 ? "day" : "days"} ago`;
+}
+
+/** A day heading: "Today", "Yesterday", "Tuesday", or "Tuesday 3 November" further back. */
+export function dayLabel(epochMs: number): string {
+  const d = new Date(epochMs);
+  const t = new Date();
+  const days = Math.round((new Date(t.getFullYear(), t.getMonth(), t.getDate()).getTime() - new Date(d.getFullYear(), d.getMonth(), d.getDate()).getTime()) / 86400e3);
+  if (days === 0) return "Today";
+  if (days === 1) return "Yesterday";
+  if (days < 7) return d.toLocaleDateString([], { weekday: "long" });
+  return d.toLocaleDateString([], { weekday: "long", day: "numeric", month: "long", ...(d.getFullYear() !== t.getFullYear() ? { year: "numeric" } : {}) });
+}
+
+/** Time of day only, for lists already grouped by day. */
+export function timeOfDay(epochMs: number): string {
+  return new Date(epochMs).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
 }
