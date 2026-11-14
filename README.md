@@ -499,6 +499,23 @@ shared file: 9 of 12 clips did not decode; a file each: all 12 fine), and that a
 or half-written clip gets exactly that 400 from both models. Not checked: two reviews
 of one game running at once in the installed app.
 
+## Version 0.4.2 (2026-11-14)
+
+- **Fixed: a gray box at the top of the player.** With the graph under the timeline
+  switched on, its three dropdowns (what the graph shows, "vs" and the other game) left
+  the graph's header and sat at the top of the player as a small gray box with a "vs"
+  and two arrows. The line that follows the mouse over the graph and the timeline had
+  the class `ghost`, the same as the dropdowns' transparent style from 0.4.0, and the
+  line's rule (`.lanes .ghost`) made each dropdown a 1 px wide box pinned to the top of
+  the player. The line is now `hoverline`. No other changes from 0.4.1.
+
+Checked: the interface with sample data in a browser, 2560 px wide with the graph on
+(before the fix all three dropdowns sat at the top of the player as in the report; after
+it they are in the graph's header with their labels), the lines that follow the mouse over
+the graph and the timeline (unchanged), the type check, a full build, and the published
+installer downloaded by 0.4.1's own updater with its signature checked. Not checked: the
+installed 0.4.2 with a real game's graph.
+
 ## Not built yet
 
 Code signing (so Windows stops warning about the installer). A sample game for the
