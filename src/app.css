@@ -659,7 +659,7 @@ i.todo { width: 7px; height: 7px; border-radius: 50%; background: var(--mark); d
 .tl .range .h:focus-visible { outline: 2px solid var(--focus); outline-offset: 1px; }
 .tl .head { position: absolute; top: 0; bottom: 0; width: 2px; margin-left: -1px; background: var(--mark); pointer-events: none; z-index: 4; }
 .tl .head::before { content: ""; position: absolute; top: 0; left: -5px; border: 6px solid transparent; border-top: 7px solid var(--mark); }
-.tl .ghost { position: absolute; top: 0; bottom: 0; width: 1px; background: rgb(255 255 255 / 0.28); pointer-events: none; z-index: 3; }
+.tl .hoverline { position: absolute; top: 0; bottom: 0; width: 1px; background: rgb(255 255 255 / 0.28); pointer-events: none; z-index: 3; }
 .tip { position: absolute; bottom: calc(100% + 8px); transform: translateX(-50%); background: #0d0f13; border: 1px solid var(--line-2); padding: 5px 10px; border-radius: 8px; font-size: 12.5px; white-space: nowrap; pointer-events: none; z-index: var(--z-over); box-shadow: var(--shadow-pop); }
 .tip .tiptext { display: flex; gap: 8px; align-items: baseline; }
 .tip b { font-weight: 700; font-variant-numeric: tabular-nums; color: var(--mark); }
@@ -867,7 +867,7 @@ table.score-t td small { display: block; color: var(--muted); font-size: 11.5px;
 .lanes .statgraph { display: block; width: 100%; height: 46px; }
 .lanes .ymax { position: absolute; right: 6px; bottom: 30px; font-size: 10.5px; color: var(--muted); pointer-events: none; font-variant-numeric: tabular-nums; }
 .lanes .head { position: absolute; top: 0; bottom: 0; width: 2px; margin-left: -1px; background: var(--mark); pointer-events: none; }
-.lanes .ghost { position: absolute; top: 0; bottom: 0; width: 1px; background: rgba(255, 255, 255, 0.28); pointer-events: none; }
+.lanes .hoverline { position: absolute; top: 0; bottom: 0; width: 1px; background: rgba(255, 255, 255, 0.28); pointer-events: none; }
 
 /* ---- review tab and the walk-through strip */
 .rv { margin-bottom: 14px; }

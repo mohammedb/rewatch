@@ -286,7 +286,7 @@ export function Timeline({ duration, time, markers, bands = [], cpm, cpmBucket, 
             ))}
           </div>
         )}
-        {hover && <div className="ghost" style={{ left: hover.x }} />}
+        {hover && <div className="hoverline" style={{ left: hover.x }} />}
         <div className="head" style={{ left: pct(time) }} />
       </div>
     </div>

@@ -1144,7 +1144,7 @@ export function Lanes({
           </svg>
         )}
         {statsOn && <span className="ymax">{fmt(series!.hi)}</span>}
-        {hover && <div className="ghost" style={{ left: hover.x }} />}
+        {hover && <div className="hoverline" style={{ left: hover.x }} />}
         <div className="head" style={{ left: `${pct(time)}%` }} />
       </div>
     </div>
