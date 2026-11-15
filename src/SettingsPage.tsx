@@ -25,6 +25,7 @@ import {
 import { useCallback, useEffect, useMemo, useRef, useState, type InputHTMLAttributes, type ReactNode } from "react";
 import { api, pickFolder, showInFolder } from "./api";
 import { bytes } from "./format";
+import type { SetupStep } from "./Onboarding";
 import type { Environment, Friend, KeySlot, LeagueBackup, MatchSummary, MicInfo, QueueToggles, Settings, ShareInfo, UpdateInfo } from "./types";
 import { humanError, Select, Skeleton, useConfirm, useToast } from "./ui";
 
@@ -313,7 +314,18 @@ let saves: Promise<void> = Promise.resolve();
 /** "Try again" on a failed save goes through the open page, so the page shows how it went. */
 let retryOpen: (() => void) | null = null;
 
-export function SettingsPage({ settings, onSave, matches }: { settings: Settings; onSave: (s: Settings) => Promise<void>; matches: MatchSummary[] | null }) {
+export function SettingsPage({
+  settings,
+  onSave,
+  matches,
+  onSetup,
+}: {
+  settings: Settings;
+  onSave: (s: Settings) => Promise<void>;
+  matches: MatchSummary[] | null;
+  /** Open the setup guide, at one step if given. */
+  onSetup?: (step?: SetupStep) => void;
+}) {
   const toast = useToast();
   const confirm = useConfirm();
   // The page's copy is the one being edited. It saves itself; what comes back from a save
@@ -413,6 +425,12 @@ export function SettingsPage({ settings, onSave, matches }: { settings: Settings
       .riotCheck(key)
       .then(setKeyCheck)
       .catch((e) => setKeyCheck({ ok: false, message: humanError(e) }));
+  };
+  /** The setup guide starts from the saved settings, so a change still waiting here is saved first. */
+  const openGuide = (step?: SetupStep) => {
+    if (!onSetup) return;
+    if (timer.current == null && !unsaved) return onSetup(step);
+    flush().then(() => onSetup(step), () => {});
   };
 
   // Leaving the page with a change still waiting saves it straight away.
@@ -802,6 +820,13 @@ export function SettingsPage({ settings, onSave, matches }: { settings: Settings
 
           <Section id="set-status" icon={HeartPulse} title="Status">
             <Health checks={checks} />
+            {onSetup && (
+              <Opt title="Setup guide" hint="This PC, recording, sound and teammates again, one step at a time.">
+                <button className="btn" onClick={() => openGuide()}>
+                  Open the guide
+                </button>
+              </Opt>
+            )}
           </Section>
 
           <Section id="set-recording" icon={CircleDot} title="Recording">
@@ -1096,6 +1121,14 @@ export function SettingsPage({ settings, onSave, matches }: { settings: Settings
               <p className="muted">
                 Send it to a teammate. When one of you adds the other's code, the other sees a request here. After that, each of you can watch the other's view of games you both
                 recorded.
+                {onSetup && (
+                  <>
+                    {" "}
+                    <button className="btn link" onClick={() => openGuide("team")}>
+                      Pair step by step
+                    </button>
+                  </>
+                )}
               </p>
               {share?.error && <p className="fres bad">{share.error}</p>}
             </div>

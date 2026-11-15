@@ -376,3 +376,136 @@ pub fn list_microphones() -> Vec<MicInfo> {
     }
     out
 }
+
+// ------------------------------------------------------------------ microphone check
+
+/// The setup guide's microphone check: one device held open while the page keeps asking
+/// how loud it is. It closes by itself a moment after the page stops asking.
+struct MicCheck {
+    device: String,
+    started: Instant,
+    /// Loudness as f32 bits, 0.0 to 1.0, falling back slowly after each sound.
+    level: Arc<std::sync::atomic::AtomicU32>,
+    asked: Arc<std::sync::Mutex<Instant>>,
+    error: Arc<std::sync::Mutex<Option<String>>>,
+    stop: Arc<AtomicBool>,
+}
+
+static MIC_CHECK: std::sync::Mutex<Option<MicCheck>> = std::sync::Mutex::new(None);
+
+/// How loud microphone `device` is right now, 0.0 to 1.0 ("" is the Windows default).
+/// The first call opens it; it is closed again a second and a half after the last.
+pub fn mic_level(device: &str) -> Result<f32> {
+    let mut slot = MIC_CHECK.lock().map_err(|_| anyhow!("the microphone check is stuck"))?;
+    // A check that could not open the device is not retried on every call.
+    let restart = match slot.as_ref() {
+        Some(c) if c.device == device => c.stop.load(Ordering::Relaxed) && c.started.elapsed() > Duration::from_secs(3),
+        _ => true,
+    };
+    if restart {
+        if let Some(old) = slot.take() {
+            old.stop.store(true, Ordering::Relaxed);
+        }
+        let check = MicCheck {
+            device: device.to_string(),
+            started: Instant::now(),
+            level: Arc::new(std::sync::atomic::AtomicU32::new(0)),
+            asked: Arc::new(std::sync::Mutex::new(Instant::now())),
+            error: Arc::new(std::sync::Mutex::new(None)),
+            stop: Arc::new(AtomicBool::new(false)),
+        };
+        let (dev, level, asked, error, stop) = (device.to_string(), check.level.clone(), check.asked.clone(), check.error.clone(), check.stop.clone());
+        std::thread::spawn(move || run_mic_check(dev, level, asked, error, stop));
+        *slot = Some(check);
+    }
+    let check = slot.as_ref().expect("set above");
+    if let Ok(mut t) = check.asked.lock() {
+        *t = Instant::now();
+    }
+    if let Some(e) = check.error.lock().ok().and_then(|e| e.clone()) {
+        return Err(anyhow!(e));
+    }
+    Ok(f32::from_bits(check.level.load(Ordering::Relaxed)))
+}
+
+/// Close the microphone check now.
+pub fn mic_check_stop() {
+    if let Some(check) = MIC_CHECK.lock().ok().and_then(|mut s| s.take()) {
+        check.stop.store(true, Ordering::Relaxed);
+    }
+}
+
+fn run_mic_check(
+    device: String,
+    level: Arc<std::sync::atomic::AtomicU32>,
+    asked: Arc<std::sync::Mutex<Instant>>,
+    error: Arc<std::sync::Mutex<Option<String>>>,
+    stop: Arc<AtomicBool>,
+) {
+    let _ = wasapi::initialize_mta();
+    let kind = TrackKind::Mic(Some(device).filter(|d| !d.is_empty()));
+    let format = WaveFormat::new(32, 32, SampleType::Float, RATE as usize, CHANNELS as usize, None);
+    let mode = StreamMode::EventsShared {
+        autoconvert: true,
+        buffer_duration_hns: 0,
+    };
+    let opened = (|| -> Result<_> {
+        let mut client = open_client(&kind)?;
+        client
+            .initialize_client(&format, Direction::Capture, mode, None)
+            .map_err(|e| anyhow!("{e}"))?;
+        let event = client.set_get_eventhandle().map_err(|e| anyhow!("{e}"))?;
+        let capture = client.get_audiocaptureclient().map_err(|e| anyhow!("{e}"))?;
+        client.start_stream().map_err(|e| anyhow!("{e}"))?;
+        Ok((client, event, capture))
+    })();
+    let (client, event, capture) = match opened {
+        Ok(v) => v,
+        Err(e) => {
+            log(format!("[audio:check] could not open the microphone: {e}"));
+            if let Ok(mut slot) = error.lock() {
+                *slot = Some(format!("Could not open the microphone: {e}"));
+            }
+            stop.store(true, Ordering::Relaxed);
+            return;
+        }
+    };
+    let mut buf = vec![0u8; IN_FRAME * RATE as usize / 10];
+    let mut window = 0f32;
+    let mut shown = 0f32;
+    let mut tick = Instant::now();
+    'outer: while !stop.load(Ordering::Relaxed) {
+        if asked.lock().map(|t| t.elapsed() > Duration::from_millis(1500)).unwrap_or(true) {
+            break;
+        }
+        let _ = event.wait_for_event(100);
+        loop {
+            let frames = match capture.get_next_packet_size() {
+                Ok(Some(n)) if n > 0 => n as usize,
+                Ok(_) => break,
+                Err(e) => {
+                    log(format!("[audio:check] device lost: {e}"));
+                    break 'outer;
+                }
+            };
+            let need = frames * IN_FRAME;
+            if buf.len() < need {
+                buf.resize(need, 0);
+            }
+            let Ok((got, _)) = capture.read_from_device(&mut buf[..need]) else { break };
+            for s in buf[..(got as usize * IN_FRAME).min(need)].chunks_exact(4) {
+                window = window.max(f32::from_le_bytes([s[0], s[1], s[2], s[3]]).abs());
+            }
+        }
+        // Twenty readings a second; a sound stays on the meter a moment after it ends.
+        if tick.elapsed() >= Duration::from_millis(50) {
+            tick = Instant::now();
+            shown = window.max(shown * 0.7).min(1.0);
+            window = 0.0;
+            level.store(shown.to_bits(), Ordering::Relaxed);
+        }
+    }
+    let _ = client.stop_stream();
+    level.store(0, Ordering::Relaxed);
+    stop.store(true, Ordering::Relaxed);
+}

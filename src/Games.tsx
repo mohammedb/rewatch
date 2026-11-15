@@ -1,10 +1,10 @@
-import { Bookmark, Check, CircleCheck, CircleDashed, CircleDot, Crosshair, Film, HardDrive, LayoutGrid, List, MessageSquare, Play, Search, Skull, Star, Trash2, Video, VideoOff, X } from "lucide-react";
+import { Bookmark, Check, CircleCheck, CircleDashed, CircleDot, Crosshair, Film, FolderOpen, HardDrive, LayoutGrid, List, MessageSquare, Play, Search, Skull, Star, Trash2, Video, VideoOff, X } from "lucide-react";
 import { useEffect, useMemo, useRef, useState } from "react";
-import { absoluteFileUrl, api, fileUrl, pickFolder } from "./api";
+import { absoluteFileUrl, api, fileUrl } from "./api";
 import { Portrait } from "./ChampIcon";
 import { ago, bytes, clock, dayLabel, timeOfDay, toReview } from "./format";
-import { Logo } from "./icons";
 import { STORY_HINT, storyLabel } from "./Insights";
+import type { SetupStep } from "./Onboarding";
 import { LpDelta, queueLabel, standing } from "./Rank";
 import { Crest, ItemSlots, Kda, KdaRatio } from "./Stats";
 import type { Environment, MatchSummary, NextFocus, Review, Settings, Story } from "./types";
@@ -17,7 +17,8 @@ interface Props {
   /** Open a game; "deaths" starts straight on a walk-through of its deaths. */
   onOpen: (id: string, start?: "deaths") => void;
   onRecord: () => void;
-  onSaveSettings: (s: Settings) => Promise<void>;
+  /** Open the setup guide, at one step if given. */
+  onSetup: (step?: SetupStep) => void;
   /** Delete games (the app offers an undo for a few seconds). */
   onDelete: (ids: string[], what?: string) => void;
   /** Delete games' videos and keep their stats (with an undo too). */
@@ -290,14 +291,14 @@ function Storage({ matches, settings, env, onSettings }: { matches: MatchSummary
   );
 }
 
-/** What is set up and what is missing, for a library with nothing in it yet. */
-function Checklist({ settings, env, busy, onRecord, onSettings }: { settings: Settings; env: Environment | null; busy: boolean; onRecord: () => void; onSettings: () => void }) {
-  const items: { ok: boolean | null; label: string; detail: string; optional?: boolean }[] = [
-    { ok: !!settings.recordingsDir, label: "Recordings folder", detail: settings.recordingsDir || "Not chosen yet." },
-    { ok: env ? !!(env.leagueDir || settings.leagueDir) : null, label: "League of Legends", detail: env?.leagueDir || settings.leagueDir || "Not found. Set its folder in Settings so games are seen starting." },
-    { ok: env ? !!env.ffmpegVersion : null, label: "FFmpeg", detail: env?.ffmpegVersion ? env.ffmpegVersion.replace(/^ffmpeg version /, "Version ").split(" Copyright")[0] : "Recording needs it. Set its path in Settings." },
-    { ok: settings.recordDiscord || settings.recordMic, label: "Discord and your mic", detail: settings.recordDiscord || settings.recordMic ? "Recorded as their own sound tracks, so you can mute either later." : "Not recorded. Turn them on in Settings to hear your calls back." },
-    { ok: settings.friends.length > 0, optional: true, label: "Teammates", detail: settings.friends.length ? `${settings.friends.length} added. You can watch their view of games you played together.` : "Optional. Add a friend's code to watch their view of the same game." },
+/** What is set up and what is missing, for a library with nothing in it yet. Each missing piece opens the setup guide where it's fixed. */
+function Checklist({ settings, env, busy, onRecord, onSettings, onSetup }: { settings: Settings; env: Environment | null; busy: boolean; onRecord: () => void; onSettings: () => void; onSetup: (step?: SetupStep) => void }) {
+  const items: { ok: boolean | null; label: string; detail: string; optional?: boolean; fix: [string, SetupStep] }[] = [
+    { ok: !!settings.recordingsDir, label: "Recordings folder", detail: settings.recordingsDir || "Not chosen yet.", fix: ["Choose", "record"] },
+    { ok: env ? !!(env.leagueDir || settings.leagueDir) : null, label: "League of Legends", detail: env?.leagueDir || settings.leagueDir || "Not found yet. Rewatch needs its folder to see a game start.", fix: ["Find it", "pc"] },
+    { ok: env ? !!env.ffmpegVersion : null, label: "FFmpeg", detail: env?.ffmpegVersion ? env.ffmpegVersion.replace(/^ffmpeg version /, "Version ").split(" Copyright")[0] : "Missing, and recording needs it.", fix: ["Fix", "pc"] },
+    { ok: settings.recordDiscord || settings.recordMic, label: "Discord and your mic", detail: settings.recordDiscord || settings.recordMic ? "Recorded as their own sound tracks, so you can mute either later." : "Not recorded, so your calls can't be heard back.", fix: ["Set up", "sound"] },
+    { ok: settings.friends.length > 0, optional: true, label: "Teammates", detail: settings.friends.length ? `${settings.friends.length} added. You can watch their view of games you played together.` : "Optional. Swap friend codes to watch their view of the same game.", fix: ["Add teammates", "team"] },
   ];
   return (
     <div className="checklist">
@@ -309,6 +310,11 @@ function Checklist({ settings, env, busy, onRecord, onSettings }: { settings: Se
               <b>{it.label}</b>
               <small>{it.detail}</small>
             </span>
+            {it.ok === false && (
+              <button className="btn sm" onClick={() => onSetup(it.fix[1])}>
+                {it.fix[0]}
+              </button>
+            )}
           </li>
         ))}
       </ul>
@@ -317,67 +323,14 @@ function Checklist({ settings, env, busy, onRecord, onSettings }: { settings: Se
           <CircleDot size={15} aria-hidden />
           Record a test
         </button>
+        <button className="btn" onClick={() => onSetup()}>
+          Setup guide
+        </button>
         <button className="btn" onClick={onSettings}>
           Open Settings
         </button>
       </div>
       <p className="muted">A test records your screen until you press Stop at the top. League games are recorded by themselves.</p>
-    </div>
-  );
-}
-
-function FirstRun({ settings, onSave }: { settings: Settings; onSave: (s: Settings) => Promise<void> }) {
-  const [dir, setDir] = useState("");
-  const [env, setEnv] = useState<Environment | null>(null);
-  const [saving, setSaving] = useState(false);
-  useEffect(() => {
-    api
-      .environment()
-      .then((e) => {
-        setEnv(e);
-        setDir((d) => d || e.suggestedRecordingsDir);
-      })
-      .catch(() => {});
-  }, []);
-  return (
-    <div className="welcome">
-      <span className="wl-logo">
-        <Logo size={30} />
-      </span>
-      <h1>Welcome to Rewatch</h1>
-      <p className="lede">It records your League games by itself, with your Discord call and mic on their own tracks, so you can watch back what happened and why.</p>
-      <div className="wl-step">
-        <h2>Where should recordings go?</h2>
-        <p>A 35-minute game takes about 5 to 15 GB, so pick a drive with room. You can set a size limit later.</p>
-        <div className="wl-row">
-          <input className="field-input" type="text" value={dir} onChange={(e) => setDir(e.target.value)} aria-label="Recordings folder" />
-          <button className="btn" onClick={async () => setDir((await pickFolder(dir)) ?? dir)}>
-            Browse
-          </button>
-        </div>
-        <button
-          className="btn primary"
-          disabled={!dir.trim() || saving}
-          onClick={() => {
-            setSaving(true);
-            onSave({ ...settings, recordingsDir: dir.trim() }).finally(() => setSaving(false));
-          }}
-        >
-          Use this folder
-        </button>
-      </div>
-      {env && (
-        <ul className="wl-checks">
-          <li className={env.leagueDir ? "ok" : "todo"}>
-            {env.leagueDir ? <CircleCheck size={16} aria-hidden /> : <CircleDashed size={16} aria-hidden />}
-            {env.leagueDir ? "League of Legends found" : "League of Legends not found yet"}
-          </li>
-          <li className={env.ffmpegVersion ? "ok" : "todo"}>
-            {env.ffmpegVersion ? <CircleCheck size={16} aria-hidden /> : <CircleDashed size={16} aria-hidden />}
-            {env.ffmpegVersion ? "FFmpeg found" : "FFmpeg not found. Recording needs it; set its path in Settings."}
-          </li>
-        </ul>
-      )}
     </div>
   );
 }
@@ -452,7 +405,7 @@ function Recap({ m, focus, onOpen }: { m: MatchSummary; focus: NextFocus | null;
 
 const FOCUS_WORD = { yes: "Did it", partly: "Partly", no: "Not really" } as const;
 
-export function Games({ matches, settings, busy, onOpen, onRecord, onSaveSettings, onDelete, onDeleteVideo, onChanged, onSettings }: Props) {
+export function Games({ matches, settings, busy, onOpen, onRecord, onSetup, onDelete, onDeleteVideo, onChanged, onSettings }: Props) {
   const toast = useToast();
   const [filter, setFilter] = useState<Filter>("all");
   const [activeTag, setActiveTag] = useState("");
@@ -581,10 +534,16 @@ export function Games({ matches, settings, busy, onOpen, onRecord, onSaveSetting
 
   if (!settings) return <div className="page" />;
   if (!settings.recordingsDir) {
+    // On a new PC the setup guide is open over this; otherwise it only shows if the folder was cleared since.
     return (
       <div className="page">
-        <div className="page-inner">
-          <FirstRun settings={settings} onSave={onSaveSettings} />
+        <div className="page-inner empty-lib">
+          <FolderOpen size={34} strokeWidth={1.4} aria-hidden />
+          <h2>Choose where recordings go</h2>
+          <p>Rewatch needs a folder before it can record a game.</p>
+          <button className="btn primary" onClick={() => onSetup("record")}>
+            Set up Rewatch
+          </button>
         </div>
       </div>
     );
@@ -727,7 +686,7 @@ export function Games({ matches, settings, busy, onOpen, onRecord, onSaveSetting
             <Video size={34} strokeWidth={1.4} aria-hidden />
             <h2>No games recorded yet</h2>
             <p>{settings.autoRecord ? "Start a League game and it is recorded by itself. Keep Rewatch running; closing the window leaves it in the tray." : "Automatic recording is off. Turn it on in Settings, or record a test below."}</p>
-            <Checklist settings={settings} env={env} busy={busy} onRecord={onRecord} onSettings={onSettings} />
+            <Checklist settings={settings} env={env} busy={busy} onRecord={onRecord} onSettings={onSettings} onSetup={onSetup} />
           </div>
         ) : shown.length === 0 ? (
           <div className="nomatch">

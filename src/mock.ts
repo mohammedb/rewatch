@@ -558,7 +558,63 @@ const status: Status = {
   bookmarks: 0, lastError: null, lastMatchId: null,
 };
 
+// The first-run setup in the browser: "?setup" in the address starts as a new PC does, and "?setup=missing"
+// as one where League and FFmpeg weren't found.
+const setupPreview = new URLSearchParams(location.search).get("setup");
+if (setupPreview !== null) settings = { ...settings, recordingsDir: "", shareName: "", friends: [] };
+const loadedAt = Date.now();
+const MY_CODE = "c4e19d2a7b3f5061a8d4e2c9b7f1a3d5e6c8b0a2f4d6e8c1a3b5d7f9e0c2a4b6";
+const IDA = "9d41c7e2a0b3f5648c1d2e3f4a5b6c7d8e9f0a1b2c3d4e5f6a7b8c9d0e1f2a3b";
+const pings = new Map<string, number>();
+const wait = (ms: number) => new Promise((r) => setTimeout(r, ms));
+
+/** Codes starting 0 to 3 add you back after two checks, 4 and 5 are offline, the rest have you already. */
+async function mockPing(code: string): Promise<string> {
+  await wait(700 + Math.random() * 700);
+  const c = code.trim().toLowerCase();
+  if (!/^[0-9a-f]{64}$/.test(c)) throw "That does not look like a friend code. Ask them to copy it again.";
+  if (c === MY_CODE) throw "That is your own code.";
+  const n = (pings.get(c) ?? 0) + 1;
+  pings.set(c, n);
+  if (/^[0-3]/.test(c) && n < 3) throw "Reached them, but you are not on their teammates list yet. You now show up in their Settings under Teammates, where they can add you with one click.";
+  if (/^[45]/.test(c)) throw "Could not reach them. Their PC must be on with Rewatch running.";
+  return c === IDA ? "Ida" : ["Kaja", "Tor", "Sindre", "Lumen"][parseInt(c[1], 16) % 4];
+}
+
+/** Something like a voice: a few words, then a pause. */
+function mockMicLevel(): number {
+  const t = Date.now() / 1000;
+  const words = Math.max(0, Math.sin(t * 1.3)) * Math.abs(Math.sin(t * 9.1)) * (0.6 + 0.4 * Math.random());
+  return Math.min(1, 0.002 + words * 0.35);
+}
+
 export async function mock<T>(cmd: string, args?: Record<string, unknown>): Promise<T> {
+  switch (cmd) {
+    case "league_name": await wait(900); return "Rin" as T;
+    case "disk_free": {
+      const drive = String(args!.path).slice(0, 1).toUpperCase();
+      return ((drive === "C" ? 96 : drive === "D" ? 1210 : 412) * 1024 ** 3) as T;
+    }
+    case "mic_level": return mockMicLevel() as T;
+    case "mic_check_stop": return null as T;
+  }
+  if (setupPreview !== null) {
+    if (cmd === "friend_ping") return (await mockPing(args!.code as string)) as T;
+    if (cmd === "environment") {
+      await wait(400);
+      const missing = setupPreview === "missing" && !settings.leagueDir;
+      return {
+        ffmpeg: "C:\\Program Files\\Rewatch\\bin\\ffmpeg.exe", ffmpegVersion: setupPreview === "missing" && !settings.ffmpegPath ? null : "ffmpeg version 7.1.1", ffprobeFound: true,
+        leagueDir: missing ? null : settings.leagueDir || "D:\\Riot Games\\League of Legends", suggestedRecordingsDir: "C:\\Users\\you\\Videos\\Rewatch", freeBytes: 96 * 1024 ** 3,
+      } as T;
+    }
+    if (cmd === "share_info") {
+      // Someone asks to connect a little while after the page opens.
+      const asked = Date.now() - loadedAt > 9000 && !settings.friends.some((f) => f.code === IDA);
+      return { code: MY_CODE, running: true, online: Date.now() - loadedAt > 1500, error: null, requests: asked ? [{ code: IDA, name: "Ida", atMs: Date.now() - 4000 }] : [] } as T;
+    }
+    if (cmd === "list_matches") return [] as T;
+  }
   const out = ((): unknown => {
     switch (cmd) {
       case "get_settings": return settings;

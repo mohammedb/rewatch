@@ -676,6 +676,42 @@ errors and no picture failed to load. The published installer was downloaded by 
 own updater, which accepted its signature. Not checked: the app itself with real games,
 and a video that another program has open.
 
+## Version 0.6.2 (2026-11-15)
+
+**A setup guide.** A new PC starts with a guide over the whole window instead of the one
+question about a recordings folder. The steps are listed on the left, each one slides in
+the way you're going, and anything set in it can be changed later in Settings:
+
+- **This PC**: League, FFmpeg, the free space and the connection to teammates, each
+  ticked off as it's checked. A League folder or FFmpeg that wasn't found gets a button
+  to choose it.
+- **Recording**: the recordings folder with the free space on its drive, the size limit
+  (with a warning when it's more than the drive has free), Start with Windows, and which
+  queues to record.
+- **Sound**: the Discord and microphone tracks, and a microphone picker with a live level
+  that shows whether Rewatch hears you.
+- **Teammates**: your name, filled in from League; your friend code in eight groups, the
+  first one marked because that's what a teammate sees when you ask to connect; "Copy
+  invite for Discord", a ready-made message with the code and the download link; and a
+  field that takes a code or a whole pasted invite. Each teammate shows whether they've
+  added you back, and turns to "Connected" by itself once they have. Requests to connect
+  show up with an Add button.
+- **Ready**: what's set up and what isn't, and three tips.
+
+If Rewatch is closed halfway through, the guide opens again on the step it was on.
+Settings has "Open the guide" under Status and "Pair step by step" under Teammates, and
+the empty library's checklist opens the guide at the step that fixes each item. Settings
+starts again from what the guide saved when the guide closes, so it can't save over it,
+and the "Watch together" toast waits until the guide is closed.
+
+Checked: the unit tests, the type check, a full build, the whole guide with the sample
+data in a browser (every step, a PC without League or FFmpeg, every teammate state, a
+request coming in, reopening on the step it was left at, and with reduced motion), and a
+debug copy of the app on this PC with its own app id and data folder: the guide opened on
+the first start, found FFmpeg and League, read the player's name from the League client
+and the free space on C:. Not checked: the microphone level and connecting to a real
+teammate in the app itself.
+
 ## Not built yet
 
 Code signing (so Windows stops warning about the installer). A sample game for the

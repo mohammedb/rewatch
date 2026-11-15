@@ -41,6 +41,13 @@ export const api = {
   exportFull: (id: string) => call<string>("export_full", { id }),
   shareInfo: () => call<ShareInfo>("share_info"),
   friendPing: (code: string) => call<string>("friend_ping", { code }),
+  /** The player's name in League, to suggest as the name teammates see. */
+  leagueName: () => call<string | null>("league_name"),
+  /** Free space on the drive a folder is on (or would be on). */
+  diskFree: (path: string) => call<number | null>("disk_free", { path }),
+  /** How loud a microphone is right now, 0 to 1 ("" is the Windows default). Opens it; it closes once the calls stop. */
+  micLevel: (device: string) => call<number>("mic_level", { device }),
+  micCheckStop: () => call<void>("mic_check_stop"),
   povList: async (id: string) => {
     const list = await call<Pov[]>("pov_list", { id });
     // Saved views are files on this PC; turn their paths into addresses the page can load.
@@ -106,6 +113,13 @@ export function onEvent<T = unknown>(name: string, handler: (payload: T) => void
 export async function pickFolder(current?: string): Promise<string | null> {
   if (!inApp) return window.prompt("Folder", current ?? "") || null;
   const picked = await open({ directory: true, defaultPath: current || undefined });
+  return typeof picked === "string" ? picked : null;
+}
+
+/** Choose one program, like ffmpeg.exe. */
+export async function pickProgram(name: string, current?: string): Promise<string | null> {
+  if (!inApp) return window.prompt(name, current ?? "") || null;
+  const picked = await open({ defaultPath: current || undefined, filters: [{ name, extensions: ["exe"] }] });
   return typeof picked === "string" ? picked : null;
 }
 

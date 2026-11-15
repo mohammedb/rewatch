@@ -4,6 +4,7 @@ import { api, onEvent } from "./api";
 import { clock, toReview } from "./format";
 import { Games } from "./Games";
 import { Logo } from "./icons";
+import { leftSetup, Onboarding, type SetupStep } from "./Onboarding";
 import { Player } from "./Player";
 import { SettingsPage } from "./SettingsPage";
 import { Trends } from "./Trends";
@@ -64,6 +65,11 @@ export default function App() {
   const [session, setSession] = useState<string | null>(null);
   const [updOpen, setUpdOpen] = useState(false);
   const [invOpen, setInvOpen] = useState(false);
+  /** The setup guide while it's open: a first setup, or opened again from Settings or the library. */
+  const [setup, setSetup] = useState<{ first: boolean; step?: SetupStep } | null>(null);
+  const openSetup = useCallback((step?: SetupStep) => setSetup({ first: false, step }), []);
+  /** Goes up as the guide closes: Settings keeps its own copy of the settings, so it starts again from what the guide saved. */
+  const [settingsRev, setSettingsRev] = useState(0);
   const updBtn = useRef<HTMLButtonElement>(null);
   const invBtn = useRef<HTMLButtonElement>(null);
 
@@ -85,7 +91,13 @@ export default function App() {
   }, []);
 
   useEffect(() => {
-    api.getSettings().then(setSettings);
+    api.getSettings().then((s) => {
+      // A new PC starts with the setup guide, and so does one where it was left halfway the last time. It opens
+      // together with the settings arriving, so nothing meant for the app shows up first.
+      const left = leftSetup();
+      if (left || !s.recordingsDir) setSetup({ first: true, step: left ?? undefined });
+      setSettings(s);
+    });
     refreshMatches();
     refreshStatus();
     const iv = setInterval(refreshStatus, 1500);
@@ -286,7 +298,9 @@ export default function App() {
     const key = invite.code + invite.matchId;
     // Already looking at that game: its header offers joining, so the toast can go.
     if (inviteHere) return toast.dismiss(`invite-${key}`);
-    if (announced.current.includes(key)) return;
+    // Not over the setup guide, where "Watch together" would open a game behind it, nor before the settings say
+    // whether the guide opens: it's said once the guide is closed.
+    if (!settings || setup || announced.current.includes(key)) return;
     announced.current.push(key);
     toast.show({
       id: `invite-${key}`,
@@ -297,7 +311,7 @@ export default function App() {
       actions: [{ label: "Watch together", run: () => watchTogether(invite.matchId!) }],
     });
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [invite?.code, invite?.matchId, inviteHere]);
+  }, [invite?.code, invite?.matchId, inviteHere, !!settings, !!setup]);
 
   const reviewCount = toReview(matches).length;
   const state = saving ? "saving" : recording ? "rec" : status?.gameRunning ? "game" : settings?.autoRecord === false ? "off" : "";
@@ -316,7 +330,7 @@ export default function App() {
 
   return (
     <div className="shell">
-      <header className="topbar">
+      <header className="topbar" inert={!!setup}>
         <div className="brand">
           <Logo size={19} />
           <b>Rewatch</b>
@@ -439,7 +453,7 @@ export default function App() {
         </div>
       </header>
 
-      <main className={`main ${view.name === "player" ? "" : "wash"}`}>
+      <main className={`main ${view.name === "player" ? "" : "wash"}`} inert={!!setup}>
         {view.name === "player" ? (
           <Player
             key={view.id + (view.together ? "-together" : "")}
@@ -474,7 +488,7 @@ export default function App() {
             breakAfter={settings?.breakAfterLosses ?? 0}
           />
         ) : view.name === "settings" ? (
-          settings && <SettingsPage settings={settings} onSave={saveSettings} matches={matches} />
+          settings && <SettingsPage key={settingsRev} settings={settings} onSave={saveSettings} matches={matches} onSetup={openSetup} />
         ) : (
           <Games
             matches={matches}
@@ -482,7 +496,7 @@ export default function App() {
             busy={recording || saving}
             onOpen={(id, start) => setView({ name: "player", id, start })}
             onRecord={startManual}
-            onSaveSettings={saveSettings}
+            onSetup={openSetup}
             onDelete={removeGames}
             onDeleteVideo={removeVideos}
             onChanged={refreshMatches}
@@ -490,6 +504,18 @@ export default function App() {
           />
         )}
       </main>
+      {setup && settings && (
+        <Onboarding
+          settings={settings}
+          firstRun={setup.first}
+          start={setup.step}
+          onSave={saveSettings}
+          onClose={() => {
+            setSetup(null);
+            setSettingsRev((n) => n + 1);
+          }}
+        />
+      )}
     </div>
   );
 }

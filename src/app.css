@@ -479,18 +479,7 @@ i.todo { width: 7px; height: 7px; border-radius: 50%; background: var(--mark); d
 .checklist li small { color: var(--muted); font-size: 12.5px; overflow-wrap: anywhere; }
 .cl-acts { display: flex; gap: 8px; justify-content: center; }
 .checklist > p { text-align: center; font-size: 12.5px; }
-.welcome { max-width: 620px; margin: 36px auto 0; display: grid; gap: 14px; justify-items: start; }
-.wl-logo { width: 54px; height: 54px; border-radius: 14px; display: grid; place-items: center; background: var(--raised); border: 1px solid var(--line-2); color: var(--brand); }
-.welcome h1 { font-size: 32px; }
-.welcome .lede { color: var(--soft); font-size: 15px; line-height: 1.5; max-width: 56ch; }
-.wl-step { width: 100%; margin-top: 8px; padding: 18px; border-radius: 12px; background: var(--panel); border: 1px solid var(--line); display: grid; gap: 10px; justify-items: start; }
-.wl-step p { color: var(--soft); font-size: 13px; }
-.wl-row { display: flex; gap: 8px; width: 100%; }
-.wl-row input { flex: 1; }
-.wl-checks { list-style: none; padding: 0; margin: 2px 0 0; display: grid; gap: 6px; font-size: 13px; color: var(--soft); }
-.wl-checks li { display: flex; gap: 8px; align-items: center; }
-.wl-checks .ok svg { color: var(--up); }
-.wl-checks .todo svg { color: var(--down); }
+.checklist li .btn { margin-left: auto; align-self: center; }
 
 /* ---------- review player */
 .player { display: grid; grid-template-rows: auto minmax(0, 1fr); height: 100%; min-height: 0; flex: 1; }
@@ -1552,3 +1541,402 @@ button.mdot { cursor: pointer; }
 .mb-team.mine .mb-bar i { background: linear-gradient(90deg, rgb(91 141 239 / 0.5), var(--win)); }
 .mb-team:not(.mine) .mb-bar i { background: linear-gradient(90deg, rgb(232 64 87 / 0.5), var(--loss)); }
 .mb-foot { margin: 0; max-width: 100ch; font-size: 11.5px; color: var(--muted); }
+
+/* ---------- setup guide (Onboarding.tsx)
+   The whole window: the steps on the left, one step at a time on the right. A step slides in the way you're going
+   and its parts rise in order (--d). Checks tick themselves, your code decodes, and the line to a teammate lights
+   up the moment they connect. Colours keep their jobs: gold is you, blue your teammates, green what's done. */
+@property --ob-a { syntax: "<color>"; inherits: false; initial-value: rgb(229 72 77 / 0.12); }
+@property --ob-b { syntax: "<color>"; inherits: false; initial-value: rgb(229 72 77 / 0); }
+
+.ob {
+  --spring: cubic-bezier(0.34, 1.56, 0.64, 1);
+  --mono: ui-monospace, "Cascadia Mono", Consolas, monospace;
+  /* Over the app, under menus (40), toasts (50) and the confirm dialog (60). */
+  position: fixed; inset: 0; z-index: 30;
+  display: grid; grid-template-columns: 252px minmax(0, 1fr);
+  background: var(--bg);
+  animation: ob-fade 360ms ease backwards;
+}
+.ob.closing { animation: ob-fade-out 420ms ease forwards; pointer-events: none; }
+.ob.closing .ob-scroll { animation: ob-sink 420ms var(--ease) forwards; }
+.ob h1:focus { outline: none; }
+.ob .mono { font-family: var(--mono); font-weight: 600; letter-spacing: 0.02em; }
+.ob .path { color: var(--soft); word-break: break-all; }
+
+/* The steps, down the left. */
+.ob-rail {
+  display: flex; flex-direction: column; gap: 28px; min-height: 0; overflow: auto;
+  padding: 18px 14px 16px; background: var(--bg-2); border-right: 1px solid var(--line);
+  animation: ob-from-left 620ms var(--ease) backwards;
+}
+.ob-brand { display: flex; align-items: center; gap: 9px; height: 30px; padding: 0 8px; }
+.ob-brand .logo { color: var(--brand); }
+.ob-brand b { font: 800 16px/1 var(--display); font-stretch: 118%; letter-spacing: -0.03em; }
+.ob-brand span { margin-left: auto; padding: 3px 8px; border-radius: 999px; border: 1px solid var(--line-2); font-size: 11px; font-weight: 500; color: var(--muted); }
+.ob-steps { position: relative; }
+.ob-steps ol { position: relative; z-index: 2; list-style: none; margin: 0; padding: 0; display: grid; gap: 4px; }
+.ob-steps li { animation: ob-from-left 520ms var(--ease) backwards; }
+.ob-steps li:nth-child(1) { animation-delay: 140ms; }
+.ob-steps li:nth-child(2) { animation-delay: 190ms; }
+.ob-steps li:nth-child(3) { animation-delay: 240ms; }
+.ob-steps li:nth-child(4) { animation-delay: 290ms; }
+.ob-steps li:nth-child(5) { animation-delay: 340ms; }
+.ob-steps li:nth-child(6) { animation-delay: 390ms; }
+.ob-steps button {
+  width: 100%; height: 40px; display: flex; align-items: center; gap: 12px; padding: 0 10px;
+  border: 0; border-radius: 8px; background: none; color: var(--muted); font-size: 13.5px; font-weight: 500; text-align: left; cursor: pointer;
+  transition: color 200ms;
+}
+.ob-steps button:hover:not(:disabled) { color: var(--text); }
+.ob-steps button:disabled { cursor: default; opacity: 0.6; }
+.ob-steps button:focus-visible { outline-offset: -2px; }
+.ob-steps button.done { color: var(--soft); }
+.ob-steps button[aria-current="step"] { color: var(--text); font-weight: 600; }
+.ob-dot {
+  flex: none; width: 22px; height: 22px; border-radius: 50%; display: grid; place-items: center;
+  background: var(--bg-2); border: 1.5px solid var(--line-2); color: var(--muted);
+  font-size: 11px; font-weight: 600; font-variant-numeric: tabular-nums;
+  transition: background 260ms, border-color 260ms, color 260ms, box-shadow 260ms, transform 360ms var(--ease);
+}
+.ob-steps button.done .ob-dot { border-color: rgb(76 195 138 / 0.6); color: var(--up); }
+.ob-steps button.done .ob-dot svg { animation: ob-pop 380ms var(--spring) backwards; }
+.ob-steps button[aria-current="step"] .ob-dot { background: var(--primary); border-color: var(--primary); color: var(--primary-ink); transform: scale(1.1); box-shadow: 0 0 0 4px rgb(236 238 242 / 0.08); }
+/* A line through the dots (one every 44px), filled down to the step you're on; a highlight slides behind that step. */
+.ob-track { position: absolute; z-index: 1; left: 20px; top: 20px; width: 2px; height: calc(5 * 44px); border-radius: 1px; background: var(--line); pointer-events: none; }
+.ob-track i { display: block; width: 100%; height: calc(var(--at) * 44px); border-radius: 1px; background: linear-gradient(rgb(76 195 138 / 0.75), rgb(236 238 242 / 0.55)); transition: height 520ms var(--ease); }
+.ob-ind {
+  position: absolute; z-index: 0; left: 0; right: 0; top: 0; height: 40px; border-radius: 8px; pointer-events: none;
+  background: var(--raised); box-shadow: inset 0 0 0 1px var(--line);
+  transform: translateY(calc(var(--at) * 44px)); transition: transform 460ms var(--ease);
+}
+.ob-rail-foot { margin-top: auto; display: grid; gap: 10px; justify-items: start; }
+.ob-rail-foot p { display: flex; gap: 8px; padding: 0 8px; font-size: 12px; line-height: 1.45; color: var(--muted); }
+.ob-rail-foot p svg { flex: none; margin-top: 2px; }
+
+/* The step on the right, over a glow that takes the step's colour. */
+.ob-main { position: relative; isolation: isolate; min-width: 0; min-height: 0; display: grid; grid-template-rows: minmax(0, 1fr) auto; }
+.ob-aura {
+  position: absolute; inset: 0; z-index: -1; overflow: hidden; pointer-events: none;
+  background: radial-gradient(70% 55% at 50% -12%, var(--ob-a), transparent 72%), radial-gradient(45% 40% at 104% 104%, var(--ob-b), transparent 70%);
+  transition: --ob-a 1.1s ease, --ob-b 1.1s ease;
+}
+.ob-aura::after {
+  content: ""; position: absolute; inset: 0;
+  background: radial-gradient(rgb(255 255 255 / 0.05) 1px, transparent 1.5px) 0 0 / 24px 24px;
+  mask-image: radial-gradient(60% 46% at 50% 0%, #000, transparent);
+}
+.ob-main[data-step="welcome"] .ob-aura { --ob-a: rgb(229 72 77 / 0.17); --ob-b: rgb(229 72 77 / 0.04); }
+.ob-main:is([data-step="pc"], [data-step="record"], [data-step="sound"]) .ob-aura { --ob-a: rgb(236 238 242 / 0.06); --ob-b: rgb(236 238 242 / 0.02); }
+.ob-main[data-step="team"] .ob-aura { --ob-a: rgb(91 141 239 / 0.15); --ob-b: rgb(91 141 239 / 0.07); }
+.ob-main[data-step="done"] .ob-aura { --ob-a: rgb(76 195 138 / 0.15); --ob-b: rgb(76 195 138 / 0.05); }
+.ob-scroll {
+  min-height: 0; overflow: auto; container-type: inline-size;
+  display: grid; justify-items: center; align-content: start; padding: clamp(28px, 7vh, 72px) 40px 48px;
+}
+.ob-main:is([data-step="welcome"], [data-step="done"]) .ob-scroll { align-content: safe center; }
+.ob-step { width: min(680px, 100%); display: grid; gap: 16px; animation: ob-in 480ms var(--ease) backwards; }
+.ob-step.back { animation-name: ob-in-back; }
+.ob-step.leaving { animation: ob-out 170ms ease-in forwards; }
+.ob-step.back.leaving { animation-name: ob-out-back; }
+.ob-step.welcome { width: min(780px, 100%); }
+.ob-step.done { width: min(640px, 100%); }
+.ob-rise { animation: ob-rise 560ms var(--ease) backwards; animation-delay: calc(var(--d, 0) * 70ms + 80ms); }
+
+.ob-head { display: grid; gap: 10px; margin-bottom: 6px; }
+.ob-eyebrow { font-size: 11.5px; font-weight: 600; letter-spacing: 0.08em; text-transform: uppercase; color: var(--muted); }
+.ob h1 { font-size: 34px; line-height: 1.05; }
+.ob-lede { max-width: 62ch; font-size: 15px; line-height: 1.55; color: var(--soft); }
+.ob-fine { font-size: 12.5px; line-height: 1.5; color: var(--muted); }
+.ob-fine.warn { color: var(--down); }
+
+/* Cards of rows: an icon, the words, and a switch or a state on the right. */
+.ob-card {
+  margin: 0; padding: 0; list-style: none; border-radius: 14px;
+  background: rgb(18 20 25 / 0.86); border: 1px solid var(--line);
+  box-shadow: inset 0 1px 0 rgb(255 255 255 / 0.03), 0 12px 32px rgb(0 0 0 / 0.25);
+}
+.ob-card > * + * { border-top: 1px solid var(--line); }
+.ob-check, .ob-row, .ob-sum li { display: flex; align-items: center; gap: 14px; padding: 14px 16px; }
+.ob-row.top { align-items: flex-start; }
+.ob-card > .ob-row.sub { border-top: 0; padding-top: 0; animation: ob-drop 320ms var(--ease) backwards; }
+.ob-card .ic { flex: none; width: 34px; height: 34px; border-radius: 9px; display: grid; place-items: center; background: var(--raised); color: var(--soft); transition: color 300ms, background 300ms; }
+.ob-card .ic.blank { background: none; }
+.ob-card .tx { flex: 1; min-width: 0; display: grid; gap: 2px; }
+.ob-card .tx b { font-size: 13.5px; font-weight: 600; }
+.ob-card .tx small { font-size: 12.5px; line-height: 1.45; color: var(--muted); overflow-wrap: anywhere; }
+.ob-row .qchips { margin-top: 10px; }
+.ob-spin { flex: none; display: inline-block; width: 16px; height: 16px; border-radius: 50%; border: 2px solid rgb(255 255 255 / 0.12); border-top-color: var(--soft); animation: spin 0.8s linear infinite; }
+.ob-pop { animation: ob-pop 420ms var(--spring) backwards; }
+.ob-pop.warn { color: var(--down); }
+.ob-pop.bad { color: #ff8589; }
+
+/* A tick in a ring that draws itself. */
+.ob-tick { flex: none; color: var(--up); overflow: visible; }
+.ob-tick circle {
+  fill: rgb(76 195 138 / 0.12); stroke: currentColor; stroke-width: 1.5;
+  transform: rotate(-90deg); transform-origin: 12px 12px;
+  animation: ob-draw 520ms var(--ease) backwards, ob-fade 520ms ease backwards;
+}
+.ob-tick path { fill: none; stroke: currentColor; stroke-width: 2.2; stroke-linecap: round; stroke-linejoin: round; animation: ob-draw 360ms 280ms var(--ease) backwards; }
+
+/* Welcome */
+.ob-welcome { display: grid; justify-items: center; gap: 16px; text-align: center; padding: 8px 0 16px; }
+.ob-welcome h1 { font-size: 42px; letter-spacing: -0.03em; }
+.ob-welcome .ob-lede { max-width: 56ch; }
+.ob-mark { position: relative; display: grid; place-items: center; width: 120px; height: 120px; margin-bottom: 4px; color: var(--brand); }
+.ob-mark::before { content: ""; position: absolute; inset: -30px; border-radius: 50%; background: radial-gradient(closest-side, rgb(229 72 77 / 0.24), transparent); animation: ob-glow 1.4s 400ms ease backwards; }
+.ob-logo { position: relative; overflow: visible; }
+.ob-logo .ring { animation: ob-draw 900ms 120ms var(--ease) backwards; }
+.ob-logo .stem { transform-box: fill-box; transform-origin: 50% 0; animation: ob-grow 520ms 640ms var(--ease) backwards; }
+.ob-logo .leg { animation: ob-leg 520ms 860ms var(--ease) backwards; }
+.ob-tiles { width: 100%; list-style: none; margin: 14px 0 6px; padding: 0; display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 12px; text-align: left; }
+.ob-tile { display: grid; gap: 5px; align-content: start; padding: 16px; border-radius: 14px; background: rgb(18 20 25 / 0.82); border: 1px solid var(--line); transition: border-color 200ms, transform 320ms var(--ease); }
+.ob-tile:hover { border-color: var(--line-2); transform: translateY(-2px); }
+.ob-tile .ic { width: 36px; height: 36px; margin-bottom: 8px; border-radius: 10px; display: grid; place-items: center; background: var(--raised); color: var(--soft); }
+.ob-tile .ic.rec { color: var(--rec); background: rgb(255 77 79 / 0.1); }
+.ob-tile .ic.team { color: var(--ally); background: rgb(91 141 239 / 0.12); }
+.ob-tile b { font-size: 13.5px; font-weight: 600; }
+.ob-tile small { font-size: 12.5px; line-height: 1.45; color: var(--muted); }
+.ob-cta {
+  height: 44px; padding: 0 22px; border-radius: 10px; font-size: 14px; margin-top: 8px;
+  animation: ob-rise 560ms var(--ease) backwards, ob-call 1.8s ease-out 2;
+  animation-delay: calc(var(--d, 0) * 70ms + 80ms), calc(var(--d, 0) * 70ms + 900ms);
+}
+.ob-cta svg, .ob-next svg { transition: transform 220ms var(--ease); }
+.ob-cta:hover svg, .ob-next:hover:not(:disabled) svg { transform: translateX(3px); }
+
+/* This PC */
+.ob-check { animation: ob-fade 300ms ease backwards; }
+.ob-check:nth-child(2) { animation-delay: 50ms; }
+.ob-check:nth-child(3) { animation-delay: 100ms; }
+.ob-check:nth-child(4) { animation-delay: 150ms; }
+.ob-check .st { flex: none; display: flex; align-items: center; justify-content: flex-end; gap: 10px; min-width: 22px; }
+.ob-check.wait .ic { color: var(--muted); }
+.ob-check.ok .ic { color: var(--text); }
+.ob-check.warn .ic { color: var(--down); background: rgb(240 163 94 / 0.1); }
+.ob-check.bad .ic { color: #ff8589; background: rgb(232 64 87 / 0.1); }
+.ob-check:not(.wait) small { animation: ob-fade 360ms ease backwards; }
+.ob-after { display: flex; align-items: center; justify-content: space-between; gap: 12px; min-height: 28px; }
+
+/* Recording */
+.ob-folder { display: flex; align-items: center; gap: 10px; padding: 12px 12px 12px 16px; color: var(--muted); }
+.ob-folder-in {
+  flex: 1; min-width: 0; height: 36px; padding: 0 12px; border-radius: 8px; border: 1px solid var(--line-2); background: var(--bg);
+  font-size: 13px; user-select: text; transition: border-color var(--fast);
+}
+.ob-folder-in:hover { border-color: rgb(255 255 255 / 0.22); }
+.ob-folder-in:focus-visible { outline-offset: 0; }
+.ob-folder-in::placeholder { color: var(--muted); }
+.ob-folder .btn { height: 36px; }
+.ob-drive { display: grid; gap: 12px; padding: 16px; }
+.ob-drive-top { display: flex; align-items: baseline; flex-wrap: wrap; gap: 8px; font-size: 13px; }
+.ob-drive-top .big { font: 700 28px/1 var(--display); font-stretch: 108%; letter-spacing: -0.02em; font-variant-numeric: tabular-nums; }
+.ob-bar { position: relative; height: 10px; border-radius: 5px; background: rgb(255 255 255 / 0.06); overflow: hidden; }
+.ob-bar i { position: absolute; left: 0; top: 0; bottom: 0; width: var(--w); border-radius: 5px; background: linear-gradient(90deg, rgb(236 238 242 / 0.35), rgb(236 238 242 / 0.85)); transition: width 700ms var(--ease); }
+.ob-bar.nolimit i { background: repeating-linear-gradient(-45deg, rgb(236 238 242 / 0.3) 0 6px, rgb(236 238 242 / 0.12) 6px 12px); }
+.ob-bar.over i { background: linear-gradient(90deg, rgb(240 163 94 / 0.45), var(--down)); }
+.ob-limits { display: flex; align-items: center; flex-wrap: wrap; gap: 10px; font-size: 13px; }
+.ob-limits .seg button { font-variant-numeric: tabular-nums; }
+
+/* Sound */
+.ob-pill { flex: none; display: inline-flex; align-items: center; gap: 6px; height: 24px; padding: 0 9px; border-radius: 12px; border: 1px solid var(--line); background: rgb(255 255 255 / 0.03); font-size: 11.5px; font-weight: 500; color: var(--muted); white-space: nowrap; }
+.ob-pill i { width: 6px; height: 6px; border-radius: 50%; background: var(--muted); }
+.ob-pill.on { color: var(--soft); }
+.ob-pill.on i { background: var(--up); animation: ob-beat 2.2s ease-out infinite; }
+.ob-micpick { flex: 1; min-width: 0; display: grid; gap: 10px; }
+.select.ob-micsel { width: min(380px, 100%); height: 36px; }
+.ob-mictest { display: flex; align-items: center; gap: 14px; padding: 10px 10px 10px 14px; border-radius: 10px; border: 1px solid var(--line); background: var(--bg); transition: border-color 300ms; }
+.ob-mictest.on { border-color: rgb(76 195 138 / 0.35); }
+.ob-meter { flex: none; display: flex; align-items: flex-end; gap: 3px; height: 22px; }
+.ob-meter i { width: 4px; height: calc(30% + var(--k) * 70%); border-radius: 2px; background: rgb(255 255 255 / 0.1); transition: background 90ms; }
+.ob-meter i.on { background: var(--up); }
+.ob-meter i.hot { background: var(--down); }
+.ob-mic-note { flex: 1; min-width: 0; display: flex; align-items: center; gap: 8px; font-size: 12.5px; color: var(--soft); }
+.ob-mic-note.ok { color: var(--up); }
+.ob-mic-note.bad { color: #ff8589; }
+.ob-note { display: flex; align-items: flex-start; gap: 12px; padding: 14px 16px; border-radius: 12px; border: 1px solid var(--line); background: rgb(255 255 255 / 0.025); font-size: 13px; line-height: 1.5; color: var(--soft); }
+.ob-note svg { flex: none; margin-top: 2px; }
+.ob-note b { color: var(--text); font-weight: 600; }
+
+/* Teammates: you and your code */
+.ob-you-id { display: flex; align-items: center; gap: 14px; padding: 14px 16px; }
+.ob-avatar { flex: none; width: 44px; height: 44px; border-radius: 50%; display: grid; place-items: center; background: var(--mark); color: var(--mark-ink); font: 800 18px/1 var(--display); animation: ob-pop 420ms var(--spring) backwards; }
+.ob-namefield { flex: 1; min-width: 0; display: grid; gap: 2px; }
+.ob-namefield span { font-size: 11.5px; font-weight: 500; color: var(--muted); }
+.ob-namefield input {
+  width: 100%; max-width: 340px; height: 34px; margin-left: -9px; padding: 0 8px; border-radius: 8px; border: 1px solid transparent; background: transparent;
+  font: 700 18px/1 var(--display); font-stretch: 106%; letter-spacing: -0.01em; user-select: text;
+  transition: border-color var(--fast), background var(--fast);
+}
+.ob-namefield input:hover { border-color: var(--line-2); }
+.ob-namefield input:focus { border-color: var(--line-2); background: var(--bg); }
+.ob-namefield input:focus-visible { outline-offset: 0; }
+.ob-namefield input::placeholder { color: var(--muted); font-weight: 500; }
+.ob-tag { flex: none; padding: 3px 8px; border-radius: 6px; background: var(--raised); font-size: 11px; font-weight: 600; color: var(--soft); animation: ob-fade 300ms ease backwards; }
+.ob-code { display: grid; gap: 12px; padding: 16px; }
+.ob-label { font-size: 11.5px; font-weight: 600; letter-spacing: 0.07em; text-transform: uppercase; color: var(--muted); }
+.ob-codeblock {
+  position: relative; overflow: hidden; display: grid; grid-template-columns: repeat(4, max-content); gap: 6px 16px;
+  padding: 14px 18px; border-radius: 10px; border: 1px solid var(--line); background: var(--bg);
+  font: 500 15.5px/1.35 var(--mono); letter-spacing: 0.05em; user-select: text;
+}
+.ob-codeblock::after { content: ""; position: absolute; inset: 0; pointer-events: none; background: linear-gradient(90deg, transparent, rgb(255 255 255 / 0.07), transparent); transform: translateX(-100%); animation: ob-sweep 1.2s 300ms ease-out; }
+.ob-codeblock .g { white-space: pre; }
+/* The first group (after the full code for screen readers) is what teammates see when you ask to connect. */
+.ob-codeblock .g:nth-child(2) { color: var(--mark); }
+.ob-codeblock .scr { color: var(--muted); }
+.ob-codeblock.wait { display: flex; align-items: center; gap: 10px; font: 13px var(--body); letter-spacing: 0; }
+.ob-codeblock.wait::after { display: none; }
+.ob-code .ob-fine .mono { color: var(--mark); }
+.ob-code-acts { display: flex; flex-wrap: wrap; gap: 8px; }
+.ob-copy-ic { display: inline-grid; place-items: center; animation: ob-pop 320ms var(--spring) backwards; }
+.ob-copy.done:not(.primary) { color: var(--up); border-color: rgb(76 195 138 / 0.4); }
+
+/* Teammates: how pairing goes, the code box, and the list */
+.ob-pair { display: grid; gap: 12px; }
+.ob-how { list-style: none; margin: 0 0 4px; padding: 0; display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 8px; }
+.ob-how li { display: grid; grid-template-columns: auto minmax(0, 1fr); column-gap: 10px; row-gap: 2px; padding: 12px; border-radius: 12px; border: 1px solid var(--line); background: rgb(255 255 255 / 0.02); transition: border-color 400ms, background 400ms; }
+.ob-how .n { grid-row: 1 / span 2; width: 24px; height: 24px; border-radius: 50%; display: grid; place-items: center; border: 1.5px solid var(--line-2); font-size: 11.5px; font-weight: 700; color: var(--muted); transition: background 300ms, border-color 300ms, color 300ms; }
+.ob-how b { grid-column: 2; font-size: 12.5px; font-weight: 600; }
+.ob-how small { grid-column: 2; font-size: 11.5px; line-height: 1.4; color: var(--muted); }
+.ob-how li.done { border-color: rgb(76 195 138 / 0.28); background: rgb(76 195 138 / 0.05); }
+.ob-how li.done .n { background: var(--up); border-color: var(--up); color: #06210f; animation: ob-pop 420ms var(--spring); }
+.ob-paste {
+  display: flex; align-items: center; gap: 10px; height: 50px; padding: 0 7px 0 15px; border-radius: 12px;
+  border: 1px dashed rgb(255 255 255 / 0.2); background: rgb(10 11 14 / 0.6); color: var(--muted);
+  transition: border-color 200ms, background 200ms, box-shadow 200ms, color 200ms;
+}
+.ob-paste:hover { border-color: rgb(255 255 255 / 0.3); }
+.ob-paste:focus-within { border-style: solid; border-color: rgb(255 255 255 / 0.34); background: var(--bg); }
+.ob-paste.valid { border-style: solid; border-color: rgb(76 195 138 / 0.6); box-shadow: 0 0 0 3px rgb(76 195 138 / 0.1); color: var(--up); }
+.ob-paste.invalid { border-style: solid; border-color: rgb(240 163 94 / 0.55); }
+.ob-paste[data-shake] { animation: ob-shake 400ms ease; }
+.ob-paste input { flex: 1; min-width: 0; height: 100%; border: 0; outline: none; background: none; font-size: 13.5px; color: var(--text); user-select: text; }
+.ob-paste input::placeholder { color: var(--muted); }
+.ob-paste .btn { height: 36px; padding: 0 16px; }
+.ob-hint { margin: -4px 4px 0; font-size: 12.5px; animation: ob-drop 220ms var(--ease) backwards; }
+.ob-hint.bad { color: var(--down); }
+.ob-hint.ok { color: var(--up); }
+.ob-mates { list-style: none; margin: 0; padding: 0; display: grid; gap: 8px; }
+.ob-mate, .ob-req { display: flex; align-items: center; gap: 14px; padding: 12px 12px 12px 14px; border-radius: 12px; border: 1px solid var(--line); background: rgb(18 20 25 / 0.86); }
+.ob-mate { animation: ob-drop 420ms var(--ease) backwards; transition: border-color 500ms, background-color 500ms; }
+.ob-mate.ok { border-color: rgb(91 141 239 / 0.4); background-color: rgb(20 27 42 / 0.92); }
+.ob-req { border-color: rgb(91 141 239 / 0.5); background: linear-gradient(90deg, rgb(91 141 239 / 0.12), rgb(18 20 25 / 0.86) 70%); animation: ob-req-in 560ms var(--spring) backwards; }
+.ob-req .ob-node.them { animation: ob-ask 2s ease-out infinite; }
+.ob-mates .who { flex: 1; min-width: 0; display: grid; gap: 3px; }
+.ob-mates .who b { font-size: 13.5px; font-weight: 600; }
+.ob-mates .who small { font-size: 12.5px; line-height: 1.4; color: var(--muted); }
+.ob-mate .who small { display: flex; align-items: center; gap: 7px; transition: color 300ms; }
+.ob-mate .who small .ob-spin { width: 11px; height: 11px; border-width: 1.5px; }
+.ob-mate.ok .who small { color: var(--win-ink); }
+.ob-mate.waiting .who small { color: var(--soft); }
+.ob-mate:is(.offline, .off) .who small { color: var(--down); }
+.ob-mate:is(.bad, .error) .who small { color: #ff8589; }
+.ob-mate .nm {
+  width: 100%; max-width: 280px; height: 28px; margin-left: -8px; padding: 0 7px; border-radius: 6px; border: 1px solid transparent; background: transparent;
+  font-size: 14px; font-weight: 600; user-select: text; transition: border-color var(--fast), background var(--fast);
+}
+.ob-mate .nm:hover { border-color: var(--line-2); }
+.ob-mate .nm:focus { border-color: var(--line-2); background: var(--bg); }
+.ob-mate .nm:focus-visible { outline-offset: 0; }
+.ob-mate code { flex: none; padding: 5px 8px; border-radius: 6px; background: rgb(255 255 255 / 0.04); font: 500 12px/1 var(--mono); letter-spacing: 0.03em; color: var(--muted); user-select: text; }
+.ob-mate .acts { flex: none; display: flex; align-items: center; gap: 4px; }
+.ob-empty { display: flex; align-items: center; gap: 16px; padding: 16px 18px; border-radius: 12px; border: 1px dashed var(--line-2); font-size: 13px; color: var(--muted); }
+
+/* You, a line, and a teammate: how the connection stands. */
+.ob-link { flex: none; display: flex; align-items: center; }
+.ob-node { position: relative; flex: none; width: 30px; height: 30px; border-radius: 50%; display: grid; place-items: center; font: 800 12.5px/1 var(--display); }
+.ob-node.me { background: var(--mark); color: var(--mark-ink); }
+.ob-node.them { background: var(--raised); color: var(--soft); box-shadow: inset 0 0 0 1.5px var(--line-2); transition: background 400ms, color 400ms, box-shadow 400ms, opacity 400ms; }
+.ob-node .badge { position: absolute; right: -3px; bottom: -3px; width: 14px; height: 14px; border-radius: 50%; display: grid; place-items: center; background: var(--up); color: #06210f; box-shadow: 0 0 0 2px var(--panel); animation: ob-pop 420ms 200ms var(--spring) backwards; }
+.ob-wire { position: relative; width: 44px; height: 2px; background: rgb(255 255 255 / 0.12); }
+.ob-wire i { position: absolute; display: block; }
+.ob-link[data-state="checking"] .ob-wire i { left: 0; top: -2px; width: 6px; height: 6px; border-radius: 50%; background: var(--text); box-shadow: 0 0 6px rgb(255 255 255 / 0.6); animation: ob-travel 1s ease-in-out infinite; }
+.ob-link[data-state="waiting"] .ob-wire { background: repeating-linear-gradient(90deg, rgb(236 238 242 / 0.55) 0 4px, transparent 4px 8px); animation: ob-flow 0.7s linear infinite; }
+.ob-link[data-state="waiting"] .ob-node.them { box-shadow: inset 0 0 0 1.5px rgb(236 238 242 / 0.45); }
+.ob-link[data-state="ok"] .ob-wire i { inset: 0; background: var(--ally); box-shadow: 0 0 8px rgb(91 141 239 / 0.75); transform-origin: left; animation: ob-fill 520ms var(--ease) backwards; }
+.ob-link[data-state="ok"] .ob-node.them { background: var(--ally); color: #071a3d; box-shadow: 0 0 0 4px rgb(91 141 239 / 0.18); }
+.ob-link:is([data-state="offline"], [data-state="off"], [data-state="bad"], [data-state="error"]) .ob-wire { background: linear-gradient(90deg, rgb(255 255 255 / 0.14) 0 38%, transparent 38% 62%, rgb(255 255 255 / 0.14) 62%); }
+.ob-link:is([data-state="offline"], [data-state="off"], [data-state="bad"], [data-state="error"]) .ob-wire i { left: 50%; top: -5px; width: 2px; height: 12px; margin-left: -1px; border-radius: 1px; background: var(--down); transform: rotate(24deg); }
+.ob-link:is([data-state="bad"], [data-state="error"]) .ob-wire i { background: #ff8589; }
+.ob-link:is([data-state="offline"], [data-state="off"], [data-state="bad"], [data-state="error"]) .ob-node.them { opacity: 0.55; }
+.ob-link[data-state="idle"] .ob-wire { background: repeating-linear-gradient(90deg, rgb(255 255 255 / 0.18) 0 3px, transparent 3px 7px); }
+.ob-link[data-state="idle"] .ob-node.them { background: transparent; box-shadow: none; border: 1.5px dashed rgb(255 255 255 / 0.28); color: var(--muted); }
+
+/* Ready */
+.ob-main[data-step="done"] .ob-scroll { padding-top: clamp(20px, 4vh, 48px); padding-bottom: 28px; }
+.ob-done { display: grid; justify-items: center; gap: 12px; text-align: center; }
+.ob-done h1 { font-size: 38px; letter-spacing: -0.03em; }
+.ob-done-mark { position: relative; display: grid; place-items: center; width: 112px; height: 112px; }
+.ob-done-mark .ob-tick { position: relative; z-index: 1; filter: drop-shadow(0 0 18px rgb(76 195 138 / 0.35)); }
+.ob-done-mark .ob-tick circle { fill: rgb(76 195 138 / 0.14); stroke-width: 1.2; }
+.ob-done-mark .ob-tick path { stroke-width: 1.9; }
+.ob-done-mark .ripple { position: absolute; inset: 20px; border-radius: 50%; border: 1.5px solid rgb(76 195 138 / 0.55); opacity: 0; animation: ob-ripple 1.5s var(--ease) both; }
+.ob-burst { position: absolute; left: 50%; top: 50%; }
+.ob-burst i { position: absolute; left: -3px; top: -3px; width: 6px; height: 6px; border-radius: 2px; background: var(--c); opacity: 0; animation: ob-burst 1s cubic-bezier(0.2, 0.7, 0.3, 1) both; animation-delay: calc(var(--t) + 260ms); }
+.ob-burst i:nth-child(3n) { border-radius: 50%; }
+.ob-burst i:nth-child(3n + 1) { left: -4.5px; top: -1.5px; width: 9px; height: 3px; }
+.ob-sum { width: 100%; margin-top: 8px; text-align: left; }
+.ob-sum li { padding-block: 11px; }
+.ob-sum li.todo .ic { color: var(--muted); }
+.ob-sum .ob-tick circle { animation-delay: calc(var(--d, 0) * 70ms + 320ms); }
+.ob-sum .ob-tick path { animation-delay: calc(var(--d, 0) * 70ms + 600ms); }
+.ob-dash { flex: none; width: 19px; height: 19px; border-radius: 50%; border: 1.5px dashed rgb(255 255 255 / 0.24); }
+.ob-tips { width: 100%; list-style: none; margin: 4px 0 0; padding: 0; display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 10px; text-align: left; }
+.ob-tips li { display: grid; gap: 4px; align-content: start; padding: 12px 14px; border-radius: 12px; border: 1px solid var(--line); background: rgb(255 255 255 / 0.02); }
+.ob-tips .ic { width: 30px; height: 30px; margin-bottom: 6px; border-radius: 8px; display: grid; place-items: center; background: var(--raised); color: var(--soft); }
+.ob-tips li:nth-child(1) .ic { color: var(--rec); }
+.ob-tips li:nth-child(2) .ic { color: var(--mark); }
+.ob-tips b { font-size: 13px; font-weight: 600; }
+.ob-tips small { font-size: 12px; line-height: 1.45; color: var(--muted); }
+
+/* Back and Continue, under every step but the first. */
+.ob-foot { padding: 0 40px; border-top: 1px solid var(--line); background: rgb(10 11 14 / 0.72); backdrop-filter: blur(12px); animation: ob-fade 400ms ease backwards; }
+.ob-foot-in { width: min(680px, 100%); margin: 0 auto; display: flex; align-items: center; gap: 10px; padding: 12px 0; }
+.ob-foot .grow { flex: 1; }
+.ob-foot .btn { height: 36px; padding: 0 14px; }
+.ob-next { min-width: 132px; }
+
+@container (max-width: 700px) {
+  .ob-tiles, .ob-tips, .ob-how { grid-template-columns: minmax(0, 1fr); }
+  .ob-codeblock { grid-template-columns: repeat(2, max-content); }
+}
+
+@keyframes ob-fade { from { opacity: 0; } }
+@keyframes ob-fade-out { to { opacity: 0; } }
+@keyframes ob-sink { to { transform: scale(0.98) translateY(6px); } }
+@keyframes ob-from-left { from { opacity: 0; transform: translateX(-10px); } }
+@keyframes ob-in { from { opacity: 0; transform: translateX(26px); } }
+@keyframes ob-in-back { from { opacity: 0; transform: translateX(-26px); } }
+@keyframes ob-out { to { opacity: 0; transform: translateX(-18px); } }
+@keyframes ob-out-back { to { opacity: 0; transform: translateX(18px); } }
+@keyframes ob-rise { from { opacity: 0; transform: translateY(12px); } }
+@keyframes ob-drop { from { opacity: 0; transform: translateY(-6px); } }
+@keyframes ob-pop { from { opacity: 0; transform: scale(0.4); } }
+/* Dashed only while it draws (pathLength 1): left dashed, a ring shows a hairline gap where it closes. */
+@keyframes ob-draw { from { stroke-dasharray: 1 1; stroke-dashoffset: 1; } to { stroke-dasharray: 1 1; stroke-dashoffset: 0; } }
+@keyframes ob-glow { from { opacity: 0; transform: scale(0.6); } }
+@keyframes ob-grow { from { transform: scaleY(0); } }
+@keyframes ob-leg { from { opacity: 0; transform: translate(-60px, -80px); } }
+@keyframes ob-call { from { box-shadow: 0 0 0 0 rgb(236 238 242 / 0.4); } to { box-shadow: 0 0 0 14px rgb(236 238 242 / 0); } }
+@keyframes ob-sweep { to { transform: translateX(100%); } }
+@keyframes ob-shake { 20% { transform: translateX(-7px); } 40% { transform: translateX(6px); } 60% { transform: translateX(-4px); } 80% { transform: translateX(2px); } }
+@keyframes ob-req-in { from { opacity: 0; transform: translateY(-6px) scale(0.94); } }
+@keyframes ob-beat { from { box-shadow: 0 0 0 0 rgb(76 195 138 / 0.55); } 70%, to { box-shadow: 0 0 0 6px rgb(76 195 138 / 0); } }
+@keyframes ob-ask { from { box-shadow: 0 0 0 0 rgb(91 141 239 / 0.6); } 70%, to { box-shadow: 0 0 0 8px rgb(91 141 239 / 0); } }
+@keyframes ob-travel { from { transform: translateX(-3px); opacity: 0; } 25%, 75% { opacity: 1; } to { transform: translateX(41px); opacity: 0; } }
+@keyframes ob-flow { to { background-position: 8px 0; } }
+@keyframes ob-fill { from { transform: scaleX(0); } }
+@keyframes ob-ripple { 0% { opacity: 0; transform: scale(0.7); } 12% { opacity: 1; } 100% { opacity: 0; transform: scale(2); } }
+@keyframes ob-burst {
+  0% { opacity: 0; transform: translate(0, 0) rotate(0deg) scale(0.4); }
+  10%, 75% { opacity: 1; }
+  100% { opacity: 0; transform: translate(var(--x), var(--y)) rotate(var(--r)) scale(1); }
+}
+
+/* The global rule above shortens every animation; here nothing waits for its turn either, and the purely festive bits go. */
+@media (prefers-reduced-motion: reduce) {
+  .ob *, .ob *::before, .ob *::after { animation-delay: 0ms !important; }
+  .ob-burst, .ob-done-mark .ripple, .ob-codeblock::after { display: none; }
+}

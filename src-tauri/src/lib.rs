@@ -571,6 +571,37 @@ fn friend_ping(app: AppHandle, code: String) -> CmdResult<String> {
     pov_engine(&app)?.ping(&code).map_err(err)
 }
 
+/// The player's name in League, suggested in the setup guide as the name teammates see.
+/// The League client is only asked while no game is on.
+#[tauri::command(async)]
+fn league_name(state: State<AppState>) -> Option<String> {
+    let in_game = state.status.lock().unwrap().game_running;
+    let s = state.settings.lock().unwrap().clone();
+    riot::league_name(&s, !in_game)
+}
+
+/// Free space on the drive a folder is on, or would be on once made.
+#[tauri::command(async)]
+fn disk_free(path: String) -> Option<u64> {
+    let path = path.trim();
+    if path.is_empty() {
+        return None;
+    }
+    winutil::free_bytes(std::path::Path::new(path))
+}
+
+/// How loud a microphone is right now, for the setup guide's check. The first call
+/// opens it, and it is closed again shortly after the calls stop.
+#[tauri::command(async)]
+fn mic_level(device: String) -> CmdResult<f32> {
+    audio::mic_level(&device).map_err(err)
+}
+
+#[tauri::command(async)]
+fn mic_check_stop() {
+    audio::mic_check_stop();
+}
+
 /// Teammates' views of the same game as recording `id`: saved ones first, then
 /// whatever teammates who are online can offer.
 #[tauri::command(async)]
@@ -1119,6 +1150,10 @@ pub fn run() {
             list_microphones,
             share_info,
             friend_ping,
+            league_name,
+            disk_free,
+            mic_level,
+            mic_check_stop,
             pov_list,
             pov_saving,
             pov_extras,

@@ -197,6 +197,22 @@ fn remember_account(a: &Account) {
     let _ = write_json(&accounts_file(), &Value::Array(all.iter().map(Account::to_json).collect()));
 }
 
+/// The player's name in League, which the setup guide suggests as the name teammates
+/// see: the account last seen playing on this PC, or else the one logged in to the
+/// League client. That costs one read-only request, made only when `ask_client` (no
+/// game on) and the client setting allow it.
+pub fn league_name(settings: &Settings, ask_client: bool) -> Option<String> {
+    if let Some(name) = known_accounts().into_iter().map(|a| a.game_name.trim().to_string()).find(|n| !n.is_empty()) {
+        return Some(name);
+    }
+    if !ask_client {
+        return None;
+    }
+    let me = Lcu::connect(settings)?.get("/lol-summoner/v1/current-summoner")?;
+    let name = text(&me, "gameName").trim().to_string();
+    (!name.is_empty()).then_some(name)
+}
+
 /// Who played a recorded game: certain when the game's start was seen, otherwise
 /// worked out from the player's name.
 fn who_played(riot: &Value, game: &GameRef, client: Option<&Account>) -> Account {
