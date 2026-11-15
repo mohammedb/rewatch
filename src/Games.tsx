@@ -1,11 +1,13 @@
 import { Bookmark, Check, CircleCheck, CircleDashed, CircleDot, Crosshair, Film, HardDrive, LayoutGrid, List, MessageSquare, Play, Search, Skull, Star, Trash2, Video, X } from "lucide-react";
 import { useEffect, useMemo, useRef, useState } from "react";
 import { absoluteFileUrl, api, fileUrl, pickFolder } from "./api";
-import { ItemIcon, Portrait } from "./ChampIcon";
+import { Portrait } from "./ChampIcon";
 import { ago, bytes, clock, dayLabel, timeOfDay, toReview } from "./format";
 import { Logo } from "./icons";
+import { STORY_HINT, storyLabel } from "./Insights";
 import { LpDelta, queueLabel, standing } from "./Rank";
-import type { Environment, MatchSummary, NextFocus, Review, Settings } from "./types";
+import { ItemSlots, Kda, KdaRatio } from "./Stats";
+import type { Environment, MatchSummary, NextFocus, Review, Settings, Story } from "./types";
 import { humanError, ownsKeys, Popover, Select, Skeleton, useToast } from "./ui";
 
 interface Props {
@@ -38,7 +40,42 @@ function loadLayout(): Layout {
 const gameLength = (m: MatchSummary) => (m.trimmedToHighlights ? (m.reelDuration ?? m.duration) : (m.game?.length ?? m.duration));
 const champName = (m: MatchSummary) => m.game?.me?.champion ?? (m.mode === "manual" ? "Screen recording" : "League game");
 const queueName = (m: MatchSummary) => m.game?.queueName ?? (m.mode === "manual" ? "Screen recording" : m.game?.mode === "PRACTICETOOL" ? "Practice Tool" : "League game");
+const STORIES: Story[] = ["stomp", "comeback", "throw", "close"];
+const STORY_FILTER: Record<Story, string> = { stomp: "Stomps", comeback: "Comebacks", throw: "Throws", close: "Close games" };
+
+/** "Comeback", "Stomped"...: what kind of game it was, from Riot's gold numbers. */
+function StoryChip({ m }: { m: MatchSummary }) {
+  if (!m.story) return null;
+  const won = m.game?.result === "Win" ? true : m.game?.result === "Lose" ? false : null;
+  return (
+    <span className={`story ${m.story}${m.story === "stomp" && won === false ? " lost" : ""}`} title={STORY_HINT[m.story]}>
+      {storyLabel(m.story, won)}
+    </span>
+  );
+}
 const resultOf = (m: MatchSummary) => (m.game?.result === "Win" ? "win" : m.game?.result === "Lose" ? "lose" : "");
+
+/** Both teams in two small columns, yours first, as in a match history. */
+function Teams({ m }: { m: MatchSummary }) {
+  const players = m.game?.players ?? [];
+  if (players.length < 2) return <span className="lh-teams" />;
+  const mine = players.find((p) => p.isMe)?.team ?? players[0].team;
+  const sides = [players.filter((p) => p.team === mine), players.filter((p) => p.team !== mine)];
+  return (
+    <span className="lh-teams" aria-hidden>
+      {sides.map((side, i) => (
+        <span key={i} className="lh-team">
+          {side.slice(0, 5).map((p) => (
+            <span key={p.name + p.champion} className={`lh-p ${p.isMe ? "me" : ""}`}>
+              <Portrait championKey={p.championKey} name={p.champion} size={16} square />
+              <i>{p.isMe ? "You" : p.name || p.champion}</i>
+            </span>
+          ))}
+        </span>
+      ))}
+    </span>
+  );
+}
 
 /** A thumbnail that plays through the recording as the pointer moves across it. */
 function Thumb({ m, flags = true }: { m: MatchSummary; flags?: boolean }) {
@@ -384,6 +421,7 @@ export function Games({ matches, settings, busy, onOpen, onRecord, onSaveSetting
   const toast = useToast();
   const [filter, setFilter] = useState<Filter>("all");
   const [activeTag, setActiveTag] = useState("");
+  const [story, setStory] = useState<Story | "">("");
   const [query, setQuery] = useState("");
   const [layout, setLayout] = useState<Layout>(loadLayout);
   const [env, setEnv] = useState<Environment | null>(null);
@@ -410,6 +448,11 @@ export function Games({ matches, settings, busy, onOpen, onRecord, onSaveSetting
     for (const m of all) for (const t of m.tags ?? []) counts.set(t, (counts.get(t) ?? 0) + 1);
     return [...counts.entries()].sort((a, b) => b[1] - a[1] || a[0].localeCompare(b[0]));
   }, [all]);
+  const storyCounts = useMemo(() => {
+    const counts = new Map<Story, number>();
+    for (const m of all) if (m.story) counts.set(m.story, (counts.get(m.story) ?? 0) + 1);
+    return counts;
+  }, [all]);
 
   const shown = useMemo(() => {
     const q = query.trim().toLowerCase();
@@ -419,6 +462,7 @@ export function Games({ matches, settings, busy, onOpen, onRecord, onSaveSetting
       if (filter === "lose" && m.game?.result !== "Lose") return false;
       if (filter === "kept" && !m.keep) return false;
       if (activeTag && !(m.tags ?? []).includes(activeTag)) return false;
+      if (story && m.story !== story) return false;
       if (q) {
         const players = (m.game?.players ?? []).map((p) => `${p.name} ${p.champion}`).join(" ");
         const hay = `${champName(m)} ${queueName(m)} ${(m.tags ?? []).join(" ")} ${m.notesText ?? ""} ${players}`.toLowerCase();
@@ -426,7 +470,7 @@ export function Games({ matches, settings, busy, onOpen, onRecord, onSaveSetting
       }
       return true;
     });
-  }, [all, filter, activeTag, query, pending]);
+  }, [all, filter, activeTag, story, query, pending]);
 
   const groups = useMemo(() => {
     const out: { key: string; label: string; items: MatchSummary[] }[] = [];
@@ -598,6 +642,19 @@ export function Games({ matches, settings, busy, onOpen, onRecord, onSaveSetting
                 options={[{ value: "", label: "Any" }, ...allTags.map(([t, n]) => ({ value: t, label: `#${t}`, hint: games(n) }))]}
               />
             )}
+            {(storyCounts.size > 0 || story) && (
+              <Select<Story | "">
+                small
+                label="Filter by how the game went, from Riot's gold numbers"
+                prefix="Game"
+                value={story}
+                onChange={setStory}
+                options={[
+                  { value: "", label: "Any" },
+                  ...STORIES.filter((s) => storyCounts.has(s) || s === story).map((s) => ({ value: s, label: STORY_FILTER[s], hint: games(storyCounts.get(s) ?? 0) })),
+                ]}
+              />
+            )}
             <span className="grow" />
             <label className="search">
               <Search size={14} aria-hidden />
@@ -645,6 +702,7 @@ export function Games({ matches, settings, busy, onOpen, onRecord, onSaveSetting
                 setFilter("all");
                 setQuery("");
                 setActiveTag("");
+                setStory("");
               }}
             >
               Show all games
@@ -677,13 +735,13 @@ export function Games({ matches, settings, busy, onOpen, onRecord, onSaveSetting
                       const sel = visibleSel.includes(m.id);
                       return (
                         <div key={m.id} className={`cardwrap ${sel ? "sel" : ""}`}>
-                          <button className="card" onClick={(e) => open(m, e)} aria-label={`${champName(m)}, ${res === "win" ? "victory" : res === "lose" ? "defeat" : queueName(m)}, ${timeOfDay(m.startedEpochMs)}`}>
+                          <button className="card" data-res={res || undefined} onClick={(e) => open(m, e)} aria-label={`${champName(m)}, ${res === "win" ? "victory" : res === "lose" ? "defeat" : queueName(m)}, ${timeOfDay(m.startedEpochMs)}`}>
                             <Thumb m={m} />
                             <span className="info">
                               {me ? (
-                                <Portrait championKey={me.championKey} name={me.champion} size={36} />
+                                <Portrait championKey={me.championKey} name={me.champion} size={40} square level={me.level} />
                               ) : (
-                                <span className="glyph" style={{ width: 36, height: 36 }}>
+                                <span className="glyph" style={{ width: 40, height: 40 }}>
                                   <Video size={16} aria-hidden />
                                 </span>
                               )}
@@ -691,26 +749,18 @@ export function Games({ matches, settings, busy, onOpen, onRecord, onSaveSetting
                                 {champName(m)}
                                 {pending.has(m.id) && <i className="todo" title="Not reviewed yet" />}
                               </span>
-                              <span className="kda num">
-                                {me && (
-                                  <>
-                                    {me.kills}
-                                    <i>/</i>
-                                    <span className="d">{me.deaths}</span>
-                                    <i>/</i>
-                                    {me.assists}
-                                  </>
-                                )}
-                              </span>
+                              {me ? <Kda k={me.kills} d={me.deaths} a={me.assists} /> : <span />}
                               <span className="meta">
-                                {res && <b className={res === "win" ? "ally" : "enemy"}>{res === "win" ? "Victory" : "Defeat"}</b>}
-                                {m.rank?.delta != null && " "}
+                                {res && <span className={`res ${res}`}>{res === "win" ? "Victory" : "Defeat"}</span>}
                                 <LpDelta rank={m.rank} />
-                                {res && " · "}
-                                {queueName(m)} · {timeOfDay(m.startedEpochMs)}
+                                <span className="q">
+                                  {queueName(m)} · {timeOfDay(m.startedEpochMs)}
+                                </span>
                               </span>
-                              {tags.length > 0 && (
+                              {me && <KdaRatio k={me.kills} d={me.deaths} a={me.assists} />}
+                              {(tags.length > 0 || m.story) && (
                                 <span className="card-tags">
+                                  <StoryChip m={m} />
                                   {tags.slice(0, 3).map((t) => (
                                     <i key={t}>#{t}</i>
                                   ))}
@@ -718,12 +768,16 @@ export function Games({ matches, settings, busy, onOpen, onRecord, onSaveSetting
                                 </span>
                               )}
                               <span className="foot">
-                                <span>{me ? `${(me.cs / mins).toFixed(1)} CS a minute` : `${m.height}p, ${bytes(m.sizeBytes)}`}</span>
-                                <span className="build">
-                                  {me?.items.slice(0, 6).map((it, i) => (
-                                    <ItemIcon key={i} id={it.id} name={it.name} size={20} />
-                                  ))}
-                                </span>
+                                {me ? (
+                                  <span className="cs">
+                                    <b className="num">{me.cs}</b> CS <span className="num">({(me.cs / mins).toFixed(1)})</span>
+                                  </span>
+                                ) : (
+                                  <span>
+                                    {m.height}p, {bytes(m.sizeBytes)}
+                                  </span>
+                                )}
+                                {me && me.items.length > 0 && <ItemSlots items={me.items} size={20} />}
                               </span>
                             </span>
                           </button>
@@ -742,12 +796,19 @@ export function Games({ matches, settings, busy, onOpen, onRecord, onSaveSetting
                       return (
                         <div key={m.id} role="listitem" className={`lrow ${sel ? "sel" : ""}`}>
                           {pick(m)}
-                          <button className="lhit" onClick={(e) => open(m, e)}>
+                          <button className={`lhit ${res}`} onClick={(e) => open(m, e)}>
+                            <span className="lh-res">
+                              <b>{res === "win" ? "Victory" : res === "lose" ? "Defeat" : m.mode === "game" ? "Game" : "Recording"}</b>
+                              <small>{queueName(m)}</small>
+                              <small className="num">
+                                {clock(gameLength(m))} · {timeOfDay(m.startedEpochMs)}
+                              </small>
+                            </span>
                             {me ? (
-                              <Portrait championKey={me.championKey} name={me.champion} size={30} />
+                              <Portrait championKey={me.championKey} name={me.champion} size={44} square level={me.level} />
                             ) : (
-                              <span className="glyph" style={{ width: 30, height: 30 }}>
-                                <Video size={14} aria-hidden />
+                              <span className="glyph" style={{ width: 44, height: 44 }}>
+                                <Video size={16} aria-hidden />
                               </span>
                             )}
                             <span className="lc">
@@ -756,15 +817,28 @@ export function Games({ matches, settings, busy, onOpen, onRecord, onSaveSetting
                                 {pending.has(m.id) && <i className="todo" title="Not reviewed yet" />}
                               </b>
                               <small>
-                                {queueName(m)}
-                                {m.rank?.delta != null && " · "}
                                 <LpDelta rank={m.rank} />
+                                <StoryChip m={m} />
                               </small>
                             </span>
-                            <span className={`lres ${res}`}>{res === "win" ? "Victory" : res === "lose" ? "Defeat" : ""}</span>
-                            <span className="kda num">{me ? `${me.kills} / ${me.deaths} / ${me.assists}` : ""}</span>
-                            <span className="num soft">{me ? `${(me.cs / mins).toFixed(1)} CS/m` : ""}</span>
-                            <span className="num muted">{clock(gameLength(m))}</span>
+                            <span className="lh-kda">
+                              {me && (
+                                <>
+                                  <Kda k={me.kills} d={me.deaths} a={me.assists} />
+                                  <KdaRatio k={me.kills} d={me.deaths} a={me.assists} />
+                                </>
+                              )}
+                            </span>
+                            <span className="lh-cs">
+                              {me && (
+                                <>
+                                  <b className="num">{me.cs} CS</b>
+                                  <small className="num">{(me.cs / mins).toFixed(1)} a minute</small>
+                                </>
+                              )}
+                            </span>
+                            <span className="lh-items">{me && me.items.length > 0 && <ItemSlots items={me.items} size={22} />}</span>
+                            <Teams m={m} />
                             <span className="lflags">
                               {m.keep && <Star size={13} fill="currentColor" className="kept" aria-label="Kept" />}
                               {m.noteCount > 0 && (
@@ -774,7 +848,6 @@ export function Games({ matches, settings, busy, onOpen, onRecord, onSaveSetting
                                 </span>
                               )}
                             </span>
-                            <span className="num muted">{timeOfDay(m.startedEpochMs)}</span>
                             <span className="num muted">{bytes(m.sizeBytes)}</span>
                           </button>
                         </div>

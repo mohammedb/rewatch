@@ -2,14 +2,27 @@
 // inside the desktop app.
 
 import type {
-  Coach, Extras, GameEvent, Highlight, TeamReview, Insights, LeagueBackup, MatchFull, MatchSummary, PgKill, PgPlayer, PlayerRow, PostGame, RankChange, Review, Settings, Stats, Status, TrendMatch,
-  TrendPg, TrendSpot, UpdateInfo, Voice, WatchPeer,
+  Coach, Extras, GameEvent, Highlight, TeamReview, Insights, LeagueBackup, MatchFull, MatchSummary, MatchupNote, PgKill, PgPlayer, PlayerRanks, PlayerRow, PostGame, RankChange, Review, Settings, Stats, Status,
+  Story, TrendMatch, TrendPg, TrendSpot, UpdateInfo, Voice, WatchPeer,
 } from "./types";
 
 const LANE: Record<string, string> = { Rin: "MIDDLE", Vex1: "MIDDLE", Sindre: "JUNGLE", Rook: "JUNGLE", Kaja: "BOTTOM", Lumen: "BOTTOM", Tor: "UTILITY", Peel: "UTILITY", Ida: "TOP", Stone: "TOP" };
+/** A plausible build at the end of the game for each sample champion, trinket last. */
+const BUILD: Record<string, [number, string][]> = {
+  Ahri: [[3157, "Zhonya's Hourglass"], [3020, "Sorcerer's Shoes"], [4645, "Shadowflame"], [3089, "Rabadon's Deathcap"], [3135, "Void Staff"], [3340, "Stealth Ward"]],
+  LeeSin: [[6692, "Eclipse"], [3047, "Plated Steelcaps"], [3071, "Black Cleaver"], [6333, "Death's Dance"], [3364, "Oracle Lens"]],
+  Jinx: [[6672, "Kraken Slayer"], [3006, "Berserker's Greaves"], [3031, "Infinity Edge"], [3046, "Phantom Dancer"], [3036, "Lord Dominik's Regards"], [3363, "Farsight Alteration"]],
+  Thresh: [[3869, "Celestial Opposition"], [3047, "Plated Steelcaps"], [3190, "Locket of the Iron Solari"], [3109, "Knight's Vow"], [3364, "Oracle Lens"]],
+  Ornn: [[6665, "Jak'Sho, The Protean"], [3047, "Plated Steelcaps"], [3068, "Sunfire Aegis"], [3075, "Thornmail"], [3065, "Spirit Visage"], [3340, "Stealth Ward"]],
+  Zed: [[3142, "Youmuu's Ghostblade"], [3158, "Ionian Boots of Lucidity"], [6694, "Serylda's Grudge"], [3814, "Edge of Night"], [3340, "Stealth Ward"]],
+  Vi: [[3071, "Black Cleaver"], [3111, "Mercury's Treads"], [3053, "Sterak's Gage"], [6610, "Sundered Sky"], [3364, "Oracle Lens"]],
+  Kaisa: [[6672, "Kraken Slayer"], [3006, "Berserker's Greaves"], [3124, "Guinsoo's Rageblade"], [3115, "Nashor's Tooth"], [3085, "Runaan's Hurricane"], [3363, "Farsight Alteration"]],
+  Nautilus: [[3876, "Solstice Sleigh"], [3047, "Plated Steelcaps"], [3190, "Locket of the Iron Solari"], [3050, "Zeke's Convergence"], [3364, "Oracle Lens"]],
+  Garen: [[6631, "Stridebreaker"], [3047, "Plated Steelcaps"], [3053, "Sterak's Gage"], [6333, "Death's Dance"], [3742, "Dead Man's Plate"], [3340, "Stealth Ward"]],
+};
 const row = (name: string, champion: string, key: string, team: string, k: number, d: number, a: number, cs: number, isMe = false): PlayerRow => ({
-  name, isMe, champion, championKey: key, team, position: LANE[name] ?? "", level: 14, kills: k, deaths: d, assists: a, cs,
-  items: isMe ? [{ id: 3157, name: "Zhonya's Hourglass" }, { id: 3020, name: "Sorcerer's Shoes" }, { id: 4645, name: "Shadowflame" }, { id: 3089, name: "Rabadon's Deathcap" }, { id: 3135, name: "Void Staff" }, { id: 3340, name: "Stealth Ward" }] : [],
+  name, isMe, champion, championKey: key, team, position: LANE[name] ?? "", level: isMe ? 14 : Math.min(18, 10 + Math.round(cs / 45)), kills: k, deaths: d, assists: a, cs,
+  items: (BUILD[key] ?? []).map(([id, n]) => ({ id, name: n })),
 });
 
 const players: PlayerRow[] = [
@@ -138,7 +151,7 @@ const base = (id: string, ms: number, result: "Win" | "Lose", champ: PlayerRow, 
     { name: "discord", file: "discord.m4a", silent: false, note: null },
     { name: "mic", file: "mic.m4a", silent: true, note: null },
   ],
-  game: { queueId: 420, queueName: "Ranked Solo/Duo", mode: "CLASSIC", map: "Map11", length: 1974, result, me: champ, players },
+  game: { queueId: 420, queueName: "Ranked Solo/Duo", mode: "CLASSIC", map: "Map11", length: 1974, result, me: champ, players: players.map((p) => (p.isMe ? champ : p)) },
   bookmarks: [{ t: 45 }, { t: 90 }],
   mouse: { file: "mouse.csv", offset: 0, w: 1280, h: 720 },
   keys: { file: "keys.csv", offset: 0, names: ["Q", "W", "E", "R", "D", "F", "1", "2", "3", "4", "5", "6", "7", "B", "A", "S", "Tab", "Space", "Ctrl", "Shift"] },
@@ -184,6 +197,9 @@ const ROTATE = ["no_vision", "overextended", "no_vision", "outnumbered", "tower_
 
 let watchPeers: WatchPeer[] = [{ code: "kaja", name: "Kaja", playing: false, rate: 1, matchId: null, t: 61 }];
 
+/** What kind of game each was, as the gold numbers would tell it. */
+const storyOf = (i: number, won: boolean): Story | null => (["stomp", "close", null, won ? "comeback" : "throw", null, "close"] as (Story | null)[])[i % 6];
+
 const now = Date.now();
 const reviews: Record<string, Review> = {};
 /** Games whose record was asked for by hand. */
@@ -206,7 +222,10 @@ const matches: MatchSummary[] = SPEC.map(([h, c, result, k, d, a, cs, min, q, ta
     focusCheck: i in CHECK ? { text: FOCUS[CHECK[i][0]], answer: CHECK[i][1] } : null,
   };
   reviews[m.id] = review;
-  return { ...m, keep: review.keep, reviewed: done, nextFocus: review.nextFocus, focusCheck: review.focusCheck, noteCount: review.notes.length, notesText: review.notes.map((n) => n.text).join("\n") };
+  return {
+    ...m, keep: review.keep, reviewed: done, nextFocus: review.nextFocus, focusCheck: review.focusCheck, noteCount: review.notes.length, notesText: review.notes.map((n) => n.text).join("\n"),
+    story: storyOf(i, result === "Win"),
+  };
 });
 // The newest game has the full sample review: notes, a drawing and tags.
 reviews[matches[0].id] = {
@@ -295,7 +314,10 @@ const spotNear = (rnd: () => number): [number, number] => {
 /** Video time for a game time, with the sample clock (video 0 is 10:00 in the game). */
 const videoAt = (t: number) => Math.min(110, Math.max(0, t - 600));
 
-function trendPgFor(i: number, me: PlayerRow, length: number): TrendPg {
+/** Lane opponents across the sample games, so the matchups have something to show. */
+const OPPONENTS: [string, string][] = [["Zed", "Zed"], ["Syndra", "Syndra"], ["Zed", "Zed"], ["Kha'Zix", "Khazix"], ["Yasuo", "Yasuo"], ["Zed", "Zed"], ["Syndra", "Syndra"]];
+
+function trendPgFor(i: number, me: PlayerRow, length: number, story: Story | null): TrendPg {
   const rnd = seeded(i + 11);
   const mins = Math.max(1, length / 60);
   const spot = (deaths: boolean): TrendSpot => {
@@ -318,6 +340,9 @@ function trendPgFor(i: number, me: PlayerRow, length: number): TrendPg {
     vision: Math.round(mins * 0.9),
     vpm: 0.9,
     taken: Math.round(16000 + me.deaths * 2200),
+    opp: OPPONENTS[i % OPPONENTS.length][0],
+    oppKey: OPPONENTS[i % OPPONENTS.length][1],
+    story,
     gold10: Math.round((rnd() - 0.45) * 900),
     gold15: Math.round((rnd() - 0.42) * 1700),
     xp10: Math.round((rnd() - 0.45) * 600),
@@ -327,6 +352,19 @@ function trendPgFor(i: number, me: PlayerRow, length: number): TrendPg {
     kills: Array.from({ length: me.kills }, () => spot(false)).sort((a, b) => a.t - b.t),
   };
 }
+
+const SPELLS: Record<string, number[]> = { TOP: [4, 12], JUNGLE: [4, 11], MIDDLE: [4, 14], BOTTOM: [4, 7], UTILITY: [4, 3] };
+/** Keystone, its path, and the second path. */
+const RUNES: Record<string, [number, number, number]> = {
+  Ahri: [8112, 8100, 8300], LeeSin: [8010, 8000, 8100], Jinx: [8005, 8000, 8300], Thresh: [8439, 8400, 8300], Ornn: [8437, 8400, 8300],
+  Zed: [8112, 8100, 8000], Vi: [8010, 8000, 8100], Kaisa: [9923, 8100, 8000], Nautilus: [8439, 8400, 8200], Garen: [8010, 8000, 8400],
+};
+const TRINKET_IDS = new Set([3340, 3363, 3364]);
+/** Riot's seven item slots: six, then the trinket. */
+const sevenSlots = (items: { id: number }[]): number[] => {
+  const six = items.filter((it) => !TRINKET_IDS.has(it.id)).map((it) => it.id).slice(0, 6);
+  return [...six, ...Array<number>(6 - six.length).fill(0), items.find((it) => TRINKET_IDS.has(it.id))?.id ?? 0];
+};
 
 /** A whole record of one game, built from its scoreboard. */
 function postgameFor(m: MatchSummary, i: number): PostGame {
@@ -350,9 +388,12 @@ function postgameFor(m: MatchSummary, i: number): PostGame {
       mitigated: Math.round(9000 + rnd() * 12000), heal: Math.round(2000 + rnd() * 5000), allyHeal: sup ? Math.round(3000 + rnd() * 4000) : Math.round(rnd() * 600),
       shield: sup ? Math.round(2000 + rnd() * 5000) : 0, objectives: Math.round(4000 + rnd() * 14000), buildings: Math.round(1000 + rnd() * 6000),
       vision: Math.round(mins * (sup ? 2.2 : 0.8)), wardsPlaced: Math.round(mins * (sup ? 1.1 : 0.35)), wardsKilled: Math.round(mins * 0.15), controlWards: sup ? 6 : 2,
-      cc: Math.round(10 + rnd() * 40), deadSecs: p.deaths * 28, largestMulti: p.kills > 6 ? 2 : 1, firstBlood: false,
-      items: (p.items ?? []).map((it) => it.id), spells: [4, 14],
-      runes: { primary: 8100, secondary: 8300, keystone: 8112, perks: [8112, 8139, 8138, 8135, 8345, 8347], shards: [5008, 5008, 5001] },
+      cc: Math.round(10 + rnd() * 40), deadSecs: p.deaths * 28, largestMulti: p.kills >= 9 ? 3 : p.kills >= 6 ? 2 : 1, firstBlood: j === 0,
+      items: sevenSlots(p.items ?? []), spells: SPELLS[p.position ?? ""] ?? [4, 14],
+      runes: (() => {
+        const [keystone, primary, secondary] = RUNES[p.championKey] ?? [8112, 8100, 8300];
+        return { primary, secondary, keystone, perks: [keystone], shards: [5008, 5008, 5001] };
+      })(),
       kp: null, dmgShare: null, skills: p.isMe ? "QWEQQRQEQERWEEWRWW" : "", extra: null,
     };
   });
@@ -424,22 +465,59 @@ function postgameFor(m: MatchSummary, i: number): PostGame {
   };
   const opp = players.find((p) => p.teamId !== me.teamId && p.position === me.position) ?? enemies[0];
   let g = 0;
-  let tg = 0;
   const laneGold = t.map((_, n) => (n === 0 ? 0 : (g += Math.round((rnd() - 0.47) * 260))));
-  const teamGold = t.map((_, n) => (n === 0 ? 0 : (tg += Math.round((rnd() - (myTeamWon ? 0.4 : 0.6)) * 900))));
+  // The lead follows the game's story. The sample video is game minutes 10 to 12, so
+  // the lead swings hard in minutes 11 and 12 to have turns to show there.
+  const sign = myTeamWon ? 1 : -1;
+  const teamGold = t.map((_, n) => {
+    if (n === 0) return 0;
+    const f = n / (t.length - 1);
+    const shape =
+      m.story === "stomp" ? sign * 8000 * f
+      : m.story === "comeback" ? (f < 0.5 ? -9000 * f : -4500 + 15000 * (f - 0.5))
+      : m.story === "throw" ? (f < 0.5 ? 9000 * f : 4500 - 15000 * (f - 0.5))
+      : m.story === "close" ? 1200 * Math.sin(f * 9)
+      : sign * 3500 * f;
+    const swing = (n >= 11 ? 2400 : 0) - (n >= 12 ? 1900 : 0);
+    return Math.round(shape + swing + (rnd() - 0.5) * 300);
+  });
   const teams = [100, 200].map((id) => ({
-    teamId: id, team: (id === 100 ? "ORDER" : "CHAOS") as "ORDER" | "CHAOS", win: (id === 100) === myTeamWon, bans: [],
+    teamId: id, team: (id === 100 ? "ORDER" : "CHAOS") as "ORDER" | "CHAOS", win: (id === 100) === myTeamWon, bans: id === 100 ? [157, 555, 517, 777, 141] : [84, 105, 266, 875, 200],
     kills: players.filter((p) => p.teamId === id).reduce((s, p) => s + p.kills, 0),
     towers: (id === 100) === myTeamWon ? 8 : 3, inhibitors: (id === 100) === myTeamWon ? 1 : 0, dragons: (id === 100) === myTeamWon ? 3 : 1, barons: (id === 100) === myTeamWon ? 1 : 0, heralds: 1, grubs: 3, atakhan: 0,
   }));
   return {
     version: 1, source: "riot", matchId: `EUW1_70${String(1234567 + i)}`, gameId: 701234567 + i, platform: "EUW1", queueId: m.game.queueId ?? 420, mapId: 11, mode: "CLASSIC",
     patch: "25.22", duration: length, startMs: m.startedEpochMs, me: me.id, teams, players, frames, kills: all,
-    objectives: [{ t: 380, kind: "dragon", sub: "FIRE_DRAGON", lane: "", by: 100, killer: 2, x: 9866, y: 4414 }],
+    objectives: [
+      { t: 380, kind: "dragon", sub: "FIRE_DRAGON", lane: "", by: 100, killer: 2, x: 9866, y: 4414 },
+      { t: 619, kind: "dragon", sub: "FIRE_DRAGON", lane: "", by: 100, killer: 2, x: 9866, y: 4414 },
+      { t: 634, kind: "tower", sub: "OUTER_TURRET", lane: "MID_LANE", by: 100, killer: 1, x: 8955, y: 8510 },
+      { t: 678, kind: "baron", sub: "", lane: "", by: 200, killer: 7, x: 5007, y: 10471 },
+      { t: 686, kind: "tower", sub: "OUTER_TURRET", lane: "TOP_LANE", by: 200, killer: 10, x: 981, y: 10441 },
+      { t: 704, kind: "inhibitor", sub: "", lane: "MID_LANE", by: 100, killer: 3, x: 11598, y: 11667 },
+    ],
     lane: { opponent: opp.id, gold: laneGold, xp: laneGold.map((v) => Math.round(v * 0.6)), cs: laneGold.map((v) => Math.round(v / 40)) },
     teamGold,
   };
 }
+
+/** Everyone's rank a few minutes after the game: Solo/Duo around Gold, a few unranked. */
+function playerRanksFor(m: MatchSummary, pg: PostGame, i: number): PlayerRanks {
+  const rnd = seeded(i + 303);
+  return {
+    at: pg.startMs + (pg.duration + 240) * 1000,
+    players: pg.players.map((p) => {
+      const ladder = p.isMe && m.rank?.ladder != null ? m.rank.ladder : Math.round(700 + rnd() * 1700);
+      const ranks = !p.isMe && rnd() < 0.12 ? [] : [{ queue: "RANKED_SOLO_5x5", ...standingAt(ladder), wins: 30 + Math.round(rnd() * 90), losses: 0, ladder }];
+      return { name: p.name, champion: p.champion, championKey: p.championKey, team: p.team, ranks };
+    }),
+  };
+}
+
+let matchupNotes: Record<string, MatchupNote> = {
+  Zed: { text: "Stay behind the minions until his W is down. Ward the side brush at 3:00 and keep Spirit Rush for his ultimate.", at: now - 3 * 86400e3 },
+};
 
 /** Causes for the deaths in a game, as the hints would give them. */
 const causesOf = (i: number, deaths: number) => Array.from({ length: Math.min(deaths, 3) }, (_, j) => ROTATE[(i * 2 + j) % ROTATE.length]);
@@ -463,7 +541,7 @@ let settings: Settings = {
   micDevice: "", mouseTracking: true, keyTracking: true, keyMap: [], useClientApi: true,
   queues: { rankedSolo: true, rankedFlex: true, normal: true, aram: false, custom: true, other: true },
   quotaGb: 300, bookmarkHotkey: "F8", ffmpegPath: "", leagueDir: "", autoBackupLeague: true,
-  shareWithFriends: true, shareName: "Rin", keepTeammateViews: true, reviewCopies: true, shareNotes: true, notify: true, autoUpdate: true, autoHighlights: true, highlightsOnly: false, aiReview: true, geminiKey: "sample", riotApiKey: "",
+  shareWithFriends: true, shareName: "Rin", keepTeammateViews: true, reviewCopies: true, shareNotes: true, notify: true, autoUpdate: true, autoHighlights: true, highlightsOnly: false, aiReview: true, geminiKey: "sample", riotApiKey: "", breakAfterLosses: 3,
   friends: [
     { name: "Kaja", code: "3f9a1c0b7d2e4a6f8b1c3d5e7f9a0b2c4d6e8f0a1b3c5d7e9f1a2b4c6d8e0f13" },
     { name: "Tor", code: "a81d4e6f0b2c3d5e7f9a1b3c5d7e9f0a2b4c6d8e0f1a3b5c7d9e1f2a4b6c8d0e" },
@@ -496,10 +574,13 @@ export async function mock<T>(cmd: string, args?: Record<string, unknown>): Prom
         const review = reviews[m.id] ?? { keep: m.keep, notes: [], drawings: [], tags: m.tags ?? [] };
         const gi = matches.filter((x) => x.mode === "game").indexOf(m);
         const waiting = gi === 1 && !fetched.has(m.id);
+        const pg = game && !waiting ? postgameFor(m, gi) : null;
         const full: MatchFull = {
           ...m, events: game ? events : [], clock: game ? [[0, 600]] : [], review, stats: game ? stats : null, voice: game ? voice : null, titles: game ? builtInTitles : [], highlights: game ? highlights : [], team: [],
-          postgame: game && !waiting ? postgameFor(m, gi) : null,
+          postgame: pg,
           postgameNote: waiting ? "Riot has not published this game yet." : null,
+          // One older game from before ranks were read.
+          playerRanks: pg && gi !== 2 ? playerRanksFor(m, pg, gi) : null,
         };
         return full;
       }
@@ -514,6 +595,17 @@ export async function mock<T>(cmd: string, args?: Record<string, unknown>): Prom
       case "stop_recording": status.state = "idle"; status.mode = null; return matches[0].id;
       case "export_clip": return args?.maxMb ? `E:\\Rewatch\\Clips\\clip_${args.maxMb}mb.mp4` : "E:\\Rewatch\\Clips\\clip.mp4";
       case "export_full": return "E:\\Rewatch\\all-tracks.mp4";
+      case "share_card": return `E:\\Rewatch\\${args!.id}\\share.png`;
+      case "matchup_notes": return matchupNotes;
+      case "set_matchup_note": {
+        const champion = String(args!.champion);
+        const text = String(args!.text ?? "").trim();
+        const next = { ...matchupNotes };
+        if (text) next[champion] = { text, at: Date.now() };
+        else delete next[champion];
+        matchupNotes = next;
+        return matchupNotes;
+      }
       case "build_highlight_reel": return "E:\\Rewatch\\2026-11-12_20-14-03\\highlights_reel.mp4";
       case "library_trends": {
         const games = matches.filter((m) => m.mode !== "manual" && m.game.me);
@@ -551,7 +643,7 @@ export async function mock<T>(cmd: string, args?: Record<string, unknown>): Prom
             deathCauses: causes,
             avgAvoidable: causes.length ? 0.45 + wob * 0.4 : null,
             rank: m.rank ?? null,
-            pg: idx === 1 && !fetched.has(m.id) ? null : trendPgFor(idx, me, len),
+            pg: idx === 1 && !fetched.has(m.id) ? null : trendPgFor(idx, me, len, m.story ?? null),
           };
         });
         return list;

@@ -1,12 +1,12 @@
 // What sits under the timeline and in the Review tab: who was talking when, the
 // numbers of the game as lines, and the lists of deaths and team fights to walk through.
 
-import { ArrowDownWideNarrow, Bookmark, Check, ChevronLeft, ChevronRight, Clapperboard, Crosshair, Film, FolderOpen, MoreHorizontal, Play, Repeat, RotateCcw, Skull, Sparkles, Swords, Trophy, Users, X, Zap } from "lucide-react";
+import { ArrowDownWideNarrow, Bookmark, Check, ChevronLeft, ChevronRight, Clapperboard, Crosshair, Film, FolderOpen, MoreHorizontal, Play, Repeat, RotateCcw, Skull, Sparkles, Swords, TrendingDown, TrendingUp, Trophy, Users, X, Zap } from "lucide-react";
 import { useEffect, useMemo, useRef, useState } from "react";
 import { api } from "./api";
 import { Portrait } from "./ChampIcon";
-import { clock, gameClockAt, laneName } from "./format";
-import type { Coach, DeathInsight, FocusCheck, GameEvent, Highlight, Insights, MatchFull, MatchSummary, NextFocus, PlayerRow, Span, Stats, TeamReview } from "./types";
+import { clock, gameClockAt, laneName, videoTimeAt } from "./format";
+import type { Coach, DeathInsight, FocusCheck, GameEvent, Highlight, Insights, MatchFull, MatchSummary, NextFocus, PgObjective, PlayerRow, PostGame, Span, Stats, Story, TeamReview } from "./types";
 import { humanError, Menu, Select } from "./ui";
 import type { KeyLog } from "./Views";
 
@@ -65,6 +65,153 @@ export function deathItems(events: GameEvent[]): QueueItem[] {
 
 export function fightItems(fights: Fight[]): QueueItem[] {
   return fights.map((f) => ({ t: f.start, start: Math.max(0, f.start - 8), end: f.end + 4, label: `Fight, ${f.ours} for ${f.theirs}` }));
+}
+
+// ------------------------------------------------------------- where it turned
+
+/** A game's story in a word (see riot.rs, `story`). A stomp you lost reads "Stomped". */
+export function storyLabel(story: Story, won?: boolean | null): string {
+  if (story === "stomp") return won === false ? "Stomped" : "Stomp";
+  return story === "comeback" ? "Comeback" : story === "throw" ? "Throw" : "Close";
+}
+
+export const STORY_HINT: Record<Story, string> = {
+  stomp: "One-sided: the winners were never 1,500 gold behind and led by 3,000 at 15 minutes",
+  comeback: "Won from 3,000 gold or more behind",
+  throw: "Lost from 3,000 gold or more ahead",
+  close: "No team led by 3,000 gold until the last two minutes",
+};
+
+/** A minute in which the team gold lead swung hard, and the stretch to watch for it. */
+export interface Turn {
+  /** How far the lead moved that minute, from your team's side, and where it ended. */
+  swing: number;
+  lead: number;
+  /** The minute, in game seconds: from one of Riot's records of the lead to the next. */
+  from: number;
+  to: number;
+  /** What happened in that minute. */
+  what: string;
+  item: QueueItem;
+}
+
+/** A swing smaller than this is no turn. */
+const TURN_MIN = 1500;
+const OBJECTIVE_WORDS: Record<string, [string, string]> = {
+  tower: ["a tower", "towers"],
+  inhibitor: ["an inhibitor", "inhibitors"],
+  dragon: ["a dragon", "dragons"],
+  baron: ["Baron", "Barons"],
+  herald: ["the Herald", "Heralds"],
+  grubs: ["a grub", "grubs"],
+  atakhan: ["Atakhan", "Atakhan"],
+};
+
+/** "Baron and 2 towers". */
+function objectiveWords(list: PgObjective[]): string {
+  const counts = new Map<string, number>();
+  for (const o of list) counts.set(o.kind, (counts.get(o.kind) ?? 0) + 1);
+  const parts = [...counts].map(([kind, n]) => {
+    const [one, many] = OBJECTIVE_WORDS[kind] ?? [kind, kind];
+    return n === 1 ? one : `${n} ${many}`;
+  });
+  return parts.length <= 1 ? (parts[0] ?? "") : `${parts.slice(0, -1).join(", ")} and ${parts[parts.length - 1]}`;
+}
+
+export const signedGold = (n: number) => `${n > 0 ? "+" : n < 0 ? "−" : "±"}${Math.abs(Math.round(n)).toLocaleString()}`;
+
+/**
+ * The minutes where the team gold lead swung the most (at most `max`, 1,500 gold or
+ * more), in game order, each with what to watch: the fight in that minute, else its
+ * kills, else its objectives, else the minute itself. Riot records the lead once a
+ * minute, so a minute is as close as it gets.
+ */
+export function turnsOf(pg: PostGame, samples: [number, number][], fights: Fight[], events: GameEvent[], duration: number, max = 3): Turn[] {
+  const lead = pg.teamGold;
+  const t = pg.frames?.t;
+  if (!lead || !t || lead.length !== t.length || lead.length < 3 || !samples.length) return [];
+  const myTeam = pg.players.find((p) => p.id === pg.me)?.teamId;
+  const big = lead
+    .slice(1)
+    .map((v, k) => ({ i: k + 1, swing: v - lead[k] }))
+    .filter((s) => Math.abs(s.swing) >= TURN_MIN)
+    .sort((a, b) => Math.abs(b.swing) - Math.abs(a.swing))
+    .slice(0, max)
+    .sort((a, b) => a.i - b.i);
+  const out: Turn[] = [];
+  for (const { i, swing } of big) {
+    const [g0, g1] = [t[i - 1], t[i]];
+    const v0 = videoTimeAt(samples, g0);
+    const v1 = videoTimeAt(samples, g1);
+    if (v0 === null || v1 === null || v1 <= 0 || v0 >= duration) continue;
+    const fight = fights.filter((f) => f.end >= v0 && f.start <= v1).sort((a, b) => b.kills.length - a.kills.length)[0];
+    const kills = events.filter((e) => e.kind === "ChampionKill" && e.t >= v0 && e.t <= v1).sort((a, b) => a.t - b.t);
+    const objectives = pg.objectives.filter((o) => o.t > g0 && o.t <= g1 && o.kind !== "plate");
+    const took = objectives.filter((o) => o.by === myTeam);
+    const lost = objectives.filter((o) => o.by !== myTeam && o.by > 0);
+    const words: string[] = [];
+    let span: [number, number];
+    if (fight) {
+      words.push(`Fight, ${fight.ours} for ${fight.theirs}`);
+      span = [fight.start - 8, fight.end + 4];
+    } else if (kills.length) {
+      const ours = kills.filter((k) => k.good === true).length;
+      words.push(kills.length === 1 ? (ours ? "A kill for your team" : "A kill for theirs") : `Kills, ${ours} for ${kills.length - ours}`);
+      span = [kills[0].t - 8, kills[kills.length - 1].t + 4];
+    } else if (objectives.length) {
+      const at = objectives.map((o) => videoTimeAt(samples, o.t) ?? v0);
+      span = [Math.min(...at) - 10, Math.max(...at) + 4];
+    } else {
+      span = [v0, v1];
+    }
+    if (took.length) words.push(`took ${objectiveWords(took)}`);
+    if (lost.length) words.push(`lost ${objectiveWords(lost)}`);
+    if (!words.length) words.push("no kills or objectives: farm, plates and pressure");
+    const what = words.map((w) => w.charAt(0).toUpperCase() + w.slice(1)).join(" · ");
+    const start = Math.max(0, span[0]);
+    const end = Math.min(duration, Math.max(start + 3, span[1]));
+    out.push({ swing, lead: lead[i], from: g0, to: g1, what, item: { t: Math.max(0, fight?.start ?? kills[0]?.t ?? start), start, end, label: `${signedGold(swing)} gold: ${what}` } });
+  }
+  return out;
+}
+
+/** The team gold lead over the game, small, with the turns on it. */
+function LeadStrip({ pg, turns, samples, duration }: { pg: PostGame; turns: Turn[]; samples: [number, number][]; duration: number }) {
+  const lead = pg.teamGold ?? [];
+  const t = pg.frames?.t ?? [];
+  // Only the recorded part of the game, with the nearest record on each side so the
+  // line reaches both ends; the rest would pile up on the edges.
+  const all = t.map((g, i) => ({ x: videoTimeAt(samples, g) ?? 0, v: lead[i] ?? 0 }));
+  let from = 0;
+  while (from + 1 < all.length && all[from + 1].x <= 0) from++;
+  let to = from;
+  while (to + 1 < all.length && all[to].x < duration) to++;
+  const pts = all.slice(from, to + 1);
+  if (pts.length < 2 || duration <= 0) return null;
+  const top = Math.max(1000, ...pts.map((p) => Math.abs(p.v)));
+  const X = (v: number) => (Math.min(Math.max(v, 0), duration) / duration) * 1000;
+  const Y = (v: number) => 22 - (v / top) * 19;
+  const line = pts.map((p) => `${X(p.x).toFixed(1)},${Y(p.v).toFixed(1)}`).join(" ");
+  const end = lead[lead.length - 1];
+  return (
+    <div className="leadstrip" role="img" aria-label={`Team gold lead over the game: ${signedGold(end)} at the end, ${signedGold(Math.max(...lead))} at best, ${signedGold(Math.min(...lead))} at worst`}>
+      <svg viewBox="0 0 1000 44" preserveAspectRatio="none" aria-hidden>
+        <clipPath id="ls-up">
+          <rect x="0" y="0" width="1000" height="22" />
+        </clipPath>
+        <clipPath id="ls-down">
+          <rect x="0" y="22" width="1000" height="22" />
+        </clipPath>
+        <polygon className="ls-area up" clipPath="url(#ls-up)" points={`${X(pts[0].x).toFixed(1)},22 ${line} ${X(pts[pts.length - 1].x).toFixed(1)},22`} />
+        <polygon className="ls-area down" clipPath="url(#ls-down)" points={`${X(pts[0].x).toFixed(1)},22 ${line} ${X(pts[pts.length - 1].x).toFixed(1)},22`} />
+        <line className="ls-zero" x1="0" x2="1000" y1="22" y2="22" vectorEffect="non-scaling-stroke" />
+        <polyline className="ls-line" points={line} vectorEffect="non-scaling-stroke" />
+      </svg>
+      {turns.map((tn, i) => (
+        <i key={i} className={`ls-turn ${tn.swing > 0 ? "up" : "down"}`} style={{ left: `${X(tn.item.t) / 10}%` }} />
+      ))}
+    </div>
+  );
 }
 
 const CAUSES: Record<string, string> = {
@@ -157,6 +304,10 @@ interface ReviewTabProps {
   onReopen?: () => void;
   /** The player's usual numbers over recent games, to compare this one with. */
   usual?: Usual | null;
+  /** Riot's record of the game and the clock to place it in the video, for where it turned. */
+  postgame?: PostGame | null;
+  clockSamples?: [number, number][];
+  story?: Story | null;
 }
 
 /** Averages over recent games, for context next to this game's numbers. */
@@ -211,8 +362,14 @@ export function ReviewTab({
   onFinish,
   onReopen,
   usual,
+  postgame,
+  clockSamples,
+  story,
 }: ReviewTabProps) {
   const [focusDraft, setFocusDraft] = useState<string | null>(null);
+  const turns = useMemo(() => (postgame && clockSamples ? turnsOf(postgame, clockSamples, fights, events, duration) : []), [postgame, clockSamples, fights, events, duration]);
+  const turnItems = useMemo(() => turns.map((tn) => tn.item), [turns]);
+  const won = postgame?.players.find((p) => p.id === postgame.me)?.win ?? null;
   const reel = useMemo<QueueItem[]>(() => highlights.map((h) => ({ t: h.t, start: h.start, end: h.end, label: h.label })), [highlights]);
   const unsaved = highlights.some((h) => !h.file);
   const [worstFirst, setWorstFirst] = useState(false);
@@ -229,7 +386,7 @@ export function ReviewTab({
   const fightList = useMemo(() => fightItems(fights), [fights]);
   const marks = useMemo<QueueItem[]>(() => bookmarks.map((b) => ({ t: b.t, start: Math.max(0, b.t - 10), end: b.t + 5, label: "Bookmark" })), [bookmarks]);
   const active = (title: string, i: number) => queue?.title === title && queue.idx === i;
-  const nothing = deaths.length + fightList.length + marks.length + highlights.length === 0;
+  const nothing = deaths.length + fightList.length + marks.length + highlights.length + turns.length === 0;
   const wanted = !coach || (deaths.length > 0 && !hasHints);
 
   const me = players.find((p) => p.isMe);
@@ -468,6 +625,49 @@ export function ReviewTab({
       {wanted && hintState === "off" && <p className="hint-note">A written review of the game and hints on each death can be switched on in Settings, under AI review.</p>}
       {hintError && <p className="down hint-note">{humanError(hintError)}</p>}
       {nothing && !coach && <p className="hint-note">No deaths, team fights or bookmarks in this recording.</p>}
+
+      {postgame?.teamGold && clockSamples && (turns.length > 0 || story) && (
+        <section className="rv turns">
+          <header>
+            <h3>
+              <TrendingUp size={15} aria-hidden />
+              Where the game turned{turns.length > 0 && <span className="num">{turns.length}</span>}
+            </h3>
+            <span className="grow" />
+            {turns.length > 1 && (
+              <button className="btn sm" onClick={() => onStart("Turns", turnItems, 0)} title="Plays what happened in each of these minutes, then stops so you can think">
+                <Play size={12} fill="currentColor" aria-hidden />
+                Play all
+              </button>
+            )}
+          </header>
+          <div className="ls-row">
+            {story && (
+              <span className={`story ${story}${story === "stomp" && won === false ? " lost" : ""}`} title={STORY_HINT[story]}>
+                {storyLabel(story, won)}
+              </span>
+            )}
+            <LeadStrip pg={postgame} turns={turns} samples={clockSamples} duration={duration} />
+          </div>
+          {turns.map((tn, i) => (
+            <button key={i} className={`moment ${active("Turns", i) ? "now" : ""}`} onClick={() => onStart("Turns", turnItems, i)}>
+              <span className="t">{clock(tn.item.t)}</span>
+              <span className="pic">
+                <span className={`glyph ${tn.swing > 0 ? "ally" : "enemy"}`} style={{ width: 26, height: 26 }}>
+                  {tn.swing > 0 ? <TrendingUp size={14} /> : <TrendingDown size={14} />}
+                </span>
+              </span>
+              <span className="txt">
+                <b className={tn.swing > 0 ? "up" : "down"}>{signedGold(tn.swing)} gold</b> for your team in minute {Math.round(tn.to / 60)}
+                <small className="prefight">
+                  {tn.what} · the lead was {signedGold(tn.lead)} after
+                </small>
+              </span>
+            </button>
+          ))}
+          {turns.length === 0 && <p className="hint-note">The team gold lead never moved by 1,500 within a minute you recorded.</p>}
+        </section>
+      )}
 
       {deaths.length > 0 && (
         <section className="rv">
@@ -792,18 +992,31 @@ export interface VoiceRow {
 export const VOICE_COLORS = ["#f2c94c", "#5b8def", "#4fd1a5", "#c084fc", "#f59e6b"];
 export const DISCORD_COLOR = "#8a93a3";
 
-export type Metric = "cs" | "cspm" | "level" | "gold" | "itemGold" | "goldDiff" | "killDiff" | "wards" | "apm";
-const METRICS: { key: Metric; label: string }[] = [
+export type Metric = "cs" | "cspm" | "level" | "gold" | "itemGold" | "goldDiff" | "killDiff" | "wards" | "apm" | "laneGold" | "laneXp" | "teamGold";
+const METRICS: { key: Metric; label: string; hint?: string }[] = [
   { key: "cs", label: "CS" },
   { key: "cspm", label: "CS per minute" },
   { key: "level", label: "Level" },
   { key: "gold", label: "Unspent gold" },
   { key: "itemGold", label: "Item gold" },
-  { key: "goldDiff", label: "Team gold diff" },
+  { key: "goldDiff", label: "Team item gold diff", hint: "Items bought, every 10 seconds" },
   { key: "killDiff", label: "Team kill diff" },
   { key: "wards", label: "Vision score" },
   { key: "apm", label: "APM (clicks + keys)" },
+  { key: "laneGold", label: "Gold lead in lane", hint: "Over your lane opponent, from Riot, once a minute" },
+  { key: "laneXp", label: "XP lead in lane", hint: "Over your lane opponent, from Riot, once a minute" },
+  { key: "teamGold", label: "Team gold lead", hint: "All gold earned, from Riot, once a minute" },
 ];
+/** Leads: drawn around zero with a sign, with nobody else to compare with. */
+const LEADS = new Set<Metric>(["goldDiff", "killDiff", "laneGold", "laneXp", "teamGold"]);
+/** From Riot's record of the game: a value a minute, drawn as steps. */
+const RIOT = new Set<Metric>(["laneGold", "laneXp", "teamGold"]);
+
+function riotValues(pg: PostGame | null | undefined, m: Metric): number[] | null {
+  const t = pg?.frames?.t;
+  const v = m === "teamGold" ? pg?.teamGold : m === "laneGold" ? pg?.lane?.gold : m === "laneXp" ? pg?.lane?.xp : null;
+  return t && v && v.length === t.length && v.length > 1 ? v : null;
+}
 
 interface LanesProps {
   duration: number;
@@ -823,6 +1036,9 @@ interface LanesProps {
   keys?: KeyLog | null;
   currentId?: string;
   compareGames?: MatchSummary[];
+  /** Riot's record of the game and the clock to place it in the video, for the leads. */
+  postgame?: PostGame | null;
+  clockSamples?: [number, number][];
   onMetric: (m: Metric) => void;
   onVersus: (name: string) => void;
   onSeek: (t: number) => void;
@@ -845,6 +1061,8 @@ export function Lanes({
   keys,
   currentId,
   compareGames = [],
+  postgame,
+  clockSamples,
   onMetric,
   onVersus,
   onSeek,
@@ -889,18 +1107,24 @@ export function Lanes({
   const hasWards = !!stats?.players.some((p) => (p.wardScore?.length ?? 0) > 0);
   const hasApm = cpm.length > 0 || (keys?.presses.length ?? 0) > 0;
 
+  const hasClock = (clockSamples?.length ?? 0) > 0;
   const availableMetrics = useMemo(
     () =>
       METRICS.filter((m) => {
+        if (RIOT.has(m.key)) return hasClock && !!riotValues(postgame, m.key);
+        if (m.key === "apm") return hasApm;
+        if (!stats) return false;
         if (m.key === "itemGold" || m.key === "goldDiff") return hasItemGold;
         if (m.key === "wards") return hasWards;
-        if (m.key === "apm") return hasApm;
         return true;
       }),
-    [hasItemGold, hasWards, hasApm],
+    [hasItemGold, hasWards, hasApm, hasClock, stats, postgame],
   );
   // The chosen metric is remembered across games; older recordings lack some of them.
-  const metric: Metric = availableMetrics.some((m) => m.key === wantedMetric) ? wantedMetric : "cs";
+  // Without the live numbers, Riot's leads are next best.
+  const fallback = availableMetrics.find((m) => m.key === "cs") ?? availableMetrics.find((m) => RIOT.has(m.key));
+  const metric: Metric = availableMetrics.some((m) => m.key === wantedMetric) ? wantedMetric : (fallback?.key ?? "cs");
+  const laneOpp = postgame?.lane ? postgame.players.find((p) => p.id === postgame.lane!.opponent)?.champion : undefined;
 
   const extractSeries = (st: Stats, ps: PlayerRow[], m: Metric, targetName: string | undefined, gAt: (t: number) => number | null): number[] | null => {
     const myPlayer = ps.find((p) => p.isMe);
@@ -938,6 +1162,26 @@ export function Lanes({
   };
 
   const series = useMemo(() => {
+    if (RIOT.has(metric)) {
+      const vals = riotValues(postgame, metric);
+      const g = postgame?.frames?.t;
+      if (!vals || !g || !clockSamples?.length) return null;
+      // Riot's records in video time; of those from before the recording started, only
+      // the last counts, since it holds when the video begins. Those from after it ended
+      // are left out.
+      const xs = g.map((s) => videoTimeAt(clockSamples, s) ?? 0);
+      const first = Math.max(0, xs.findIndex((x) => x > 0) - 1);
+      const past = xs.findIndex((x, i) => i > first && x >= duration);
+      const stop = past < 0 ? xs.length : past;
+      const ts = xs.slice(first, stop);
+      const mine = vals.slice(first, stop);
+      let comp: number[] | null = null;
+      const cv = riotValues(compareMatch?.postgame, metric);
+      const cg = compareMatch?.postgame?.frames?.t;
+      if (cv && cg) comp = g.slice(first, stop).map((s) => valueAt(cg, cv, s) ?? cv[0]);
+      const span = Math.max(1, ...mine.map(Math.abs), ...(comp ?? []).map(Math.abs));
+      return { ts, mine, theirs: null, comp, lo: -span, hi: span, steps: true };
+    }
     const ts = stats?.t ?? (metric === "apm" && hasApm ? Array.from({ length: Math.max(2, cpm.length) }, (_, i) => i * cpmBucket) : null);
     if (!ts || !ts.length) return null;
 
@@ -986,8 +1230,8 @@ export function Lanes({
       lo = -span;
       hi = span;
     }
-    return { ts, mine, theirs, comp, lo, hi };
-  }, [stats, me, other, players, metric, gameAt, hasApm, cpm, cpmBucket, keys, compareMatch]);
+    return { ts, mine, theirs, comp, lo, hi, steps: false };
+  }, [stats, me, other, players, metric, gameAt, hasApm, cpm, cpmBucket, keys, compareMatch, postgame, clockSamples, duration]);
 
   // CS@10 and CS@15 benchmarks
   const benchmarks = useMemo(() => {
@@ -1023,14 +1267,26 @@ export function Lanes({
   };
   const shown = hover?.t ?? time;
   const yOf = (v: number, lo: number, hi: number) => 58 - ((v - lo) / Math.max(1e-6, hi - lo)) * 52;
-  const path = (ts: number[], vs: number[], lo: number, hi: number) => ts.map((t, i) => `${(pct(t) * 10).toFixed(1)},${yOf(vs[i], lo, hi).toFixed(1)}`).join(" ");
+  /** The line's points; a stepped line holds each value until the next one and to the end. */
+  const path = (ts: number[], vs: number[], lo: number, hi: number, steps = false) => {
+    const pts: string[] = [];
+    ts.forEach((t, i) => {
+      const x = (pct(t) * 10).toFixed(1);
+      if (steps && i > 0) pts.push(`${x},${yOf(vs[i - 1], lo, hi).toFixed(1)}`);
+      pts.push(`${x},${yOf(vs[i], lo, hi).toFixed(1)}`);
+    });
+    if (steps && vs.length) pts.push(`1000,${yOf(vs[vs.length - 1], lo, hi).toFixed(1)}`);
+    return pts.join(" ");
+  };
   const talking = voiceOn ? voice.filter((r) => r.spans.some((s) => s[0] <= shown && shown <= s[1])).map((r) => r.label) : [];
   const fmt = (v: number | null) => {
     if (v === null) return "–";
     if (metric === "cspm") return v.toFixed(1);
-    if ((metric === "goldDiff" || metric === "killDiff") && v > 0) return `+${Math.round(v)}`;
-    return String(Math.round(v));
+    const n = Math.round(v);
+    const sign = n < 0 ? "−" : LEADS.has(metric) && n > 0 ? "+" : "";
+    return sign + Math.abs(n).toLocaleString();
   };
+  const mineLabel = metric === "goldDiff" || metric === "killDiff" || metric === "teamGold" ? "Your team" : (metric === "laneGold" || metric === "laneXp") && laneOpp ? `You vs ${laneOpp}` : "You";
   const zeroY = series ? yOf(0, series.lo, series.hi) : 32;
   const otherGames = compareGames.filter((g) => g.id !== currentId && g.mode !== "manual" && g.game?.me);
 
@@ -1058,15 +1314,17 @@ export function Lanes({
         {statsOn && (
           <div className="stat-ctl">
             <span className="read">
-              <b style={{ color: "var(--mark)" }}>You {fmt(valueAt(series!.ts, series!.mine, shown))}</b>
+              <b style={{ color: "var(--mark)" }}>
+                {mineLabel} {fmt(valueAt(series!.ts, series!.mine, shown))}
+              </b>
               {series!.theirs && other && <b className={other.team === me?.team ? "ally" : "enemy"}>{other.champion} {fmt(valueAt(series!.ts, series!.theirs, shown))}</b>}
               {series!.comp && compareMatch?.game?.me && (
                 <b style={{ color: "var(--epic)" }}>{compareMatch.game.me.champion} (prev) {fmt(valueAt(series!.ts, series!.comp, shown))}</b>
               )}
               <span className="muted">at {clock(shown)}</span>
             </span>
-            <Select small className="ghost" label="What the graph shows" value={metric} onChange={onMetric} placement="top-end" options={availableMetrics.map((m) => ({ value: m.key, label: m.label }))} />
-            {metric !== "gold" && metric !== "goldDiff" && metric !== "killDiff" && metric !== "apm" && (
+            <Select small className="ghost" label="What the graph shows" value={metric} onChange={onMetric} placement="top-end" options={availableMetrics.map((m) => ({ value: m.key, label: m.label, hint: m.hint }))} />
+            {metric !== "gold" && metric !== "apm" && !LEADS.has(metric) && (
               <Select
                 small
                 className="ghost"
@@ -1139,8 +1397,8 @@ export function Lanes({
           <svg className="statgraph" viewBox="0 0 1000 60" preserveAspectRatio="none" role="img" aria-label={`${METRICS.find((m) => m.key === metric)?.label} over the game`}>
             <line x1="0" x2="1000" y1={zeroY} y2={zeroY} stroke="var(--line)" strokeWidth="1" vectorEffect="non-scaling-stroke" />
             {series!.theirs && <polyline points={path(series!.ts, series!.theirs, series!.lo, series!.hi)} fill="none" stroke={other?.team === me?.team ? "var(--ally)" : "var(--enemy)"} strokeWidth="2" vectorEffect="non-scaling-stroke" />}
-            {series!.comp && <polyline points={path(series!.ts, series!.comp, series!.lo, series!.hi)} fill="none" stroke="var(--epic)" strokeWidth="2" strokeDasharray="5 3" vectorEffect="non-scaling-stroke" />}
-            <polyline points={path(series!.ts, series!.mine, series!.lo, series!.hi)} fill="none" stroke="var(--mark)" strokeWidth="2" vectorEffect="non-scaling-stroke" />
+            {series!.comp && <polyline points={path(series!.ts, series!.comp, series!.lo, series!.hi, series!.steps)} fill="none" stroke="var(--epic)" strokeWidth="2" strokeDasharray="5 3" vectorEffect="non-scaling-stroke" />}
+            <polyline points={path(series!.ts, series!.mine, series!.lo, series!.hi, series!.steps)} fill="none" stroke="var(--mark)" strokeWidth="2" vectorEffect="non-scaling-stroke" />
           </svg>
         )}
         {statsOn && <span className="ymax">{fmt(series!.hi)}</span>}

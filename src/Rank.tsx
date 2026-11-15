@@ -2,6 +2,7 @@ import { Trophy } from "lucide-react";
 import { useEffect, useMemo, useRef, useState, type KeyboardEvent } from "react";
 import { Portrait } from "./ChampIcon";
 import { dayLabel, timeOfDay } from "./format";
+import { Crest, tierColor, WinRing } from "./Stats";
 import type { RankChange, TrendMatch } from "./types";
 
 // Ranked standings and LP, as Riot reports them after each game (see riot.rs).
@@ -68,15 +69,34 @@ export function LpDelta({ rank, unit = true }: { rank?: RankChange | null; unit?
   );
 }
 
+/** Crest and "Gold II" in the tier's colour, and the LP when asked for. */
+export function TierTag({ r, lp = false, size = 16, title }: { r: { tier: string; division: string; lp?: number } | null; lp?: boolean; size?: number; title?: string }) {
+  const tier = r?.tier ?? "";
+  return (
+    <span className={`ttag ${tier ? "" : "un"}`} style={{ ["--tc" as string]: tierColor(tier) }} title={title}>
+      <Crest tier={tier} size={size} />
+      <b>{r ? rankName(r) : "Unranked"}</b>
+      {lp && tier && r?.lp != null && <small>{r.lp} LP</small>}
+    </span>
+  );
+}
+
 /** The standing after a game and the LP it won or lost, above the scoreboard. */
 export function RankLine({ rank }: { rank: RankChange }) {
   return (
-    <div className="rankline">
-      <Trophy size={15} aria-hidden />
-      <span className="rl-q">{queueLabel(rank.queue)}</span>
-      <b>{standing(rank)}</b>
+    <div className="rankline" style={{ ["--tc" as string]: tierColor(rank.tier) }}>
+      <Crest tier={rank.tier} size={34} />
+      <span className="rl-t">
+        <span className="rl-q">
+          {queueLabel(rank.queue)}
+          {rank.provisional && " · in placements"}
+        </span>
+        <b>
+          {rankName(rank)}
+          {rank.tier && <small> {rank.lp} LP</small>}
+        </b>
+      </span>
       <LpDelta rank={rank} />
-      {rank.provisional && <span className="muted">in placements</span>}
     </div>
   );
 }
@@ -173,14 +193,35 @@ export function RankCard({ rows, onOpen }: { rows: TrendMatch[]; onOpen: (id: st
           </div>
         )}
       </header>
-      <div className="rk-now">
-        <b>{standing(last)}</b>
-        <span className="muted">
-          {queueLabel(last.queue)} · {last.wins} won, {last.losses} lost this season
-        </span>
+      <div className="rk-now" style={{ ["--tc" as string]: tierColor(last.tier) }}>
+        <Crest tier={last.tier} size={56} />
+        <div className="rk-id">
+          <span className="rk-q">{queueLabel(last.queue)}</span>
+          <b>{rankName(last)}</b>
+          {last.tier && (
+            <div className="rk-lp" title={last.lp >= 100 || !last.division ? `${last.lp} LP` : `${last.lp} of 100 LP to the next division`}>
+              <span className="rk-bar" aria-hidden>
+                <i style={{ width: `${last.division ? Math.min(100, Math.max(0, last.lp)) : 100}%` }} />
+              </span>
+              <span className="num">{last.lp} LP</span>
+            </div>
+          )}
+        </div>
+        {last.wins + last.losses > 0 && (
+          <div className="rk-wl">
+            <WinRing wins={last.wins} losses={last.losses} size={52} />
+            <span>
+              <b className="num">
+                {last.wins}W {last.losses}L
+              </b>
+              <small>this season</small>
+            </span>
+          </div>
+        )}
         {known.length > 0 && (
           <span className={`rk-net ${net > 0 ? "up" : net < 0 ? "down" : "muted"}`}>
-            {signed(net)} LP over {known.length === 1 ? "1 game" : `${known.length} games`}
+            <b>{signed(net)} LP</b>
+            <small>over {known.length === 1 ? "1 game" : `${known.length} games`}</small>
           </span>
         )}
       </div>

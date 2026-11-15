@@ -150,6 +150,8 @@ pub fn list(settings: &Settings) -> Vec<Value> {
             o.insert("reel".into(), if reel.exists() { json!(reel.to_string_lossy()) } else { Value::Null });
             // LP won or lost, once Riot has it (see `riot`).
             o.insert("rank".into(), crate::riot::status(&dir).0);
+            // Stomp, comeback, throw or close, from Riot's gold numbers.
+            o.insert("story".into(), json!(crate::riot::story_of(&dir)));
         }
         out.push(doc);
     }
@@ -178,9 +180,12 @@ pub fn get(settings: &Settings, id: &str) -> Result<Value> {
         o.insert("highlights".into(), json!(highlights));
         let reel = dir.join(crate::highlights::REEL_FILE);
         o.insert("reel".into(), if reel.exists() { json!(reel.to_string_lossy()) } else { Value::Null });
-        // Riot's record of the game, the LP it won or lost, and why the record is
-        // missing if it is (see `riot`).
-        o.insert("postgame".into(), crate::riot::load(&dir).unwrap_or(Value::Null));
+        // Riot's record of the game, everyone's rank, the LP it won or lost, and why
+        // the record is missing if it is (see `riot`).
+        let pg = crate::riot::load(&dir);
+        o.insert("playerRanks".into(), crate::riot::player_ranks(&dir, pg.as_ref()));
+        o.insert("story".into(), json!(pg.as_ref().and_then(crate::riot::story)));
+        o.insert("postgame".into(), pg.unwrap_or(Value::Null));
         let (rank, note) = crate::riot::status(&dir);
         o.insert("rank".into(), rank);
         o.insert("postgameNote".into(), note);
@@ -360,7 +365,7 @@ pub fn trends(settings: &Settings) -> Vec<Value> {
         let review = read_review(&dir);
         // Riot's record: damage share, lane gold, where you died; and the LP.
         let pg = crate::riot::load(&dir)
-            .map(|pg| crate::riot::trend_extras(&pg, &crate::riot::clock_of(&doc)))
+            .map(|pg| crate::riot::trend_extras(&pg, &crate::riot::clock_of(&doc), doc.get("duration").and_then(|d| d.as_f64()).unwrap_or(0.0)))
             .unwrap_or(Value::Null);
         let row = json!({
             "id": id,
@@ -421,6 +426,110 @@ pub fn save_review(settings: &Settings, id: &str, review: &Value) -> Result<()> 
     let dir = match_dir(settings, id)?;
     fs::write(dir.join("review.json"), serde_json::to_string_pretty(review)?)?;
     Ok(())
+}
+
+/// Games further apart than this are separate sittings.
+const SITTING_GAP_MS: i64 = 60 * 60 * 1000;
+
+/// Losses in a row at the end of a sitting. `games` is (start, end, result), newest
+/// first; games without a result (practice, remakes, recordings outside a game) are
+/// passed over, and a gap of an hour ends the sitting.
+fn losing_streak_of(games: &[(i64, i64, Option<&str>)]) -> usize {
+    let mut streak = 0;
+    let mut next_start: Option<i64> = None;
+    for (start, end, result) in games {
+        if next_start.is_some_and(|n| n - end > SITTING_GAP_MS) {
+            break;
+        }
+        next_start = Some(*start);
+        match result {
+            Some("Lose") => streak += 1,
+            Some(_) => break,
+            None => {}
+        }
+    }
+    streak
+}
+
+/// How many games in a row the player has lost in this sitting, the newest game
+/// included.
+pub fn losing_streak(settings: &Settings) -> usize {
+    let Some(root) = settings.recordings_path() else { return 0 };
+    let Ok(entries) = fs::read_dir(&root) else { return 0 };
+    let mut names: Vec<String> = entries.flatten().filter(|e| e.path().is_dir()).map(|e| e.file_name().to_string_lossy().to_string()).collect();
+    // Folder names are start times, so this is newest first.
+    names.sort_by(|a, b| b.cmp(a));
+    let mut games: Vec<(i64, i64, Option<String>)> = Vec::new();
+    for name in names.iter().take(30) {
+        let Some(doc) = read_json(&root.join(name).join("match.json")) else { continue };
+        let start = doc.get("startedEpochMs").and_then(|v| v.as_i64()).unwrap_or(0);
+        let end = start + (doc.get("duration").and_then(|v| v.as_f64()).unwrap_or(0.0) * 1000.0) as i64;
+        // A remake is no loss.
+        let long = doc.pointer("/game/length").and_then(|v| v.as_f64()).unwrap_or(f64::MAX) >= 300.0;
+        let result = doc.pointer("/game/result").and_then(|v| v.as_str()).filter(|_| long).map(String::from);
+        if games.last().is_some_and(|g| g.0 - end > SITTING_GAP_MS) {
+            break;
+        }
+        let won = result.as_deref() == Some("Win");
+        games.push((start, end, result));
+        if won {
+            break;
+        }
+    }
+    let view: Vec<(i64, i64, Option<&str>)> = games.iter().map(|(s, e, r)| (*s, *e, r.as_deref())).collect();
+    losing_streak_of(&view)
+}
+
+/// One note per opponent champion, written in Trends' matchup list.
+fn matchups_file() -> PathBuf {
+    crate::settings::app_dir().join("matchups.json")
+}
+
+/// Saving one note reads and writes the whole file; one at a time.
+static MATCHUPS: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+/// The player's notes on playing against each champion, by champion key.
+pub fn matchup_notes() -> Value {
+    read_json(&matchups_file()).filter(|v| v.is_object()).unwrap_or_else(|| json!({}))
+}
+
+/// Write the note on one opponent champion; an empty note removes it.
+pub fn set_matchup_note(champion: &str, text: &str) -> Result<Value> {
+    let champion = champion.trim();
+    if champion.is_empty() || champion.len() > 64 {
+        return Err(anyhow!("No champion was named"));
+    }
+    let _one = MATCHUPS.lock().unwrap_or_else(|e| e.into_inner());
+    let mut all = matchup_notes();
+    let map = all.as_object_mut().expect("matchup_notes returns an object");
+    let text = text.trim();
+    if text.chars().count() > 4000 {
+        return Err(anyhow!("A note can be up to 4,000 characters"));
+    }
+    if text.is_empty() {
+        map.remove(champion);
+    } else {
+        map.insert(champion.to_string(), json!({ "text": text, "at": chrono::Utc::now().timestamp_millis() }));
+    }
+    let tmp = matchups_file().with_extension("tmp");
+    fs::write(&tmp, serde_json::to_vec_pretty(&all)?)?;
+    fs::rename(&tmp, matchups_file())?;
+    Ok(all)
+}
+
+/// Save a picture of a game, drawn by the app as a PNG, into the game's folder.
+pub fn save_share_card(settings: &Settings, id: &str, png_base64: &str) -> Result<PathBuf> {
+    use base64::Engine;
+    let dir = match_dir(settings, id)?;
+    let data = png_base64.trim();
+    let data = data.split_once(',').map(|(head, rest)| if head.starts_with("data:") { rest } else { data }).unwrap_or(data);
+    let bytes = base64::engine::general_purpose::STANDARD.decode(data).map_err(|e| anyhow!("The picture could not be read ({e})"))?;
+    if !bytes.starts_with(b"\x89PNG\r\n\x1a\n") || bytes.len() > 20 * 1024 * 1024 {
+        return Err(anyhow!("The picture is not a PNG image"));
+    }
+    let path = dir.join("share.png");
+    fs::write(&path, bytes)?;
+    Ok(path)
 }
 
 pub fn delete(settings: &Settings, id: &str) -> Result<()> {
@@ -745,7 +854,22 @@ pub fn export_split(
 
 #[cfg(test)]
 mod tests {
-    use super::{capped_rates, split_layout, target_video_kbps};
+    use super::{capped_rates, losing_streak_of, split_layout, target_video_kbps};
+
+    #[test]
+    fn a_losing_streak_ends_with_a_win_or_a_break() {
+        const MIN: i64 = 60_000;
+        // (start, end, result), newest first, games 35 minutes long with 5 between.
+        let at = |n: i64, r: Option<&'static str>| (1_000 * MIN - n * 40 * MIN, 1_000 * MIN - n * 40 * MIN + 35 * MIN, r);
+        let three = [at(0, Some("Lose")), at(1, Some("Lose")), at(2, None), at(3, Some("Lose")), at(4, Some("Win")), at(5, Some("Lose"))];
+        assert_eq!(losing_streak_of(&three), 3);
+        assert_eq!(losing_streak_of(&[at(0, Some("Win")), at(1, Some("Lose"))]), 0);
+        // Two hours between games: yesterday's losses are not part of this sitting.
+        let mut apart = vec![at(0, Some("Lose"))];
+        apart.push((at(0, None).0 - 3 * 60 * MIN, at(0, None).0 - 2 * 60 * MIN, Some("Lose")));
+        assert_eq!(losing_streak_of(&apart), 1);
+        assert_eq!(losing_streak_of(&[]), 0);
+    }
 
     #[test]
     fn every_view_gets_a_place() {

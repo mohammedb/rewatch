@@ -1,4 +1,4 @@
-import { ArrowDown, ArrowUp, BarChart3, Crosshair, Loader2, MapPin, Minus, Play, RotateCcw, Skull, Swords, Table2, Users, X } from "lucide-react";
+import { ArrowDown, ArrowUp, BarChart3, CalendarClock, Crosshair, Loader2, MapPin, Minus, NotebookPen, Play, RotateCcw, Skull, Swords, Table2, Users, X } from "lucide-react";
 import { useCallback, useEffect, useMemo, useRef, useState, type KeyboardEvent } from "react";
 import { api } from "./api";
 import type { Playlist, PlaylistItem } from "./App";
@@ -6,7 +6,8 @@ import { Portrait } from "./ChampIcon";
 import { clock, dayLabel, laneName, timeOfDay } from "./format";
 import { hasMap, MapView, type MapDot } from "./MapView";
 import { LpDelta, RankCard } from "./Rank";
-import type { FocusCheck, TrendMatch, TrendSpot } from "./types";
+import { Kda, KdaRatio, kdaTier, WinRate } from "./Stats";
+import type { FocusCheck, MatchupNote, TrendMatch, TrendSpot } from "./types";
 import { humanError, Select, Skeleton, useToast, type Option } from "./ui";
 
 interface Props {
@@ -14,6 +15,8 @@ interface Props {
   /** Start a walk-through across games. */
   onPlaylist: (p: Playlist) => void;
   onSettings?: () => void;
+  /** Losses in a row after which Rewatch suggests a break; 0 when off. */
+  breakAfter?: number;
 }
 
 const DAY = 86_400_000;
@@ -580,9 +583,402 @@ function SpotsCard({ rows, onPlaylist, onSettings }: { rows: TrendMatch[]; onPla
   );
 }
 
+// ------------------------------------------------------------------ sittings
+
+/** An hour without a game ends a sitting, as for the "stop for today?" notice. */
+const SITTING_GAP = 60 * 60_000;
+/** A game shorter than this was a remake: no loss. */
+const REMAKE = 300;
+
+interface Sitting {
+  games: TrendMatch[];
+  start: number;
+  end: number;
+  wins: number;
+  losses: number;
+  /** LP over the sitting's ranked games, and whether it is known for each of them. */
+  lp: number | null;
+  lpAll: boolean;
+}
+
+const lost = (r: TrendMatch) => r.result === "Lose" && r.length >= REMAKE;
+
+/** Games, oldest first, cut into sittings. */
+function sittingsOf(rows: TrendMatch[]): Sitting[] {
+  const out: Sitting[] = [];
+  for (const r of rows) {
+    const end = r.startedEpochMs + r.length * 1000;
+    const cur = out[out.length - 1];
+    if (cur && r.startedEpochMs - cur.end <= SITTING_GAP) {
+      cur.games.push(r);
+      cur.end = Math.max(cur.end, end);
+    } else {
+      out.push({ games: [r], start: r.startedEpochMs, end, wins: 0, losses: 0, lp: null, lpAll: true });
+    }
+  }
+  for (const s of out) {
+    s.wins = s.games.filter((g) => g.result === "Win").length;
+    s.losses = s.games.filter(lost).length;
+    const ranked = s.games.filter((g) => g.rank);
+    const known = ranked.filter((g) => g.rank!.delta != null);
+    s.lp = known.length ? known.reduce((a, g) => a + g.rank!.delta!, 0) : null;
+    s.lpAll = known.length === ranked.length;
+  }
+  return out;
+}
+
+const lpText = (lp: number | null, all = true) => (lp == null ? "—" : `${signedNum(lp)}${all ? "" : "+?"} LP`);
+const lpClass = (lp: number | null) => `lp ${lp != null && lp > 0 ? "up" : lp != null && lp < 0 ? "down" : ""}`;
+
+/** Today, LP sitting by sitting, and how games go after two losses in a row. */
+function SessionsCard({ rows, breakAfter, onOpen, onSettings }: { rows: TrendMatch[]; breakAfter?: number; onOpen: (id: string) => void; onSettings?: () => void }) {
+  const [more, setMore] = useState(false);
+  const sittings = useMemo(() => sittingsOf(rows), [rows]);
+  const midnight = useMemo(() => new Date().setHours(0, 0, 0, 0), []);
+  const today = useMemo(() => {
+    const games = rows.filter((r) => r.startedEpochMs >= midnight);
+    const known = games.filter((g) => g.rank?.delta != null);
+    return {
+      games,
+      wins: games.filter((g) => g.result === "Win").length,
+      losses: games.filter(lost).length,
+      lp: known.length ? known.reduce((a, g) => a + g.rank!.delta!, 0) : null,
+      lpAll: known.length === games.filter((g) => g.rank).length,
+    };
+  }, [rows, midnight]);
+  // Games right after two losses in a row in the same sitting, against every game.
+  const tilt = useMemo(() => {
+    let n = 0;
+    let w = 0;
+    for (const s of sittings) {
+      const decided = s.games.filter((g) => g.result === "Win" || lost(g));
+      for (let i = 2; i < decided.length; i++) {
+        if (lost(decided[i - 1]) && lost(decided[i - 2])) {
+          n++;
+          if (decided[i].result === "Win") w++;
+        }
+      }
+    }
+    const wins = rows.filter((r) => r.result === "Win").length;
+    const all = wins + rows.filter(lost).length;
+    return { n, w, overall: all ? Math.round((wins / all) * 100) : null };
+  }, [sittings, rows]);
+  const newest = [...sittings].reverse();
+  const shown = more ? newest : newest.slice(0, 6);
+
+  return (
+    <section className="tcard sessions">
+      <header className="tc-h">
+        <h2>
+          <CalendarClock size={15} aria-hidden />
+          Sessions
+        </h2>
+        <p>Games with less than an hour between them make one sitting. Pick a game to open it.</p>
+      </header>
+      <div className="ss-stats">
+        <div>
+          <span>Today</span>
+          <b className="num">{today.games.length ? `${today.wins}–${today.losses}` : "No games yet"}</b>
+          {today.games.length > 0 && (
+            <small>
+              <span className={lpClass(today.lp)}>{lpText(today.lp, today.lpAll)}</span> over {plural(today.games.length, "game")}
+            </small>
+          )}
+        </div>
+        <div>
+          <span>After two losses in a row</span>
+          <b className="num">{tilt.n >= 3 ? `${Math.round((tilt.w / tilt.n) * 100)}% won` : "—"}</b>
+          <small>
+            {tilt.n >= 3
+              ? `${tilt.w} of ${plural(tilt.n, "game")}${tilt.overall != null ? `, against ${tilt.overall}% over all` : ""}`
+              : tilt.n
+                ? `Only ${plural(tilt.n, "game")} so far`
+                : "No game came after two losses in a row"}
+          </small>
+        </div>
+        <div>
+          <span>"Stop for today?"</span>
+          <b>{breakAfter ? `After ${breakAfter} losses` : "Off"}</b>
+          <small>
+            {breakAfter ? "in a row, in the notice after the game" : "A notice can suggest a break"}
+            {onSettings && (
+              <>
+                {" · "}
+                <button className="btn link" onClick={onSettings}>
+                  {breakAfter ? "Change" : "Turn on"}
+                </button>
+              </>
+            )}
+          </small>
+        </div>
+      </div>
+      <h3 className="sp-h">LP by sitting</h3>
+      <ul className="sittings">
+        {shown.map((s) => (
+          <li key={s.start}>
+            <span className="st-when">
+              {dayLabel(s.start)} · {timeOfDay(s.start)} to {timeOfDay(s.end)}
+            </span>
+            <span className="st-games">
+              {s.games.map((g) => (
+                <button
+                  key={g.id}
+                  className={`sgame ${g.result === "Win" ? "w" : lost(g) ? "l" : ""}`}
+                  onClick={() => onOpen(g.id)}
+                  title={`${g.champion}, ${g.result === "Win" ? "won" : lost(g) ? "lost" : "no result"}${g.rank?.delta != null ? `, ${signedNum(g.rank.delta)} LP` : ""}`}
+                  aria-label={`${g.champion}, ${g.result === "Win" ? "won" : lost(g) ? "lost" : "no result"}. Open the game.`}
+                >
+                  <Portrait championKey={g.championKey ?? undefined} name={g.champion} size={22} />
+                </button>
+              ))}
+            </span>
+            <span className="st-rec num">
+              {s.wins}–{s.losses}
+            </span>
+            <span className={`st-lp num ${lpClass(s.lp)}`}>{lpText(s.lp, s.lpAll)}</span>
+          </li>
+        ))}
+      </ul>
+      {newest.length > 6 && (
+        <button className="btn link more" onClick={() => setMore((v) => !v)}>
+          {more ? "Show fewer" : `Show all ${newest.length}`}
+        </button>
+      )}
+    </section>
+  );
+}
+
+// ------------------------------------------------------------------ matchups
+
+/** Deaths in the first 14 minutes count as early: the laning phase. */
+const EARLY = 840;
+
+interface Matchup {
+  name: string;
+  key: string | null;
+  games: TrendMatch[];
+  wins: number;
+  losses: number;
+  lp: number | null;
+  gold10: number | null;
+  gold15: number | null;
+  early: { r: TrendMatch; s: TrendSpot }[];
+}
+
+/** A note on one matchup, saved when the box loses focus. */
+function NoteBox({ champion, note, onSave }: { champion: string; note?: MatchupNote; onSave: (text: string) => Promise<void> }) {
+  const [text, setText] = useState(note?.text ?? "");
+  const [state, setState] = useState<"" | "saving" | "saved" | "error">("");
+  const id = `mu-note-${champion.replace(/[^A-Za-z0-9]/g, "")}`;
+  const commit = () => {
+    if (text.trim() === (note?.text ?? "")) return;
+    setState("saving");
+    onSave(text.trim()).then(
+      () => setState("saved"),
+      () => setState("error"),
+    );
+  };
+  return (
+    <div className="mu-note">
+      <label htmlFor={id}>Your notes on {champion}</label>
+      <textarea
+        id={id}
+        className="field-input"
+        rows={3}
+        maxLength={2000}
+        value={text}
+        placeholder={`What works against ${champion}: when to trade, their power spikes, where to ward.`}
+        onChange={(e) => {
+          setText(e.target.value);
+          setState("");
+        }}
+        onBlur={commit}
+      />
+      <small className={state === "error" ? "down" : "muted"}>
+        {state === "saving" ? "Saving" : state === "saved" ? "Saved" : state === "error" ? "Not saved. Click in the box and out again to try again." : note ? `Written ${dayLabel(note.at)}` : "Saved when you click away"}
+      </small>
+    </div>
+  );
+}
+
+/** Your record against each lane opponent, with notes and their early deaths to watch. */
+function MatchupsCard({ rows, onOpen, onPlaylist }: { rows: TrendMatch[]; onOpen: (id: string) => void; onPlaylist: (p: Playlist) => void }) {
+  const toast = useToast();
+  // Null until read: a note box opened before then would start empty, and clicking
+  // away from it would save the empty text over the note.
+  const [notes, setNotes] = useState<Record<string, MatchupNote> | null>(null);
+  const [pick, setPick] = useState<string | null>(null);
+  const [all, setAll] = useState(false);
+  useEffect(() => {
+    api
+      .matchupNotes()
+      .then(setNotes)
+      .catch(() => setNotes({}));
+  }, []);
+  const list = useMemo<Matchup[]>(() => {
+    const m = new Map<string, TrendMatch[]>();
+    for (const r of rows) if (r.pg?.opp) m.set(r.pg.opp, [...(m.get(r.pg.opp) ?? []), r]);
+    return [...m.entries()]
+      .map(([name, games]) => {
+        const known = games.filter((g) => g.rank?.delta != null);
+        const g10 = games.flatMap((g) => (g.pg?.gold10 != null ? [g.pg.gold10] : []));
+        const g15 = games.flatMap((g) => (g.pg?.gold15 != null ? [g.pg.gold15] : []));
+        return {
+          name,
+          key: games.find((g) => g.pg?.oppKey)?.pg?.oppKey ?? null,
+          games,
+          wins: games.filter((g) => g.result === "Win").length,
+          losses: games.filter(lost).length,
+          lp: known.length ? known.reduce((a, g) => a + g.rank!.delta!, 0) : null,
+          gold10: mean(g10),
+          gold15: mean(g15),
+          early: games.flatMap((r) => (r.pg?.deaths ?? []).filter((s) => s.t < EARLY).map((s) => ({ r, s }))),
+        };
+      })
+      .sort((a, b) => b.games.length - a.games.length || a.name.localeCompare(b.name));
+  }, [rows]);
+  const cur = list.find((x) => x.name === pick) ?? list[0];
+  const shown = all ? list : list.slice(0, 8);
+  if (cur && !shown.includes(cur)) shown.push(cur);
+  const anyLp = list.some((x) => x.lp != null);
+
+  const playEarly = (x: Matchup) => {
+    const items: PlaylistItem[] = [...x.early]
+      .filter(({ s }) => s.v != null)
+      .sort((a, b) => b.r.startedEpochMs - a.r.startedEpochMs || a.s.t - b.s.t)
+      .map(({ r, s }) => ({
+        matchId: r.id,
+        t: s.v!,
+        start: Math.max(0, s.v! - 12),
+        end: s.v! + 3,
+        label: `${spotWords(s, true)} at ${clock(s.t)}, ${r.champion} vs ${x.name}, ${dayLabel(r.startedEpochMs)}`,
+      }));
+    if (items.length) onPlaylist({ title: `Early deaths vs ${x.name}`, items, index: 0 });
+  };
+  const save = async (champion: string, text: string) => {
+    try {
+      setNotes(await api.setMatchupNote(champion, text));
+    } catch (e) {
+      toast.show({ kind: "error", text: `The note was not saved. ${humanError(e)}` });
+      throw e;
+    }
+  };
+
+  return (
+    <section className="tcard matchups">
+      <header className="tc-h">
+        <h2>
+          <NotebookPen size={15} aria-hidden />
+          Matchups
+        </h2>
+        {cur && <p>Your games against each lane opponent, from Riot's record of the game. Gold leads are yours over them. Pick one for its notes and early deaths.</p>}
+      </header>
+      {!cur ? (
+        <div className="tc-empty">
+          <p>Once Riot's record of your games is in, each lane opponent gets a line here: your record and LP against them, your gold lead at 10 and 15 minutes, and your notes.</p>
+        </div>
+      ) : (
+        <div className="mu-body">
+          <div className="tscroll">
+            <table className="ttable">
+              <thead>
+                <tr>
+                  <th>Against</th>
+                  <th className="n">Games</th>
+                  <th className="n">Won</th>
+                  {anyLp && <th className="n">LP</th>}
+                  <th className="n" title="Your gold lead over them at 10 minutes, on average">Gold @10</th>
+                  <th className="n" title="Your gold lead over them at 15 minutes, on average">Gold @15</th>
+                  <th className="n" title="Your deaths in the first 14 minutes">Early deaths</th>
+                </tr>
+              </thead>
+              <tbody>
+                {shown.map((x) => (
+                  <tr key={x.name} className={x === cur ? "on" : ""}>
+                    <td>
+                      <button className="tlink" onClick={() => setPick(x.name)} aria-pressed={x === cur}>
+                        <Portrait championKey={x.key ?? undefined} name={x.name} size={24} />
+                        <span>{x.name}</span>
+                        {notes?.[x.name] && <NotebookPen size={12} className="muted" aria-label="Has a note" />}
+                      </button>
+                    </td>
+                    <td className="n">{x.games.length}</td>
+                    <td className="n">
+                      {x.wins}–{x.losses}
+                    </td>
+                    {anyLp && <td className="n">{x.lp != null ? <span className={lpClass(x.lp)}>{signedNum(x.lp)}</span> : "—"}</td>}
+                    <td className="n">{x.gold10 != null ? <span className={x.gold10 >= 0 ? "up" : "down"}>{signedNum(x.gold10)}</span> : "—"}</td>
+                    <td className="n">{x.gold15 != null ? <span className={x.gold15 >= 0 ? "up" : "down"}>{signedNum(x.gold15)}</span> : "—"}</td>
+                    <td className="n">{x.early.length}</td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+            {list.length > 8 && (
+              <button className="btn link more" onClick={() => setAll((v) => !v)}>
+                {all ? "Show fewer" : `Show all ${list.length}`}
+              </button>
+            )}
+          </div>
+          <div className="mu-side">
+            <div className="mu-head">
+              <Portrait championKey={cur.key ?? undefined} name={cur.name} size={40} side="enemy" />
+              <div>
+                <b>vs {cur.name}</b>
+                <small>
+                  {plural(cur.games.length, "game")}, {cur.wins} won and {cur.losses} lost
+                  {cur.lp != null && (
+                    <>
+                      , <span className={lpClass(cur.lp)}>{signedNum(cur.lp)} LP</span>
+                    </>
+                  )}
+                </small>
+              </div>
+            </div>
+            <dl className="mu-stats">
+              <div>
+                <dt>Gold lead at 10</dt>
+                <dd className={cur.gold10 == null ? "" : cur.gold10 >= 0 ? "up" : "down"}>{cur.gold10 != null ? signedNum(cur.gold10) : "—"}</dd>
+              </div>
+              <div>
+                <dt>at 15</dt>
+                <dd className={cur.gold15 == null ? "" : cur.gold15 >= 0 ? "up" : "down"}>{cur.gold15 != null ? signedNum(cur.gold15) : "—"}</dd>
+              </div>
+              <div>
+                <dt>Early deaths</dt>
+                <dd>
+                  {cur.early.length}
+                  <small> in {plural(cur.games.length, "game")}</small>
+                </dd>
+              </div>
+            </dl>
+            {cur.early.some(({ s }) => s.v != null) && (
+              <button className="btn sm" onClick={() => playEarly(cur)} title="Plays the 12 seconds before each of your deaths in the first 14 minutes of these games, newest game first">
+                <Play size={13} aria-hidden />
+                Play every early death vs {cur.name}
+              </button>
+            )}
+            {notes && <NoteBox key={cur.name} champion={cur.name} note={notes[cur.name]} onSave={(text) => save(cur.name, text)} />}
+            <div className="mu-games" role="list" aria-label={`Games against ${cur.name}`}>
+              {[...cur.games].reverse().map((g) => (
+                <button key={g.id} role="listitem" className={`mu-game ${g.result === "Win" ? "w" : lost(g) ? "l" : ""}`} onClick={() => onOpen(g.id)} title={`Open this ${g.champion} game`}>
+                  <Portrait championKey={g.championKey ?? undefined} name={g.champion} size={18} />
+                  <span>{dayLabel(g.startedEpochMs)}</span>
+                  <b>{g.result === "Win" ? "Won" : lost(g) ? "Lost" : "—"}</b>
+                  {g.rank?.delta != null && <span className={lpClass(g.rank.delta)}>{signedNum(g.rank.delta)}</span>}
+                </button>
+              ))}
+            </div>
+          </div>
+        </div>
+      )}
+    </section>
+  );
+}
+
 // ------------------------------------------------------------------ page
 
-export function Trends({ onOpen, onPlaylist, onSettings }: Props) {
+export function Trends({ onOpen, onPlaylist, onSettings, breakAfter }: Props) {
   const toast = useToast();
   const [rows, setRows] = useState<TrendMatch[] | null>(null);
   const [error, setError] = useState<string | null>(null);
@@ -913,7 +1309,9 @@ export function Trends({ onOpen, onPlaylist, onSettings }: Props) {
             </section>
 
             <RankCard rows={chrono} onOpen={onOpen} />
+            <SessionsCard rows={chrono} breakAfter={breakAfter} onOpen={onOpen} onSettings={onSettings} />
             <SpotsCard rows={chrono} onPlaylist={onPlaylist} onSettings={onSettings} />
+            <MatchupsCard rows={chrono} onOpen={onOpen} onPlaylist={onPlaylist} />
 
             <div className="tr-two">
               <section className="tcard">
@@ -1057,13 +1455,13 @@ export function Trends({ onOpen, onPlaylist, onSettings }: Props) {
                         <tr key={c.name} className={champ === c.name ? "on" : ""}>
                           <td>
                             <button className="tlink" onClick={() => setChamp(champ === c.name ? "all" : c.name)} aria-pressed={champ === c.name}>
-                              <Portrait championKey={c.key ?? undefined} name={c.name} size={24} />
+                              <Portrait championKey={c.key ?? undefined} name={c.name} size={28} square />
                               <span>{c.name}</span>
                             </button>
                           </td>
                           <td className="n">{c.t.n}</td>
-                          <td className="n">{c.t.winRate != null ? `${Math.round(c.t.winRate)}%` : "—"}</td>
-                          <td className="n">{c.t.kda?.toFixed(2) ?? "—"}</td>
+                          <td className="n">{c.t.winRate != null ? <WinRate pct={c.t.winRate} /> : "—"}</td>
+                          <td className="n">{c.t.kda != null ? <span className={`kr t${kdaTier(c.t.kda)}`}>{c.t.kda.toFixed(2)}</span> : "—"}</td>
                           <td className="n">{c.t.cspm?.toFixed(1) ?? "—"}</td>
                           <td className="n">{c.t.dead != null ? `${Math.round(c.t.dead)}%` : "—"}</td>
                           {anyLp && (
@@ -1119,7 +1517,7 @@ export function Trends({ onOpen, onPlaylist, onSettings }: Props) {
                               <td className="n">
                                 {al.wins}–{al.losses}
                               </td>
-                              <td className="n">{dec ? `${Math.round((al.wins / dec) * 100)}%` : "—"}</td>
+                              <td className="n">{dec ? <WinRate pct={(al.wins / dec) * 100} /> : "—"}</td>
                             </tr>
                           );
                         })}
@@ -1153,7 +1551,7 @@ export function Trends({ onOpen, onPlaylist, onSettings }: Props) {
                   </thead>
                   <tbody>
                     {games.map((r) => (
-                      <tr key={r.id} onClick={() => onOpen(r.id)}>
+                      <tr key={r.id} className={r.result === "Win" ? "r-win" : r.result === "Lose" ? "r-lose" : ""} onClick={() => onOpen(r.id)}>
                         <td>
                           <button
                             className="tlink"
@@ -1162,7 +1560,7 @@ export function Trends({ onOpen, onPlaylist, onSettings }: Props) {
                               onOpen(r.id);
                             }}
                           >
-                            <Portrait championKey={r.championKey ?? undefined} name={r.champion} size={24} />
+                            <Portrait championKey={r.championKey ?? undefined} name={r.champion} size={28} square />
                             <span className="gm">
                               <b>{r.champion}</b>
                               <small>
@@ -1174,7 +1572,10 @@ export function Trends({ onOpen, onPlaylist, onSettings }: Props) {
                         </td>
                         <td>{r.result ? <span className={`res ${r.result === "Win" ? "win" : "lose"}`}>{r.result === "Win" ? "Won" : "Lost"}</span> : <span className="muted">—</span>}</td>
                         <td className="n">
-                          {r.kills} / {r.deaths} / {r.assists}
+                          <span className="kcell">
+                            <Kda k={r.kills} d={r.deaths} a={r.assists} />
+                            <KdaRatio k={r.kills} d={r.deaths} a={r.assists} unit={false} />
+                          </span>
                         </td>
                         <td className="n">{(r.cs / minutes(r)).toFixed(1)}</td>
                         <td className="n">{r.cs10 ?? "—"}</td>

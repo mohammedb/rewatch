@@ -827,6 +827,21 @@ export function SettingsPage({ settings, onSave, matches }: { settings: Settings
             <Opt title="Tell me when recording starts" hint="A Windows notice when a recording starts, is saved, or fails.">
               <Switch label="Tell me when recording starts" checked={s.notify} onChange={(v) => set("notify", v)} />
             </Opt>
+            <Opt
+              title="Suggest a break"
+              hint="After this many losses in a row, a notice asks whether to stop for today. Games with an hour or more between them don't count as a row, and remakes don't count."
+            >
+              <Select
+                label="Suggest a break after"
+                value={s.breakAfterLosses}
+                onChange={(v) => set("breakAfterLosses", v)}
+                placement="bottom-end"
+                options={[
+                  { value: 0, label: "Never" },
+                  ...[2, 3, 4, 5].map((n) => ({ value: n, label: `After ${n} losses` })),
+                ]}
+              />
+            </Opt>
             <Opt title="Save highlights as clips" hint="Multikills, aces and big fights, saved as short clips after the game. Up to six a game.">
               <Switch label="Save highlights as clips" checked={s.autoHighlights} onChange={(v) => set("autoHighlights", v)} />
             </Opt>

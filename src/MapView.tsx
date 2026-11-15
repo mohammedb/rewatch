@@ -4,7 +4,7 @@ import { Portrait, useVersion, type Side } from "./ChampIcon";
 // A minimap with things placed on it, in game units (Riot's x and y, y pointing up).
 
 /** Each map's playable area: x and y at the bottom left, then at the top right. */
-const BOUNDS: Record<number, [number, number, number, number]> = {
+export const BOUNDS: Record<number, [number, number, number, number]> = {
   11: [-120, -120, 14870, 14980],
   12: [-28, -19, 12849, 12858],
 };

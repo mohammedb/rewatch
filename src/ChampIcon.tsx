@@ -3,7 +3,7 @@ import { useEffect, useState } from "react";
 // Champion and item pictures come from Riot's public image host (Data Dragon).
 // If it cannot be reached the interface falls back to initials.
 let versionPromise: Promise<string | null> | null = null;
-function dataDragonVersion(): Promise<string | null> {
+export function dataDragonVersion(): Promise<string | null> {
   versionPromise ??= fetch("https://ddragon.leagueoflegends.com/api/versions.json")
     .then((r) => r.json())
     .then((v: string[]) => v[0] ?? null)
@@ -32,20 +32,31 @@ interface PortraitProps {
   size?: number;
   /** Coloured ring: which team this champion is on, where that matters. */
   side?: Side;
+  /** Rounded square, as in the scoreboards; round everywhere else. */
+  square?: boolean;
+  /** The champion's level, in a badge on the corner. */
+  level?: number;
 }
 
 /** Round champion portrait. People are round, things (items) are square. */
-export function Portrait({ championKey, name, size = 44, side }: PortraitProps) {
+export function Portrait({ championKey, name, size = 44, side, square, level }: PortraitProps) {
   const version = useVersion();
   const [failed, setFailed] = useState(false);
   const style = { width: size, height: size, fontSize: Math.max(10, size * 0.36) };
-  const cls = `portrait${side ? ` ring-${side}` : ""}`;
-  if (!championKey || !version || failed) {
-    return <span className={cls} style={style} aria-hidden>{name.slice(0, 2)}</span>;
-  }
+  const cls = `portrait${square ? " sq" : ""}${side ? ` ring-${side}` : ""}`;
+  const pic =
+    !championKey || !version || failed ? (
+      <span className={cls} style={style} aria-hidden>{name.slice(0, 2)}</span>
+    ) : (
+      <span className={cls} style={style} title={name}>
+        <img alt={name} src={`https://ddragon.leagueoflegends.com/cdn/${version}/img/champion/${championKey}.png`} onError={() => setFailed(true)} draggable={false} />
+      </span>
+    );
+  if (level == null || level <= 0) return pic;
   return (
-    <span className={cls} style={style} title={name}>
-      <img alt={name} src={`https://ddragon.leagueoflegends.com/cdn/${version}/img/champion/${championKey}.png`} onError={() => setFailed(true)} draggable={false} />
+    <span className="pwrap" style={{ width: size, height: size }}>
+      {pic}
+      <span className="plv" title={`Level ${level}`}>{level}</span>
     </span>
   );
 }

@@ -564,6 +564,81 @@ numbers, and five Practice Tool games marked as having no record), and the publi
 installer downloaded by 0.4.2's own updater with its signature checked. Not checked: a
 real Riot key, the LP after a ranked game, and the new screens with real games.
 
+## Version 0.6.0 (2026-11-15)
+
+**Where the game turned.** The Review tab finds the minutes where the team gold lead
+swung by 1,500 or more (the three biggest), says what happened in each (the fight, the
+kills, the objectives taken and lost) and plays it as a walk-through, over a small
+chart of the lead. The same numbers tag each game as a stomp, comeback, throw or close
+game; the tag shows on game cards, list rows and in the Review tab, and the library can
+show only one kind.
+
+- **Graph under the video**: three new lines from Riot's record, in step with the
+  video: the gold lead and the XP lead over your lane opponent, and the team gold
+  lead. They step once a minute, which is how often Riot records them. The old "Team
+  gold diff" (from items bought, every 10 seconds) is now called "Team item gold
+  diff". Games without the live numbers can show the graph too.
+- **Everyone's rank on the scoreboard**, read once within six hours of the game: from
+  the League client for players it knows, else from Riot with a key. The requests are
+  spaced out, since the client refuses quick runs of them. New games only.
+- **Matchups** in Trends: per lane opponent, your record and LP, your average gold lead
+  at 10 and 15 minutes, your deaths in the first 14 minutes, a note of your own
+  (`matchups.json` in the app's folder), and "Play every early death vs" that champion.
+- **Sessions** in Trends: today's record and LP, LP per sitting (games less than an
+  hour apart), and your win rate in games right after two losses in a row. Settings,
+  Recording, "Suggest a break": after the chosen number of losses in a row in one
+  sitting, the notice for the saved game asks "Stop for today?". Remakes don't count.
+- **Picture of the game**: More, "Copy a picture of the game" draws the result, LP, KDA,
+  damage share, kill participation, CS and a map of your deaths and kills, saves it as
+  `share.png` in the game's folder and puts it on the clipboard to paste in Discord.
+- Players the live feed showed under another name now get their champion from Riot's
+  record (matched by name, then the one left on each team, then by K/D/A), and saved
+  games are summarized again from their files once, without asking Riot.
+- Deaths from before the recording started no longer play from 0:00 in the playlists
+  of deaths.
+
+**The numbers, laid out like a match history.** Victory and defeat in blue and red
+stripes on game cards, list rows, both scoreboards and the Trends tables. KDA ratios
+are coloured by how good they are (grey under 2, then white, teal, blue, and orange from
+5 or a game without deaths), win rates blue from 50% and orange from 60%, and ranks show
+as a crest in the tier's colour. Champions are square pictures with their level on the
+corner.
+
+- **Full scoreboard**: O, or Scoreboard at the top of the player, shows both teams over
+  the video: each player's rank, summoner spells, runes, KDA and kill participation,
+  damage to champions (a bar, and the share of the team's), gold, CS and vision a
+  minute, items and trinket, multi-kills and first blood, and each team's kills, gold,
+  towers, inhibitors, dragons, barons, grubs and bans. Esc or O closes it.
+- **A score for each player**, 0 to 10, with an MVP (the best on the winning team) and
+  an ACE (the best on the losing team). It weighs KDA 30%, kill participation 20%, damage
+  a minute 18%, gold a minute 12%, vision a minute 8%, damage taken and blocked a minute
+  7% and objective damage a minute 5%, each as a place among the ten players. It needs
+  Riot's record of the game, and shows in the player's header and both scoreboards.
+- **Players tab**: the rank after the game with its LP, your final build, and two
+  compact team tables (level, name, rank, KDA and ratio, CS, MVP and ACE) with a button
+  to the full scoreboard. "Your game" says where each number places you, such as "2nd
+  of 10 in the game" or "Most in the team".
+- **Library**: list rows show the result, queue, length and time, the level, KDA and
+  ratio, CS, your items and both teams; narrower windows drop the teams, then the items.
+  Game cards add the items, CS and the ratio.
+- **Trends**: the rank card has the tier's crest, a bar for the LP to the next division
+  and the season's wins as a ring. The champion and game tables colour win rates, ratios
+  and results.
+- The gold chart fills the team's lead blue above zero and red below, and the skill
+  order gives each key its own colour.
+
+Checked: the unit tests (69), the type check, a full build, the turn finder and the
+picture on the 15 real games with Riot's record (the turns name the right fights; a
+recording cut off after four minutes shows none), and the reads of other players' ranks
+run start to finish on copies of two real games, one through the League client and one
+with a Riot key: all 10 players each time, in about 11 seconds. Every new screen was
+checked with the sample data in a browser, 1000 to 1700 px wide: the library in both
+layouts, the player, the Players tab, the full scoreboard and its keys, the Review tab,
+Trends, a matchup note and the playlist of early deaths. The page logged no errors and
+no picture failed to load. The published installer was downloaded by 0.5.0's own
+updater, which accepted its signature. Not checked: the new screens in the app with real
+games, several new games read in one go, and the break notice after real losses.
+
 ## Not built yet
 
 Code signing (so Windows stops warning about the installer). A sample game for the

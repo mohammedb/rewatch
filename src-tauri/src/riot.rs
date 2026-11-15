@@ -30,8 +30,9 @@ pub const RIOT_FILE: &str = "riot.json";
 const RAW_MATCH: &str = "riot_match.json";
 const RAW_TIMELINE: &str = "riot_timeline.json";
 /// Bumped whenever `normalize` changes. Saved games are then summarized again from
-/// their raw files, without asking Riot.
-pub const VERSION: i64 = 1;
+/// their raw files, without asking Riot. 2: players whose name the live feed hid get
+/// their champion.
+pub const VERSION: i64 = 2;
 /// Attempts at a game's match data before giving up on it.
 const MAX_TRIES: i64 = 8;
 /// Games looked up per round of the background job. Each is about two requests.
@@ -293,7 +294,17 @@ impl Lcu {
     }
 
     fn ranks(&self) -> Option<Vec<Value>> {
-        let v = self.get("/lol-ranked/v1/current-ranked-stats")?;
+        self.ranks_at("/lol-ranked/v1/current-ranked-stats")
+    }
+
+    /// Any player's standing, by their Riot id. The client only knows players on its
+    /// own region.
+    fn ranks_of(&self, puuid: &str) -> Option<Vec<Value>> {
+        self.ranks_at(&format!("/lol-ranked/v1/ranked-stats/{puuid}"))
+    }
+
+    fn ranks_at(&self, path: &str) -> Option<Vec<Value>> {
+        let v = self.get(path)?;
         Some(v.get("queues")?.as_array()?.iter().filter_map(rank_entry).collect())
     }
 
@@ -720,7 +731,9 @@ pub fn video_time(clock: &[(f64, f64)], game_t: f64) -> Option<f64> {
     }
     let i = clock.iter().take_while(|c| c.1 <= game_t).count().saturating_sub(1);
     let (v0, g0) = clock[i];
-    Some(((v0 + game_t - g0).max(0.0) * 10.0).round() / 10.0)
+    let v = v0 + game_t - g0;
+    // From before the recording started: there is nothing to play.
+    (v >= 0.0).then(|| (v * 10.0).round() / 10.0)
 }
 
 // ------------------------------------------------------------------ the summary
@@ -925,6 +938,53 @@ fn spot(e: &Value) -> (i64, i64) {
     (num(p, "x"), num(p, "y"))
 }
 
+/// A player in Riot's record, as far as finding them in the recording goes.
+struct Person {
+    name: String,
+    side: &'static str,
+    /// Kills, deaths, assists and CS at the end.
+    numbers: [i64; 4],
+}
+
+/// Each player's row in the recording's own list (an index into it). By name first.
+/// The live feed shows a player who hides their name under another one, often their
+/// champion's. Such a player is the one left on their team when one row is left too;
+/// otherwise the rows left are paired by the closest kills, deaths and assists. CS
+/// only breaks ties: the feed gives other players' CS in tens and counts it its own way.
+fn recorded_rows(people: &[Person], recorded: &[Value]) -> Vec<Option<usize>> {
+    let mut out: Vec<Option<usize>> = people
+        .iter()
+        .map(|p| recorded.iter().position(|r| same_name(text(r, "name"), &p.name) && (text(r, "team").is_empty() || text(r, "team") == p.side)))
+        .collect();
+    let mut used: HashSet<usize> = out.iter().flatten().copied().collect();
+    for side in ["ORDER", "CHAOS"] {
+        let left: Vec<usize> = (0..people.len()).filter(|i| out[*i].is_none() && people[*i].side == side).collect();
+        let free: Vec<usize> = (0..recorded.len()).filter(|j| !used.contains(j) && text(&recorded[*j], "team") == side).collect();
+        if let ([i], [j]) = (left.as_slice(), free.as_slice()) {
+            out[*i] = Some(*j);
+            used.insert(*j);
+        }
+    }
+    let mut pairs: Vec<(i64, i64, usize, usize)> = Vec::new();
+    for (i, p) in people.iter().enumerate().filter(|(i, _)| out[*i].is_none()) {
+        for (j, r) in recorded.iter().enumerate().filter(|(j, r)| !used.contains(j) && text(r, "team") == p.side) {
+            let [k, d, a, cs] = p.numbers;
+            // The feed's last numbers can miss the final seconds.
+            let gap = (k - num(r, "kills")).abs() + (d - num(r, "deaths")).abs() + (a - num(r, "assists")).abs();
+            if gap <= 4 {
+                pairs.push((gap, (cs - num(r, "cs")).abs(), i, j));
+            }
+        }
+    }
+    pairs.sort();
+    for (_, _, i, j) in pairs {
+        if out[i].is_none() && used.insert(j) {
+            out[i] = Some(j);
+        }
+    }
+    out
+}
+
 /// The match record and timeline boiled down to what the app shows. Works on both
 /// shapes: Riot's web API (match-v5) and the League client's own.
 fn normalize(raw: &Value, timeline: Option<&Value>, game: &GameRef, puuid: &str, source: &str) -> Option<Value> {
@@ -934,28 +994,43 @@ fn normalize(raw: &Value, timeline: Option<&Value>, game: &GameRef, puuid: &str,
         return None;
     }
     let idents: Vec<Value> = info.get("participantIdentities").and_then(|v| v.as_array()).cloned().unwrap_or_default();
+    let pick_in = |ident: Option<&Value>, f: &Value, keys: &[&str]| -> String {
+        keys.iter()
+            .flat_map(|k| [ident.map(|i| text(i, k)).unwrap_or(""), text(f, k)])
+            .find(|s| !s.is_empty())
+            .unwrap_or("")
+            .to_string()
+    };
+    let rows: Vec<(&Value, Value, Option<&Value>, String)> = parts
+        .iter()
+        .map(|p| {
+            let f = flat(p);
+            let id = num(&f, "participantId");
+            let ident = idents.iter().find(|x| num(x, "participantId") == id).and_then(|x| x.get("player"));
+            let name = pick_in(ident, &f, &["riotIdGameName", "gameName", "summonerName"]);
+            (p, f, ident, name)
+        })
+        .collect();
+    // The recording's own row for each player has the champion's display name.
+    let people: Vec<Person> = rows
+        .iter()
+        .map(|(_, f, _, name)| Person {
+            name: name.clone(),
+            side: if num(f, "teamId") == 200 { "CHAOS" } else { "ORDER" },
+            numbers: [num(f, "kills"), num(f, "deaths"), num(f, "assists"), num(f, "totalMinionsKilled") + num(f, "neutralMinionsKilled")],
+        })
+        .collect();
+    let recorded = recorded_rows(&people, &game.players);
 
     let mut players: Vec<Value> = Vec::new();
-    for p in parts {
-        let f = flat(p);
-        let id = num(&f, "participantId");
-        let ident = idents.iter().find(|x| num(x, "participantId") == id).and_then(|x| x.get("player"));
-        let pick = |keys: &[&str]| -> String {
-            keys.iter()
-                .flat_map(|k| [ident.map(|i| text(i, k)).unwrap_or(""), text(&f, k)])
-                .find(|s| !s.is_empty())
-                .unwrap_or("")
-                .to_string()
-        };
-        let name = pick(&["riotIdGameName", "gameName", "summonerName"]);
-        let team_id = num(&f, "teamId");
-        let side = if team_id == 200 { "CHAOS" } else { "ORDER" };
-        // The recording's own row for this player has the champion's display name.
-        let rec = game
-            .players
-            .iter()
-            .find(|r| same_name(text(r, "name"), &name) && (text(r, "team").is_empty() || text(r, "team") == side));
-        let champ_name = text(&f, "championName");
+    for (k, (p, f, ident, name)) in rows.iter().enumerate() {
+        let (p, f, ident) = (*p, f, *ident);
+        let pick = |keys: &[&str]| pick_in(ident, f, keys);
+        let id = num(f, "participantId");
+        let team_id = num(f, "teamId");
+        let side = people[k].side;
+        let rec = recorded[k].map(|j| &game.players[j]);
+        let champ_name = text(f, "championName");
         let champion = rec.map(|r| text(r, "champion")).filter(|c| !c.is_empty()).unwrap_or(champ_name);
         let champion_key = rec.map(|r| text(r, "championKey")).filter(|c| !c.is_empty()).unwrap_or(champ_name);
         let position = [text(&f, "teamPosition"), rec.map(|r| text(r, "position")).unwrap_or("")]
@@ -1231,8 +1306,9 @@ fn normalize(raw: &Value, timeline: Option<&Value>, game: &GameRef, puuid: &str,
     }))
 }
 
-/// The few numbers per game that Trends charts, from a game's summary.
-pub fn trend_extras(pg: &Value, clock: &[(f64, f64)]) -> Value {
+/// The few numbers per game that Trends charts, from a game's summary. `video_len` is
+/// the recording's length in seconds, so kills after it ended get no video time.
+pub fn trend_extras(pg: &Value, clock: &[(f64, f64)], video_len: f64) -> Value {
     let me = num(pg, "me");
     let players = pg.get("players").and_then(|p| p.as_array()).cloned().unwrap_or_default();
     let Some(mine) = players.iter().find(|p| num(p, "id") == me && me > 0) else { return Value::Null };
@@ -1249,7 +1325,8 @@ pub fn trend_extras(pg: &Value, clock: &[(f64, f64)]) -> Value {
                 let t = k.get("t").and_then(|v| v.as_f64()).unwrap_or(0.0);
                 let other = champ_of(if deaths { num(k, "killer") } else { num(k, "victim") });
                 json!({
-                    "x": num(k, "x"), "y": num(k, "y"), "t": t, "v": video_time(clock, t),
+                    "x": num(k, "x"), "y": num(k, "y"), "t": t,
+                    "v": video_time(clock, t).filter(|v| video_len <= 0.0 || *v < video_len),
                     "other": other.map(|p| text(p, "champion")),
                     "otherKey": other.map(|p| text(p, "championKey")),
                 })
@@ -1257,8 +1334,12 @@ pub fn trend_extras(pg: &Value, clock: &[(f64, f64)]) -> Value {
             .collect()
     };
     let per_min = |v: i64| ((v as f64 / minutes) * 10.0).round() / 10.0;
+    let opp = pg.pointer("/lane/opponent").and_then(|v| v.as_i64()).and_then(champ_of);
     json!({
         "mapId": num(pg, "mapId"),
+        "opp": opp.map(|p| text(p, "champion")),
+        "oppKey": opp.map(|p| text(p, "championKey")),
+        "story": story(pg),
         "dmgShare": mine.get("dmgShare"),
         "kp": mine.get("kp"),
         "damage": num(mine, "damage"),
@@ -1276,6 +1357,76 @@ pub fn trend_extras(pg: &Value, clock: &[(f64, f64)]) -> Value {
         "deaths": spots(true),
         "kills": spots(false),
     })
+}
+
+/// A team gold lead that decides a game's story.
+const BIG_LEAD: i64 = 3000;
+
+/// What kind of game it was, from the team gold lead minute by minute: a "comeback"
+/// (won from 3,000 gold behind) or a "throw" (lost from 3,000 ahead); a "stomp" (the
+/// winners were never 1,500 behind and led by 3,000 at 15 minutes); or "close" (no
+/// one led by 3,000 until the last two minutes). None for short games and the rest.
+pub fn story(pg: &Value) -> Option<&'static str> {
+    let me = num(pg, "me");
+    let won = pg.get("players")?.as_array()?.iter().find(|p| me > 0 && num(p, "id") == me).map(|p| flag(p, "win"))?;
+    let lead: Vec<i64> = pg.get("teamGold")?.as_array()?.iter().map(|v| v.as_i64().unwrap_or(0)).collect();
+    let t: Vec<i64> = pg.pointer("/frames/t")?.as_array()?.iter().map(|v| v.as_i64().unwrap_or(0)).collect();
+    if lead.len() < 11 || t.len() != lead.len() {
+        return None;
+    }
+    // The winners' lead, minute by minute.
+    let winners: Vec<i64> = lead.iter().map(|g| if won { *g } else { -g }).collect();
+    let behind = -winners.iter().copied().min().unwrap_or(0);
+    let at15 = winners.get(15).or(winners.last()).copied().unwrap_or(0);
+    let last_two = num(pg, "duration") - 120;
+    let close = lead.iter().zip(&t).filter(|(_, t)| **t <= last_two).all(|(g, _)| g.abs() < BIG_LEAD);
+    if behind >= BIG_LEAD {
+        Some(if won { "comeback" } else { "throw" })
+    } else if behind < BIG_LEAD / 2 && at15 >= BIG_LEAD {
+        Some("stomp")
+    } else if close {
+        Some("close")
+    } else {
+        None
+    }
+}
+
+/// Stories worked out already, by recording folder, with when its record last changed.
+static STORIES: Mutex<Option<HashMap<PathBuf, (SystemTime, Option<&'static str>)>>> = Mutex::new(None);
+
+/// A recording's story (see `story`), worked out once per change of its record.
+pub fn story_of(dir: &Path) -> Option<&'static str> {
+    let stamp = fs::metadata(dir.join(FILE)).and_then(|m| m.modified()).ok()?;
+    let mut cache = lock(&STORIES);
+    let map = cache.get_or_insert_with(HashMap::new);
+    if let Some((seen, s)) = map.get(dir) {
+        if *seen == stamp {
+            return *s;
+        }
+    }
+    let s = load(dir).and_then(|pg| story(&pg));
+    map.insert(dir.to_path_buf(), (stamp, s));
+    s
+}
+
+/// Everyone's rank as read after a recent game, with who they were, for the
+/// scoreboard. Null when the ranks were not read.
+pub fn player_ranks(dir: &Path, pg: Option<&Value>) -> Value {
+    let riot = read_json(&dir.join(RIOT_FILE)).unwrap_or(Value::Null);
+    let (Some(list), Some(players)) = (riot.get("playerRanks").and_then(|v| v.as_array()), pg.and_then(|p| p.get("players")).and_then(|p| p.as_array())) else {
+        return Value::Null;
+    };
+    let rows: Vec<Value> = list
+        .iter()
+        .filter_map(|r| {
+            let p = players.iter().find(|p| num(p, "id") == num(r, "id"))?;
+            Some(json!({
+                "name": p["name"], "champion": p["champion"], "championKey": p["championKey"], "team": p["team"],
+                "ranks": r.get("ranks").cloned().unwrap_or_else(|| json!([])),
+            }))
+        })
+        .collect();
+    json!({ "at": riot.get("playerRanksAt"), "players": rows })
 }
 
 // ------------------------------------------------------------------ reading for the app
@@ -1657,7 +1808,10 @@ pub fn work(settings: &Settings, stop: &dyn Fn() -> bool) -> Vec<String> {
         }
     }
     let rank_wanted = dirs.iter().any(|(_, _, r)| !text(r, "puuid").is_empty() && !flag(r, "rankChecked"));
-    if (fetches.is_empty() && !rank_wanted) || (lcu.is_none() && web.is_none()) || stop() {
+    let players_wanted = dirs
+        .iter()
+        .any(|(_, dir, r)| players_due(dir, r, now) && (dir.join(FILE).exists() || fetches.iter().any(|f| &f.0 == dir)));
+    if (fetches.is_empty() && !rank_wanted && !players_wanted) || (lcu.is_none() && web.is_none()) || stop() {
         return changed;
     }
 
@@ -1705,6 +1859,10 @@ pub fn work(settings: &Settings, stop: &dyn Fn() -> bool) -> Vec<String> {
                 }
             }
         }
+    }
+    // Everyone's rank last: it needs the record, which may have come just now.
+    if players_wanted && !stop() {
+        changed.extend(players_pass(&dirs, lcu.as_ref(), acct.as_ref(), web.as_ref(), stop));
     }
     changed.sort();
     changed.dedup();
@@ -1787,6 +1945,100 @@ fn rank_pass(dirs: &mut [(String, PathBuf, Value)], lcu: Option<&Lcu>, acct: Opt
     changed
 }
 
+/// How long after a game everyone's rank still says something about it.
+const PLAYERS_WINDOW_MS: i64 = 6 * 3600 * 1000;
+
+/// Whether a recording still wants everyone's rank read: once, for a game that ended
+/// in the last six hours. An older game would get today's ranks.
+fn players_due(dir: &Path, riot: &Value, now: i64) -> bool {
+    if flag(riot, "playersChecked") || num(riot, "playersTries") >= 3 {
+        return false;
+    }
+    let Some(game) = game_ref(dir) else { return false };
+    now >= game.ended_ms + 60_000 && now - game.ended_ms < PLAYERS_WINDOW_MS
+}
+
+/// Whether a Riot id is one the League client gives out (a UUID), rather than one of
+/// the web API's, which are encrypted for each key.
+fn client_id(puuid: &str) -> bool {
+    puuid.len() == 36 && puuid.chars().all(|c| c.is_ascii_hexdigit() || c == '-') && puuid.matches('-').count() == 4
+}
+
+/// The two ranked queues of Summoner's Rift, where the player is ranked.
+fn rift_ranks(list: Vec<Value>) -> Vec<Value> {
+    list.into_iter()
+        .filter(|e| !text(e, "tier").is_empty() && matches!(text(e, "queue"), "RANKED_SOLO_5x5" | "RANKED_FLEX_SR"))
+        .collect()
+}
+
+/// Read the rank of all ten players of recent games, newest first, for the
+/// scoreboard. Each player's Riot id comes from the game's record.
+fn players_pass(dirs: &[(String, PathBuf, Value)], lcu: Option<&Lcu>, acct: Option<&Account>, web: Option<&Web>, stop: &dyn Fn() -> bool) -> Vec<String> {
+    let mut changed = Vec::new();
+    let now = now_ms();
+    // Requests to the client so far in this pass, across games, for the pacing.
+    let mut asked = 0;
+    for (id, dir, _) in dirs.iter().rev() {
+        if stop() {
+            break;
+        }
+        // Read again: fetching may have written it since.
+        let path = dir.join(RIOT_FILE);
+        let mut riot = read_json(&path).filter(|r| r.is_object()).unwrap_or_else(|| json!({}));
+        if !players_due(dir, &riot, now) {
+            continue;
+        }
+        let Some(pg) = load(dir) else { continue };
+        let platform = [text(&riot, "platform"), text(&pg, "platform")]
+            .into_iter()
+            .find(|p| !p.is_empty())
+            .unwrap_or("")
+            .to_uppercase();
+        let client = lcu.filter(|_| acct.is_some_and(|a| platform.is_empty() || a.platform.is_empty() || a.platform.eq_ignore_ascii_case(&platform)));
+        let mut found = Vec::new();
+        for p in pg.get("players").and_then(|p| p.as_array()).into_iter().flatten() {
+            if stop() {
+                return changed;
+            }
+            let puuid = text(p, "puuid");
+            // The client's own ids are UUIDs; the web API's are encrypted for the key
+            // and only the web API reads them. The client answers any other id with an
+            // empty, unranked-looking standing.
+            let ranks = if client_id(puuid) {
+                client.and_then(|l| {
+                    // The client turns away quick runs of these.
+                    if asked > 0 {
+                        std::thread::sleep(Duration::from_millis(1200));
+                    }
+                    asked += 1;
+                    l.ranks_of(puuid)
+                })
+            } else if !puuid.is_empty() && !platform.is_empty() {
+                web.and_then(|w| w.ranks(&platform, puuid))
+            } else {
+                None
+            };
+            if let Some(r) = ranks {
+                found.push(json!({ "id": num(p, "id"), "ranks": rift_ranks(r) }));
+            }
+        }
+        // Nobody ranked at all is more likely a failed read than ten unranked players.
+        if found.iter().all(|f| f["ranks"].as_array().is_none_or(|r| r.is_empty())) {
+            riot["playersTries"] = json!(num(&riot, "playersTries") + 1);
+            let _ = write_json(&path, &riot);
+            continue;
+        }
+        riot["playerRanks"] = json!(found);
+        riot["playerRanksAt"] = json!(now);
+        riot["playersChecked"] = json!(true);
+        if write_json(&path, &riot).is_ok() && !found.is_empty() {
+            log(format!("[riot] {id}: read the rank of {} players", found.len()));
+            changed.push(id.clone());
+        }
+    }
+    changed
+}
+
 /// For `--riot-probe`: what the League client says about the logged-in account.
 pub fn probe(settings: &Settings) -> Value {
     let Some(lcu) = Lcu::connect(settings) else { return json!({ "client": false }) };
@@ -1795,6 +2047,8 @@ pub fn probe(settings: &Settings) -> Value {
         "client": true,
         "account": acct.as_ref().map(Account::to_json),
         "ranks": lcu.ranks(),
+        // The same, the way other players' ranks are read.
+        "ranksByPuuid": acct.as_ref().and_then(|a| lcu.ranks_of(&a.puuid)),
         "recent": lcu.recent_games().iter().take(5).map(|g| json!({ "gameId": g["gameId"], "gameCreation": g["gameCreation"], "queueId": g["queueId"] })).collect::<Vec<_>>(),
     })
 }
@@ -2016,13 +2270,75 @@ mod tests {
         assert_eq!(pg["teams"][0]["bans"], json!([55]));
         assert_eq!(pg["teams"][0]["kills"], 7);
 
-        let tr = trend_extras(&pg, &[(5.0, 0.0)]);
+        let tr = trend_extras(&pg, &[(5.0, 0.0)], 2000.0);
         assert_eq!(tr["deaths"][0]["x"], 7000);
         assert_eq!(tr["deaths"][0]["v"], 66.5);
+        // A recording that ended before the death has nothing to play for it.
+        assert!(trend_extras(&pg, &[(5.0, 0.0)], 60.0)["deaths"][0]["v"].is_null());
+        // Nor does one that started after it.
+        assert!(trend_extras(&pg, &[(0.0, 100.0)], 2000.0)["deaths"][0]["v"].is_null());
         assert_eq!(tr["deaths"][0]["other"], "Zed");
         assert_eq!(tr["deaths"][0]["otherKey"], "Zed");
         assert_eq!(tr["dpm"], 800.0);
         assert!(tr["gold10"].is_null());
+        assert_eq!(tr["opp"], "Zed");
+        assert_eq!(tr["oppKey"], "Zed");
+        // Three minutes is too short to tell a story.
+        assert!(tr["story"].is_null());
+    }
+
+    /// A 20-minute game from my side, with my team's gold lead at each minute.
+    fn with_lead(won: bool, lead: &[i64]) -> Value {
+        let t: Vec<i64> = (0..lead.len() as i64).map(|i| i * 60).collect();
+        json!({
+            "me": 1,
+            "duration": (lead.len() as i64 - 1) * 60 + 30,
+            "players": [ { "id": 1, "win": won } ],
+            "teamGold": lead,
+            "frames": { "t": t, "players": [] },
+        })
+    }
+
+    #[test]
+    fn games_are_told_by_their_gold_lead() {
+        let game = |f: &dyn Fn(i64) -> i64| (0..=20).map(f).collect::<Vec<i64>>();
+        // Won from 4,000 behind at 12 minutes.
+        let comeback = game(&|m| if m <= 12 { -m * 333 } else { -4000 + (m - 12) * 600 });
+        assert_eq!(story(&with_lead(true, &comeback)), Some("comeback"));
+        // Lost from 3,500 ahead.
+        let throw = game(&|m| if m <= 10 { m * 350 } else { 3500 - (m - 10) * 900 });
+        assert_eq!(story(&with_lead(false, &throw)), Some("throw"));
+        // Ahead all game, 4,500 up at 15: a stomp. The same curve against me is one too.
+        let ahead = game(&|m| m * 300);
+        assert_eq!(story(&with_lead(true, &ahead)), Some("stomp"));
+        let behind: Vec<i64> = ahead.iter().map(|g| -g).collect();
+        assert_eq!(story(&with_lead(false, &behind)), Some("stomp"));
+        // Within 3,000 until the last two minutes, whatever happened then.
+        let mut close = game(&|m| if m % 2 == 0 { 1500 } else { -1800 });
+        close[19] = 3500;
+        close[20] = 6000;
+        assert_eq!(story(&with_lead(true, &close)), Some("close"));
+        // 2,000 behind early, then far ahead: nothing to tell.
+        let ordinary = game(&|m| if m <= 8 { -m * 250 } else { -2000 + (m - 8) * 700 });
+        assert_eq!(story(&with_lead(true, &ordinary)), None);
+        // Too short, or no lead to read.
+        assert_eq!(story(&with_lead(true, &ahead[..8])), None);
+        assert_eq!(story(&json!({ "me": 1, "players": [ { "id": 1, "win": true } ] })), None);
+    }
+
+    #[test]
+    fn the_scoreboard_keeps_ranked_rift_queues() {
+        let kept = rift_ranks(vec![
+            standing("RANKED_SOLO_5x5", "DIAMOND", "II", 40, 1, 1),
+            standing("RANKED_FLEX_SR", "NONE", "", 0, 0, 0),
+            standing("RANKED_TFT", "GOLD", "I", 10, 1, 1),
+        ]);
+        assert_eq!(kept.len(), 1);
+        assert_eq!(kept[0]["tier"], "DIAMOND");
+        assert_eq!(kept[0]["division"], "II");
+        assert!(client_id("e7e87d21-f206-5984-ba48-1a38721386a7"));
+        assert!(!client_id("raJw2woGUMW_dmvYXqsEXAMPLEw7Ux0lQ6sKkE0Qx2Yx3Dc2y8qG0bFq1hk3U2yTEeM9QvLwJrQfB4w"));
+        assert!(!client_id(""));
     }
 
     #[test]
@@ -2074,6 +2390,34 @@ mod tests {
         assert_eq!(pg["kills"][0]["killer"], 1);
         assert!(pg["kills"][0]["recap"].is_null());
         assert_eq!(pg["startMs"], 999_000);
+
+        // The live feed showed both enemies under their champion's name: they are told
+        // apart by their numbers at the end (the feed's last ones missed two CS).
+        let mut hidden = recording();
+        for (i, name, k, d, a, cs) in [(1, "Zed", 2, 4, 1, 98), (3, "K'Sante", 3, 0, 1, 100)] {
+            let row = &mut hidden.players[i];
+            row["name"] = json!(name);
+            row["kills"] = json!(k);
+            row["deaths"] = json!(d);
+            row["assists"] = json!(a);
+            row["cs"] = json!(cs);
+        }
+        let pg = normalize(&raw, Some(&tl), &hidden, "", "client").unwrap();
+        assert_eq!(pg["players"][1]["name"], "Zedd");
+        assert_eq!(pg["players"][1]["champion"], "Zed");
+        assert_eq!(pg["players"][3]["name"], "Kay");
+        assert_eq!(pg["players"][3]["champion"], "K'Sante");
+        assert_eq!(pg["players"][3]["championKey"], "KSante");
+        // Numbers far from anyone's are no match.
+        let people = [Person { name: "Kay".into(), side: "CHAOS", numbers: [30, 0, 1, 100] }];
+        assert_eq!(recorded_rows(&people, &hidden.players), vec![None]);
+        // A recording cut short: Zedd's numbers are far off, but he is the one left.
+        let rows = vec![json!({ "name": "Rin", "team": "ORDER" }), json!({ "name": "Zed", "team": "CHAOS", "kills": 0, "cs": 10 })];
+        let people = [
+            Person { name: "Rin".into(), side: "ORDER", numbers: [0, 0, 0, 0] },
+            Person { name: "Zedd".into(), side: "CHAOS", numbers: [9, 9, 9, 300] },
+        ];
+        assert_eq!(recorded_rows(&people, &rows), vec![Some(0), Some(1)]);
     }
 
     #[test]

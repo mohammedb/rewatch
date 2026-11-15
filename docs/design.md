@@ -94,7 +94,13 @@ service; Discord screen share was chosen instead.
   give, and who is playing with their rank. After the game, while no game is
   on, it gives Riot's record of the game (damage, gold, vision, every kill's
   place on the map, everyone's position once a minute) and the rank again,
-  for the LP won or lost. With the setting off, every game is recorded, the
+  for the LP won or lost. Once per game, within six hours of its end, it also
+  reads the other nine players' ranks, one request at a time with a pause
+  between them, so the scoreboard can say what rank everyone was. Only the
+  client's own player ids work for that; for players known only from Riot's
+  web API, the rank comes from league-v4 with the user's key, or is left out.
+  Older games are not filled in, since today's ranks would be wrong for them.
+  With the setting off, every game is recorded, the
   per-queue switches are disabled, the library shows the game mode from the
   live feed instead of the queue name, and there is no post-game data unless
   an API key is set (my call). Its endpoints are unofficial and can change;
@@ -175,7 +181,10 @@ capture is harder to do there); reusing RiftRec's binaries (not ours to use).
   is the rank after the game minus the rank before it, and only when exactly
   one game was played in between; otherwise the game shows no LP. Positions
   are only recorded once a minute, so the map of kills is exact but the map
-  of where everyone was is a snapshot.
+  of where everyone was is a snapshot. The same minute-by-minute numbers give
+  the team gold lead, which tags a game as a stomp, comeback, throw or close
+  game and finds the minutes where it turned; a minute is as close as Riot's
+  record gets.
 - **Events.** Poll the live-game feed during the match and store each event
   with its game-clock time. Store the offset between game clock and recording
   clock so every event maps to a position in the video. The feed reports

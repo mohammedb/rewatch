@@ -57,6 +57,8 @@ export interface Settings {
   geminiKey: string;
   /** The user's own Riot API key: post-game data from Riot's web API instead of the League client. */
   riotApiKey: string;
+  /** After this many losses in a row in one sitting, a notification asks whether to stop for today. 0 is off. */
+  breakAfterLosses: number;
   friends: Friend[];
 }
 
@@ -238,6 +240,41 @@ export interface MatchSummary {
   summary: { deaths: number; bookmarks: number };
   /** The rank after this game and the LP it won or lost, once Riot has it. */
   rank?: RankChange | null;
+  /** What kind of game it was, from Riot's gold numbers. */
+  story?: Story | null;
+}
+
+/**
+ * What kind of game it was, from the team gold lead minute by minute: a comeback (won
+ * from 3,000 gold behind), a throw (lost from 3,000 ahead), a stomp (one-sided from
+ * early on) or close (no one 3,000 ahead until the last two minutes).
+ */
+export type Story = "stomp" | "comeback" | "throw" | "close";
+
+/** One ranked queue's standing, as Riot gives it. */
+export interface RankEntry {
+  queue: string;
+  tier: string;
+  division: string;
+  lp: number;
+  wins: number;
+  losses: number;
+  provisional?: boolean;
+  ladder: number | null;
+}
+
+/** Everyone's rank, read once soon after the game. */
+export interface PlayerRanks {
+  /** When they were read, epoch ms. */
+  at: number | null;
+  players: { name: string; champion: string; championKey: string; team: "ORDER" | "CHAOS"; ranks: RankEntry[] }[];
+}
+
+/** The player's note on playing against one champion. */
+export interface MatchupNote {
+  text: string;
+  /** When it was written, epoch ms. */
+  at: number;
 }
 
 /** One ranked queue's standing after a game, and the LP the game won or lost. */
@@ -426,6 +463,10 @@ export interface TrendPg {
   vision: number;
   vpm: number;
   taken: number;
+  /** The lane opponent's champion, when the game had lanes. */
+  opp: string | null;
+  oppKey: string | null;
+  story: Story | null;
   /** Gold, XP and CS against the lane opponent at 10 and 15 minutes. */
   gold10: number | null;
   gold15: number | null;
@@ -677,4 +718,9 @@ export interface MatchFull extends Omit<MatchSummary, "keep" | "noteCount" | "th
   postgame?: PostGame | null;
   /** Why Riot's record is not here yet. */
   postgameNote?: string | null;
+  /**
+   * Everyone's rank, read within a few hours of the game. Games recorded before this
+   * was added don't have it: today's ranks would not be the ranks they played at.
+   */
+  playerRanks?: PlayerRanks | null;
 }

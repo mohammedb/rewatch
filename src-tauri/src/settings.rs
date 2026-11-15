@@ -134,6 +134,9 @@ pub struct Settings {
     /// comes from Riot's official web API instead of the League client. Stays on this
     /// PC; sent only to Riot.
     pub riot_api_key: String,
+    /// After this many losses in a row in one sitting, a notification asks whether
+    /// to stop for today. 0 turns it off.
+    pub break_after_losses: u32,
     pub friends: Vec<Friend>,
 }
 
@@ -173,6 +176,7 @@ impl Default for Settings {
             ai_review: false,
             gemini_key: String::new(),
             riot_api_key: String::new(),
+            break_after_losses: 0,
             friends: Vec::new(),
         }
     }

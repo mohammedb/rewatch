@@ -345,7 +345,16 @@ fn finish_session(app: &AppHandle, note: Option<&str>) -> Result<Option<String>,
                 .and_then(|t| t.get("title").and_then(|x| x.as_str()))
                 .map(|t| format!(". Your title: {t}"))
                 .unwrap_or_default();
-            notify(app, &format!("Recording saved: {}:{:02}{result}{mine}", secs / 60, secs % 60));
+            let saved = format!("Recording saved: {}:{:02}{result}{mine}", secs / 60, secs % 60);
+            let lost = doc.pointer("/game/result").and_then(|r| r.as_str()) == Some("Lose");
+            let streak = if lost && settings.break_after_losses > 0 { library::losing_streak(&settings) } else { 0 };
+            if streak > 0 && streak >= settings.break_after_losses as usize {
+                // Its own setting, so it shows even with the other notifications off.
+                let nudge = format!("{streak} losses in a row. Stop for today?");
+                toast(&app.config().identifier, &if settings.notify { format!("{saved}. {nudge}") } else { nudge });
+            } else {
+                notify(app, &saved);
+            }
         }
         Err(e) => notify(app, &format!("The recording could not be saved: {e}")),
         Ok(None) => {}
@@ -515,6 +524,27 @@ fn environment(state: State<AppState>) -> Value {
 #[tauri::command(async)]
 fn copy_file(path: String) -> CmdResult<()> {
     winutil::copy_files_to_clipboard(&[std::path::PathBuf::from(path)]).map_err(err)
+}
+
+/// Save the picture of a game the app drew (a PNG, as base64) next to the recording
+/// and put it on the clipboard as a file, the way clips are.
+#[tauri::command(async)]
+fn share_card(state: State<AppState>, id: String, png: String) -> CmdResult<String> {
+    let s = state.settings.lock().unwrap().clone();
+    let path = library::save_share_card(&s, &id, &png).map_err(err)?;
+    winutil::copy_files_to_clipboard(std::slice::from_ref(&path)).map_err(err)?;
+    Ok(path.to_string_lossy().to_string())
+}
+
+/// The player's notes on playing against each champion, by champion key.
+#[tauri::command(async)]
+fn matchup_notes() -> Value {
+    library::matchup_notes()
+}
+
+#[tauri::command(async)]
+fn set_matchup_note(champion: String, text: String) -> CmdResult<Value> {
+    library::set_matchup_note(&champion, &text).map_err(err)
 }
 
 #[tauri::command(async)]
@@ -1074,6 +1104,9 @@ pub fn run() {
             get_status,
             environment,
             copy_file,
+            share_card,
+            matchup_notes,
+            set_matchup_note,
             list_microphones,
             share_info,
             friend_ping,

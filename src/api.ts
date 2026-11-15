@@ -6,7 +6,7 @@ import { listen } from "@tauri-apps/api/event";
 import { open } from "@tauri-apps/plugin-dialog";
 import { revealItemInDir } from "@tauri-apps/plugin-opener";
 import { mock } from "./mock";
-import type { Coach, Environment, Extras, Highlight, TeamReview, Insights, LeagueBackup, MatchFull, MatchSummary, MicInfo, PostGame, Pov, Review, Settings, ShareInfo, Status, TrackName, TrendMatch, UpdateInfo, Voice, WatchPeer } from "./types";
+import type { Coach, Environment, Extras, Highlight, TeamReview, Insights, LeagueBackup, MatchFull, MatchSummary, MatchupNote, MicInfo, PostGame, Pov, Review, Settings, ShareInfo, Status, TrackName, TrendMatch, UpdateInfo, Voice, WatchPeer } from "./types";
 
 export const inApp = "__TAURI_INTERNALS__" in window;
 
@@ -21,6 +21,12 @@ export const api = {
   environment: () => call<Environment>("environment"),
   /** Put a file on the clipboard, ready to paste into Discord or a folder. */
   copyFile: (path: string) => call<void>("copy_file", { path }),
+  /** Save a picture of a game (a PNG data URL) next to it and put it on the clipboard. Returns its path. */
+  shareCard: (id: string, png: string) => call<string>("share_card", { id, png }),
+  /** The player's notes on playing against each champion, by champion key. */
+  matchupNotes: () => call<Record<string, MatchupNote>>("matchup_notes"),
+  /** Write the note on one opponent; an empty one removes it. Returns them all. */
+  setMatchupNote: (champion: string, text: string) => call<Record<string, MatchupNote>>("set_matchup_note", { champion, text }),
   listMicrophones: () => call<MicInfo[]>("list_microphones"),
   listMatches: () => call<MatchSummary[]>("list_matches"),
   getMatch: (id: string) => call<MatchFull>("get_match", { id }),

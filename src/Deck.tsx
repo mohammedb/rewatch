@@ -251,6 +251,7 @@ export const SHORTCUTS: [string, string][] = [
   ["S", "Split view"],
   ["Shift P", "Share mode, for screen sharing"],
   ["T", "Side panel"],
+  ["O", "Scoreboard, both teams in full"],
   ["F", "Full screen"],
   ["?", "These shortcuts"],
 ];

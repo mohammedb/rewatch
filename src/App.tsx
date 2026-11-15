@@ -405,7 +405,12 @@ export default function App() {
             }}
           />
         ) : view.name === "trends" ? (
-          <Trends onOpen={(id) => setView({ name: "player", id })} onPlaylist={(p) => setView({ name: "player", id: p.items[p.index].matchId, playlist: p })} onSettings={() => goTo("settings")} />
+          <Trends
+            onOpen={(id) => setView({ name: "player", id })}
+            onPlaylist={(p) => setView({ name: "player", id: p.items[p.index].matchId, playlist: p })}
+            onSettings={() => goTo("settings")}
+            breakAfter={settings?.breakAfterLosses ?? 0}
+          />
         ) : view.name === "settings" ? (
           settings && <SettingsPage settings={settings} onSave={saveSettings} matches={matches} />
         ) : (

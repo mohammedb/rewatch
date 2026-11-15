@@ -1,6 +1,6 @@
 import {
-  ArrowLeft, Bookmark, Circle, Download, Eraser, FolderOpen, Grid2x2, HardDriveDownload, LayoutGrid, LayoutPanelLeft, Maximize2, MoreHorizontal, MoveUpRight,
-  PanelRightClose, PanelRightOpen, Pause, Pencil, Play, Presentation, Scissors, SkipBack, SkipForward, Skull, Star, Swords, Trash2, Undo2, Users, Volume2, Wand2, X,
+  ArrowLeft, Bookmark, Circle, Download, Eraser, FolderOpen, Grid2x2, HardDriveDownload, ImageDown, LayoutGrid, LayoutPanelLeft, Maximize2, MoreHorizontal, MoveUpRight,
+  PanelRightClose, PanelRightOpen, Pause, Pencil, Play, Presentation, Scissors, SkipBack, SkipForward, Skull, Star, Swords, Table2, Trash2, Undo2, Users, Volume2, Wand2, X,
   type LucideIcon,
 } from "lucide-react";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
@@ -14,8 +14,11 @@ import { deathItems, DISCORD_COLOR, fightsOf, type Fight, Lanes, QueueBar, Revie
 import { NotesPanel } from "./Notes";
 import { PostGamePanel } from "./PostGame";
 import { RankLine } from "./Rank";
+import { MatchBoard, TeamBoard } from "./Scoreboard";
+import { canShare, shareCardPng } from "./ShareCard";
+import { ItemSlots, Kda, KdaRatio, ScoreBadge, scoresOf } from "./Stats";
 import { Timeline, type Marker } from "./Timeline";
-import type { AudioPrefs, Coach, Drawing, Extras, FocusCheck, Friend, Highlight, Insights, MatchFull, MatchSummary, NextFocus, PlayerRow, PlayerTitle, Pov, Review, Shape, TeamReview, Tool, TrackName, Voice, WatchEvent, WatchPeer } from "./types";
+import type { AudioPrefs, Coach, Drawing, Extras, FocusCheck, Friend, Highlight, Insights, MatchFull, MatchSummary, NextFocus, Pov, Review, Shape, TeamReview, Tool, TrackName, Voice, WatchEvent, WatchPeer } from "./types";
 import { humanError, Menu, ownsKeys, Select, Skeleton, useToast } from "./ui";
 import { drawKeys, drawMouse, KeyOverlay, parseKeys, parseMouse, ShapeView, SideView, Splitter, TileBar, usePovMouse, ZoomPane, type KeyLog, type MouseLog } from "./Views";
 
@@ -95,46 +98,6 @@ const DEFAULT_PREFS: Prefs = {
   metric: "cs",
   versus: "",
 };
-
-function Scoreboard({ players, titles }: { players: PlayerRow[]; titles: Map<string, PlayerTitle> }) {
-  const myTeam = players.find((p) => p.isMe)?.team;
-  const teams = [...new Set(players.map((p) => p.team))].sort((a) => (a === myTeam ? -1 : 1));
-  return (
-    <>
-      {teams.map((team) => (
-        <table className="score-t" key={team}>
-          <caption className={team === myTeam ? "ally" : "enemy"}>{team === myTeam ? "Your team" : "Enemy team"}</caption>
-          <tbody>
-            {players
-              .filter((p) => p.team === team)
-              .map((p) => (
-                <tr key={p.name + p.champion} className={p.isMe ? "me" : ""}>
-                  <td style={{ width: 38 }}>
-                    <Portrait championKey={p.championKey} name={p.champion} size={30} />
-                  </td>
-                  <td>
-                    {p.champion}
-                    <small>{p.name}</small>
-                    {titles.get(p.champion) && (
-                      <em className="ptitle" title={titles.get(p.champion)!.why}>
-                        {titles.get(p.champion)!.title}
-                      </em>
-                    )}
-                  </td>
-                  <td className="n">
-                    {p.kills} / {p.deaths} / {p.assists}
-                  </td>
-                  <td className="n" title="Creep score">
-                    {p.cs}
-                  </td>
-                </tr>
-              ))}
-          </tbody>
-        </table>
-      ))}
-    </>
-  );
-}
 
 /** The small picture in front of a moment: who fought whom, what was bought, what fell. */
 function MomentPicture({ m, champKey }: { m: Marker; champKey: (n?: string) => string | undefined }) {
@@ -299,6 +262,8 @@ export function Player({ id, onBack, friends, matches, joinTogether, onTogether,
   const [buildingReel, setBuildingReel] = useState(false);
   const [busy, setBusy] = useState(false);
   const [help, setHelp] = useState(false);
+  // The whole scoreboard over the video (O).
+  const [board, setBoard] = useState(false);
   /** Share mode: a clean, large view for screen sharing in Discord. */
   const [share, setShare] = useState(false);
   const [mouse, setMouse] = useState<MouseLog | null>(null);
@@ -1116,9 +1081,11 @@ export function Player({ id, onBack, friends, matches, joinTogether, onTogether,
         case "d": setTool((t) => (t ? null : "pen")); break;
         case "t": updatePrefs({ theater: !p.theater }); break;
         case "f": fullscreen(); break;
+        case "o": setBoard((b) => !b); break;
         case "Escape":
           // One thing at a time, the most recent first.
-          if (help) setHelp(false);
+          if (board) setBoard(false);
+          else if (help) setHelp(false);
           else if (tool) setTool(null);
           else if (clipRef.current) {
             setClip(null);
@@ -1131,7 +1098,7 @@ export function Player({ id, onBack, friends, matches, joinTogether, onTogether,
     };
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
-  }, [seek, step, toggle, jump, fullscreen, updatePrefs, setTrackAudio, toggleLoop, refNow, cyclePov, toggleSplitMode, setClipEdge, undoDrawing, closeQueue, help, tool, share]);
+  }, [seek, step, toggle, jump, fullscreen, updatePrefs, setTrackAudio, toggleLoop, refNow, cyclePov, toggleSplitMode, setClipEdge, undoDrawing, closeQueue, help, tool, share, board]);
 
   // ---- timeline data
   const champKeys = useMemo(() => {
@@ -1313,6 +1280,13 @@ export function Player({ id, onBack, friends, matches, joinTogether, onTogether,
       .job("Writing one file with every sound track", () => api.exportFull(match.id), (path) => ({ kind: "success", text: "Saved the file for editing", detail: "Game, Discord and your mic are separate tracks in it.", path }))
       .finally(() => setBusy(false));
   };
+  const copyCard = () => {
+    toast.job(
+      "Drawing a picture of the game",
+      async () => api.shareCard(match.id, await shareCardPng(match)),
+      (path) => ({ kind: "success", text: "Picture of the game copied", detail: "Paste it in Discord. It is also saved with the recording.", path }),
+    );
+  };
   const setFocusCheck = (answer: FocusCheck["answer"] | null) => {
     if (!activeFocus) return;
     setReview((r) => ({ ...r, focusCheck: answer ? { text: activeFocus.text, answer } : null }));
@@ -1358,8 +1332,12 @@ export function Player({ id, onBack, friends, matches, joinTogether, onTogether,
       : []),
     ...(match.keys && !trimmed ? [{ key: "keys" as const, label: "Keys held", hint: "Which game keys were held, over the video", on: prefs.keys, extra: kpmNow !== null ? `${kpmNow} presses a minute right now` : null }] : []),
     ...(voiceRows.length > 0 ? [{ key: "comms" as const, label: "Who was talking", hint: "Rows under the timeline showing who spoke when", on: prefs.comms }] : []),
-    ...(match.stats && !trimmed ? [{ key: "graph" as const, label: "Graph", hint: "CS, level, gold and more over the game, under the timeline", on: prefs.graph }] : []),
+    ...((match.stats || match.postgame?.teamGold) && !trimmed ? [{ key: "graph" as const, label: "Graph", hint: "CS, level, gold leads and more over the game, under the timeline", on: prefs.graph }] : []),
   ];
+
+  const pgMe = match.postgame?.players.find((p) => p.isMe) ?? null;
+  const myScore = pgMe && match.postgame ? (scoresOf(match.postgame).get(pgMe.id) ?? null) : null;
+  const canBoard = match.mode === "game" && !!(match.postgame?.players.length || match.game?.players?.length);
 
   return (
     <div className={`player ${share ? "share" : ""}`}>
@@ -1368,16 +1346,14 @@ export function Player({ id, onBack, friends, matches, joinTogether, onTogether,
           <ArrowLeft size={18} />
         </button>
         <div className="pid">
-          {me && <Portrait championKey={me.championKey} name={me.champion} size={34} />}
+          {me && <Portrait championKey={me.championKey} name={me.champion} size={36} square level={me.level} />}
           <div className="pid-t">
             <div className="pid-l1">
               <span className="title">{champName}</span>
               {result && <span className={`res ${result === "Win" ? "ally" : "enemy"}`}>{result === "Win" ? "Victory" : "Defeat"}</span>}
-              {me && (
-                <span className="kda num">
-                  {me.kills} <i>/</i> <span className="d">{me.deaths}</span> <i>/</i> {me.assists}
-                </span>
-              )}
+              {me && <Kda k={me.kills} d={me.deaths} a={me.assists} />}
+              {me && <KdaRatio k={me.kills} d={me.deaths} a={me.assists} />}
+              {myScore && <ScoreBadge s={myScore} size="sm" />}
               {me && titles.get(me.champion) && (
                 <span className="mytitle" title={titles.get(me.champion)!.why}>
                   {titles.get(me.champion)!.title}
@@ -1416,6 +1392,12 @@ export function Player({ id, onBack, friends, matches, joinTogether, onTogether,
           <Star size={15} fill={review.keep ? "currentColor" : "none"} aria-hidden />
           <span className="w">{review.keep ? "Kept" : "Keep"}</span>
         </button>
+        {canBoard && (
+          <button className={`btn sm ${board ? "on" : ""}`} aria-pressed={board} onClick={() => setBoard((b) => !b)} title="Both teams in full: score, KDA, damage, gold, vision, runes and items (O)">
+            <Table2 size={15} aria-hidden />
+            <span className="w">Scoreboard</span>
+          </button>
+        )}
         <button className={`btn sm ${share ? "on" : ""}`} aria-pressed={share} onClick={() => setShare((s) => !s)} title="Share mode: a clean, large view for sharing this window in Discord (Shift+P)">
           <Presentation size={15} aria-hidden />
           <span className="w">Share mode</span>
@@ -1425,6 +1407,9 @@ export function Player({ id, onBack, friends, matches, joinTogether, onTogether,
           items={[
             { label: "Show in folder", icon: <FolderOpen size={15} />, onSelect: () => showInFolder(`${match.dir}\\${match.video}`) },
             { label: "Export for editing", hint: "One file, every sound track separate", icon: <Download size={15} />, disabled: busy, onSelect: exportFull },
+            ...(canShare(match)
+              ? [{ label: "Copy a picture of the game", hint: "Result, LP, KDA, damage share and where you died, to paste in Discord", icon: <ImageDown size={15} />, onSelect: copyCard }]
+              : []),
             "-",
             { label: "Delete recording", icon: <Trash2 size={15} />, danger: true, onSelect: () => onDelete?.(match.id, what) },
           ]}
@@ -1438,6 +1423,7 @@ export function Player({ id, onBack, friends, matches, joinTogether, onTogether,
 
       <div className={`pbody ${prefs.theater || share ? "theater" : ""}`} style={prefs.theater || share ? undefined : { gridTemplateColumns: `minmax(0, 1fr) 8px ${prefs.sideWidth}px` }}>
         <div className="stagecol">
+          {board && canBoard && <MatchBoard match={match} titles={titles} onClose={() => setBoard(false)} />}
           <div className="stage">
             <div
               className={`tiles n${1 + split.length} ${split.length > 0 ? prefs.layout : ""}`}
@@ -1718,6 +1704,8 @@ export function Player({ id, onBack, friends, matches, joinTogether, onTogether,
                 keys={trimmed ? null : keys}
                 currentId={match.id}
                 compareGames={matches}
+                postgame={trimmed ? null : (match.postgame ?? null)}
+                clockSamples={match.clock}
                 onMetric={(metric) => updatePrefs({ metric })}
                 onVersus={(versus) => updatePrefs({ versus })}
                 onSeek={seek}
@@ -1843,6 +1831,9 @@ export function Player({ id, onBack, friends, matches, joinTogether, onTogether,
               onFinish={match.mode === "game" ? finishReview : undefined}
               onReopen={reopenReview}
               usual={usual}
+              postgame={trimmed ? null : (match.postgame ?? null)}
+              clockSamples={match.clock}
+              story={match.story ?? null}
             />
           )}
 
@@ -1884,17 +1875,15 @@ export function Player({ id, onBack, friends, matches, joinTogether, onTogether,
           {tab === "players" && (
             <div className="sidebody">
               {match.rank && <RankLine rank={match.rank} />}
-              {me && me.items.length > 0 && (
+              {(pgMe?.items.some((x) => x > 0) || (me && me.items.length > 0)) && (
                 <>
                   <h3 className="sub">Your final build</h3>
                   <div className="finalbuild">
-                    {me.items.map((it, i) => (
-                      <ItemIcon key={i} id={it.id} name={it.name} size={34} />
-                    ))}
+                    <ItemSlots items={pgMe?.items.some((x) => x > 0) ? pgMe.items : me!.items} size={32} />
                   </div>
                 </>
               )}
-              {match.game?.players?.length ? <Scoreboard players={match.game.players} titles={titles} /> : <p className="hint-note">No scoreboard for this recording.</p>}
+              <TeamBoard match={match} titles={titles} onOpenFull={canBoard ? () => setBoard(true) : undefined} />
               <PostGamePanel
                 key={match.id}
                 match={match}

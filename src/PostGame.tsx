@@ -4,6 +4,7 @@ import { api } from "./api";
 import { Portrait } from "./ChampIcon";
 import { clock } from "./format";
 import { hasMap, MapView, type MapDot } from "./MapView";
+import { ordinal } from "./Stats";
 import type { MatchFull, PgKill, PgPlayer, PostGame } from "./types";
 import { humanError, Select, type Option } from "./ui";
 
@@ -76,16 +77,32 @@ export function PostGamePanel({ match, onPlay, onFetched }: Props) {
 
 // ------------------------------------------------------------------ my numbers
 
+/** Where the player stands on one number: in the game, or in their team. */
+interface Place {
+  place: number;
+  of: number;
+  where: "game" | "team";
+  /** Whether being first is a good thing; damage taken is neither. */
+  good: boolean;
+}
+
 function MyNumbers({ pg, me }: { pg: PostGame; me: PgPlayer }) {
   const mins = Math.max(1, pg.duration / 60);
   const x = me.extra;
-  const items: [string, string, string?][] = [
-    ["Kill participation", pct(me.kp)],
-    ["Damage share", pct(me.dmgShare), "Of your team's damage to champions"],
-    ["Damage a minute", num(me.damage / mins)],
-    ["Gold a minute", num(me.gold / mins)],
-    ["Vision score", `${me.vision}`, `${me.wardsPlaced} wards placed, ${me.wardsKilled} destroyed, ${me.controlWards} control wards bought`],
-    ["Damage taken", num(me.taken), `${num(me.mitigated)} more blocked or reduced`],
+  const team = pg.players.filter((p) => p.teamId === me.teamId);
+  const rank = (among: PgPlayer[], where: Place["where"], f: (p: PgPlayer) => number, good = true): Place => ({
+    place: 1 + among.filter((p) => f(p) > f(me)).length,
+    of: among.length,
+    where,
+    good,
+  });
+  const items: [string, string, string?, Place?][] = [
+    ["Kill participation", pct(me.kp), undefined, rank(team, "team", (p) => p.kp ?? 0)],
+    ["Damage share", pct(me.dmgShare), "Of your team's damage to champions", rank(team, "team", (p) => p.damage)],
+    ["Damage a minute", num(me.damage / mins), undefined, rank(pg.players, "game", (p) => p.damage)],
+    ["Gold a minute", num(me.gold / mins), undefined, rank(pg.players, "game", (p) => p.gold)],
+    ["Vision score", `${me.vision}`, `${me.wardsPlaced} wards placed, ${me.wardsKilled} destroyed, ${me.controlWards} control wards bought`, rank(pg.players, "game", (p) => p.vision)],
+    ["Damage taken", num(me.taken), `${num(me.mitigated)} more blocked or reduced`, rank(pg.players, "game", (p) => p.taken, false)],
   ];
   if (x) {
     items.push(["Solo kills", `${x.soloKills ?? 0}`]);
@@ -97,10 +114,15 @@ function MyNumbers({ pg, me }: { pg: PostGame; me: PgPlayer }) {
     <section className="pg-sec">
       <h3 className="sub">Your game</h3>
       <dl className="pg-nums">
-        {items.map(([k, v, why]) => (
-          <div key={k} title={why}>
+        {items.map(([k, v, why, pl]) => (
+          <div key={k} title={why} className={pl?.good && pl.place === 1 ? "best" : ""}>
             <dt>{k}</dt>
             <dd>{v}</dd>
+            {pl && pl.of > 1 && (
+              <small className={`pl ${pl.good && pl.place <= (pl.where === "game" ? 3 : 1) ? "top" : ""}`}>
+                {pl.place === 1 ? `Most in the ${pl.where}` : `${ordinal(pl.place)} of ${pl.of} in the ${pl.where}`}
+              </small>
+            )}
           </div>
         ))}
       </dl>
@@ -371,6 +393,8 @@ function Gold({ pg, onPlay }: { pg: PostGame; onPlay: ((t: number) => void) | nu
   const x = (i: number) => G_LEFT + (i * plotW) / (n - 1);
   const y = (v: number) => G_TOP + ((top - v) / (2 * top)) * G_H;
   const path = (vals: number[]) => vals.map((v, i) => `${i ? "L" : "M"}${x(i).toFixed(1)},${y(v).toFixed(1)}`).join("");
+  const teamVals = lines.find((l) => l.key === "team")?.values;
+  const area = (vals: number[]) => `${path(vals)}L${x(vals.length - 1).toFixed(1)},${y(0).toFixed(1)}L${x(0).toFixed(1)},${y(0).toFixed(1)}Z`;
   const pick = (clientX: number) => {
     const r = box.current?.getBoundingClientRect();
     if (!r) return 0;
@@ -428,6 +452,18 @@ function Gold({ pg, onPlay }: { pg: PostGame; onPlay: ((t: number) => void) | nu
                 {v === 0 ? "0" : `${v > 0 ? "+" : "−"}${Math.abs(v) >= 1000 ? `${Math.abs(v) / 1000}k` : Math.abs(v)}`}
               </text>
             ))}
+            {teamVals && (
+              <>
+                <clipPath id="pg-gold-up">
+                  <rect x={G_LEFT} y={0} width={plotW} height={y(0)} />
+                </clipPath>
+                <clipPath id="pg-gold-down">
+                  <rect x={G_LEFT} y={y(0)} width={plotW} height={G_TOP + G_H + 4 - y(0)} />
+                </clipPath>
+                <path className="ga up" clipPath="url(#pg-gold-up)" d={area(teamVals)} />
+                <path className="ga down" clipPath="url(#pg-gold-down)" d={area(teamVals)} />
+              </>
+            )}
             {at != null && <line className="cross" x1={x(at)} x2={x(at)} y1={G_TOP - 4} y2={G_TOP + G_H + 4} />}
             {lines
               .slice()
@@ -573,7 +609,7 @@ function Skills({ order }: { order: string }) {
           <Fragment key={k}>
             <span className="sk-k">{k}</span>
             {levels.map((s, i) => (
-              <span key={i} className={`sk-c ${s === k ? "on" : ""} ${s === k && k === "R" ? "r" : ""}`}>
+              <span key={i} className={`sk-c ${s === k ? `on k${k}` : ""}`}>
                 {s === k ? i + 1 : ""}
               </span>
             ))}
