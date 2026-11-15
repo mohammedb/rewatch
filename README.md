@@ -741,7 +741,7 @@ the first start, found FFmpeg and League, read the player's name from the League
 and the free space on C:. Not checked: the microphone level and connecting to a real
 teammate in the app itself.
 
-## Not released yet
+## Version 0.6.3 (2026-11-15)
 
 **Updates without a restart.** With "Update by itself" on, a new version is downloaded in
 the background while no game is running. A version that only changes the interface goes
@@ -755,10 +755,9 @@ now" is pressed. Each release now also publishes its interface as one signed fil
 (`Rewatch_<version>_ui.json`) made for one exact build of the program. An installed copy
 takes it only if its own program is that build, and only once the signature checks out.
 It's kept in `%APPDATA%\Rewatch\interface\` for the next start and dropped once an
-installer has replaced the program. Before the next release, the update site needs
-deploying (`npx wrangler deploy` in `updates-site/`). The release stops if the site doesn't
-serve the interface file. The first version with this still arrives by installer for
-everyone. Later ones that only change the interface don't need a restart.
+installer has replaced the program. The update site serves it from `/download/`, and a
+release stops if the site doesn't. This version still arrives by installer for everyone.
+Later ones that only change the interface don't need a restart.
 
 Checked: the Rust tests (five new ones: the interface alone only for the same build of the
 program, files only over https or from the update site itself, an interface surviving the
@@ -778,7 +777,13 @@ a reload showed the newest. A kept interface changed on disk was refused at the 
 and removed, and the built-in one showed. The page logged no errors and no file failed to
 load. Not checked: an installer update installing by itself (on this PC it would have
 replaced the installed app), the six-hourly check on its own (the tests asked for it), the
-page saying "not now" because of a real Undo or job (it was made to), and a real release.
+page saying "not now" because of a real Undo or job (it was made to), and an interface-only
+update through the real site: the first can only come with a version after this one.
+
+Released: the update site was deployed first, and its landing page stayed the same, byte
+for byte. Then 0.6.3 went out with its interface file, which the site serves. The installed
+0.6.2 found 0.6.3, downloaded the installer and accepted its signature. The 0.6.3 build,
+checked against the same announcement, says it's up to date.
 
 ## Not built yet
 
