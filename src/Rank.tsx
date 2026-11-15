@@ -69,7 +69,7 @@ export function LpDelta({ rank, unit = true }: { rank?: RankChange | null; unit?
   );
 }
 
-/** Crest and "Gold II" in the tier's colour, and the LP when asked for. */
+/** Riot's emblem and "Gold II" in the tier's colour, and the LP when asked for. */
 export function TierTag({ r, lp = false, size = 16, title }: { r: { tier: string; division: string; lp?: number } | null; lp?: boolean; size?: number; title?: string }) {
   const tier = r?.tier ?? "";
   return (

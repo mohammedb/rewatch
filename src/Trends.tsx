@@ -978,6 +978,13 @@ function MatchupsCard({ rows, onOpen, onPlaylist }: { rows: TrendMatch[]; onOpen
 
 // ------------------------------------------------------------------ page
 
+/** A game whose video was deleted keeps its numbers, but its kills and deaths can't be played. */
+function unplayable(r: TrendMatch): TrendMatch {
+  if (r.hasVideo !== false || !r.pg) return r;
+  const still = (s: TrendSpot): TrendSpot => ({ ...s, v: null });
+  return { ...r, pg: { ...r.pg, deaths: r.pg.deaths.map(still), kills: r.pg.kills.map(still) } };
+}
+
 export function Trends({ onOpen, onPlaylist, onSettings, breakAfter }: Props) {
   const toast = useToast();
   const [rows, setRows] = useState<TrendMatch[] | null>(null);
@@ -1004,7 +1011,7 @@ export function Trends({ onOpen, onPlaylist, onSettings, breakAfter }: Props) {
     setError(null);
     api
       .libraryTrends()
-      .then(setRows)
+      .then((list) => setRows(list.map(unplayable)))
       .catch((e) => setError(humanError(e)));
   }, []);
   useEffect(() => load(), [load]);
@@ -1143,7 +1150,12 @@ export function Trends({ onOpen, onPlaylist, onSettings, breakAfter }: Props) {
 
   /** Every death with this cause in the games shown, newest game first, as one walk-through. */
   const watchCause = async (cause: string) => {
-    const games = newest.filter((r) => r.deathCauses.includes(cause));
+    // A game whose video was deleted has nothing to play.
+    const games = newest.filter((r) => r.deathCauses.includes(cause) && r.hasVideo !== false);
+    if (!games.length) {
+      toast.show({ kind: "info", text: "Nothing left to watch", detail: "The videos of the games with these deaths were deleted. Their stats are kept." });
+      return;
+    }
     setBusyCause(cause);
     try {
       const found = await Promise.all(games.map((g) => api.insights(g.id, false).then((ins) => ({ g, ins }), () => ({ g, ins: null }))));

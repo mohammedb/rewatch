@@ -26,10 +26,18 @@ fn match_dir(settings: &Settings, id: &str) -> Result<PathBuf> {
     Ok(dir)
 }
 
-fn dir_size(dir: &Path) -> u64 {
-    fs::read_dir(dir)
-        .map(|it| it.flatten().filter_map(|e| e.metadata().ok()).filter(|m| m.is_file()).map(|m| m.len()).sum())
-        .unwrap_or(0)
+/// Bytes in a recording's folder: all of it, and the part that is video and sound
+/// (what `delete_video` would free).
+fn sizes(dir: &Path) -> (u64, u64) {
+    let (mut all, mut media) = (0, 0);
+    for e in fs::read_dir(dir).into_iter().flatten().flatten() {
+        let Some(len) = e.metadata().ok().filter(|m| m.is_file()).map(|m| m.len()) else { continue };
+        all += len;
+        if is_media(&e.path()) {
+            media += len;
+        }
+    }
+    (all, media)
 }
 
 fn read_json(path: &Path) -> Option<Value> {
@@ -86,6 +94,35 @@ fn source_video(dir: &Path) -> PathBuf {
     game
 }
 
+/// Whether a recording still has a video to play: the file match.json names, the full
+/// game, or its highlight reel. Without one, only its stats, notes and Riot's record are
+/// left (see `delete_video`).
+fn has_video(dir: &Path, doc: Option<&Value>) -> bool {
+    doc.and_then(|d| d.get("video")).and_then(|v| v.as_str()).is_some_and(|name| dir.join(name).exists())
+        || dir.join("game.mp4").exists()
+        || dir.join(crate::highlights::REEL_FILE).exists()
+}
+
+/// The video to cut a clip or an export from, or why there is none.
+fn video_to_cut(dir: &Path) -> Result<PathBuf> {
+    let video = source_video(dir);
+    if video.exists() {
+        Ok(video)
+    } else {
+        Err(anyhow!("This game's video was deleted, so there is nothing to cut from. Its stats are kept."))
+    }
+}
+
+/// The kinds of file that hold a recording's picture or sound: the full game, the
+/// smaller copy for teammates, the highlight reel and clips, the Discord and microphone
+/// tracks, teammates' views saved here, an export for editing, and any of those half
+/// written. Everything else in the folder is what was learned from the game.
+const MEDIA: [&str; 7] = ["mp4", "m4a", "mkv", "wav", "webm", "mov", "part"];
+
+fn is_media(path: &Path) -> bool {
+    path.extension().and_then(|e| e.to_str()).is_some_and(|e| MEDIA.iter().any(|m| e.eq_ignore_ascii_case(m)))
+}
+
 /// `discord.m4a` or `mic.m4a`, if it exists and still lines up with the video. A game
 /// trimmed to its highlight reel has those voices mixed into the reel instead.
 fn side_track(dir: &Path, name: &str) -> Option<PathBuf> {
@@ -105,6 +142,7 @@ pub fn list(settings: &Settings) -> Vec<Value> {
         let dir = entry.path();
         let Some(mut doc) = read_json(&dir.join("match.json")) else { continue };
         let review = read_review(&dir);
+        let video = has_video(&dir, Some(&doc));
         if let Some(o) = doc.as_object_mut() {
             let count = |kind: &str, role: Option<&str>| -> usize {
                 o.get("events")
@@ -123,7 +161,10 @@ pub fn list(settings: &Settings) -> Vec<Value> {
             o.remove("stats");
             o.insert("summary".into(), summary);
             o.insert("dir".into(), json!(dir.to_string_lossy()));
-            o.insert("sizeBytes".into(), json!(dir_size(&dir)));
+            let (size, media) = sizes(&dir);
+            o.insert("sizeBytes".into(), json!(size));
+            o.insert("videoBytes".into(), json!(media));
+            o.insert("hasVideo".into(), json!(video));
             o.insert("keep".into(), review.get("keep").cloned().unwrap_or(json!(false)));
             o.insert("tags".into(), review.get("tags").cloned().unwrap_or_else(|| json!([])));
             o.insert("reviewed".into(), json!(is_reviewed(&review)));
@@ -163,9 +204,13 @@ pub fn list(settings: &Settings) -> Vec<Value> {
 pub fn get(settings: &Settings, id: &str) -> Result<Value> {
     let dir = match_dir(settings, id)?;
     let mut doc = read_json(&dir.join("match.json")).ok_or_else(|| anyhow!("match.json is unreadable"))?;
+    let video = has_video(&dir, Some(&doc));
     if let Some(o) = doc.as_object_mut() {
         o.insert("dir".into(), json!(dir.to_string_lossy()));
-        o.insert("sizeBytes".into(), json!(dir_size(&dir)));
+        let (size, media) = sizes(&dir);
+        o.insert("sizeBytes".into(), json!(size));
+        o.insert("videoBytes".into(), json!(media));
+        o.insert("hasVideo".into(), json!(video));
         o.insert("review".into(), read_review(&dir));
         // A title per player, from the game's own numbers.
         let titles = crate::titles::for_match(&Value::Object(o.clone()));
@@ -252,7 +297,9 @@ pub fn trends(settings: &Settings) -> Vec<Value> {
         let dir = entry.path();
         let stamp = trend_stamp(&dir);
         if let Some((_, row)) = cache.get(&dir).filter(|(seen, _)| *seen == stamp) {
-            out.push(row.clone());
+            let mut row = row.clone();
+            row["hasVideo"] = json!(has_video(&dir, None));
+            out.push(row);
             continue;
         }
         let Some(doc) = read_json(&dir.join("match.json")) else { continue };
@@ -395,8 +442,10 @@ pub fn trends(settings: &Settings) -> Vec<Value> {
             "rank": crate::riot::status(&dir).0,
             "pg": pg,
         });
-        cache.insert(dir, (stamp, row.clone()));
-        out.push(row);
+        let mut shown = row.clone();
+        shown["hasVideo"] = json!(has_video(&dir, Some(&doc)));
+        cache.insert(dir, (stamp, row));
+        out.push(shown);
     }
     out.sort_by(|a, b| b["id"].as_str().cmp(&a["id"].as_str()));
     out
@@ -538,14 +587,69 @@ pub fn delete(settings: &Settings, id: &str) -> Result<()> {
     Ok(())
 }
 
-/// Delete the oldest recordings until the folder fits the size cap. Recordings marked
-/// "keep" and the one named in `protect` are never deleted.
-pub fn enforce_quota(settings: &Settings, protect: Option<&str>) -> Vec<String> {
-    let mut removed = Vec::new();
-    if settings.quota_gb == 0 {
-        return removed;
+/// Delete a game's video and sound and keep everything learned from it: match.json (the
+/// live feed and its numbers), Riot's record of the game, ranks and LP, the review and
+/// notes, the hints, the mouse and key logs and the thumbnail. The game stays in the
+/// library and in Trends. Returns the bytes freed.
+pub fn delete_video(settings: &Settings, id: &str) -> Result<u64> {
+    let dir = match_dir(settings, id)?;
+    let freed = delete_video_in(&dir, "you")?;
+    log(format!("[storage] {id}: deleted the video ({} MB), kept the stats", freed / 1_000_000));
+    Ok(freed)
+}
+
+/// `by` is who deleted it, kept in match.json: "you", or "limit" for the size limit.
+fn delete_video_in(dir: &Path, by: &str) -> Result<u64> {
+    let mut doc = read_json(&dir.join("match.json")).ok_or_else(|| anyhow!("match.json is unreadable"))?;
+    let media: Vec<(PathBuf, u64)> = fs::read_dir(dir)?
+        .flatten()
+        .filter_map(|e| {
+            let meta = e.metadata().ok().filter(|m| m.is_file())?;
+            is_media(&e.path()).then(|| (e.path(), meta.len()))
+        })
+        .collect();
+    // The video the player shows goes first. If another program has it open, stop
+    // there, so a game is never left half deleted.
+    let main = source_video(dir);
+    let mut freed = 0;
+    if let Some((path, size)) = media.iter().find(|(p, _)| *p == main) {
+        fs::remove_file(path).map_err(|e| anyhow!("The video is open in another program, so it was not deleted ({e})"))?;
+        freed += size;
     }
-    let cap = settings.quota_gb * 1024 * 1024 * 1024;
+    let mut stuck = 0;
+    for (path, size) in media.iter().filter(|(p, _)| *p != main) {
+        match fs::remove_file(path) {
+            Ok(()) => freed += size,
+            Err(_) => stuck += 1,
+        }
+    }
+    if let Some(o) = doc.as_object_mut().filter(|o| freed > 0 && !o.contains_key("videoDeletedAt")) {
+        let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_millis() as i64).unwrap_or(0);
+        o.insert("videoDeletedAt".into(), json!(now));
+        o.insert("videoDeletedBy".into(), json!(by));
+        fs::write(dir.join("match.json"), serde_json::to_string_pretty(&doc)?)?;
+    }
+    if stuck > 0 {
+        log(format!("[storage] {}: {stuck} sound or video files were open elsewhere and stay for now", dir.display()));
+    }
+    Ok(freed)
+}
+
+/// Make the recordings folder fit the size cap, oldest games first, by deleting their
+/// videos and keeping their stats (see `delete_video`). A screen recording has no stats
+/// to keep, so it is deleted whole. Recordings marked "keep" and the one named in
+/// `protect` are never touched. Returns the recordings changed.
+pub fn enforce_quota(settings: &Settings, protect: Option<&str>) -> Vec<String> {
+    if settings.quota_gb == 0 {
+        return Vec::new();
+    }
+    fit_under(settings, settings.quota_gb * 1024 * 1024 * 1024, protect)
+}
+
+/// `enforce_quota` with the cap in bytes.
+fn fit_under(settings: &Settings, cap: u64, protect: Option<&str>) -> Vec<String> {
+    let mut changed = Vec::new();
+    let Some(root) = settings.recordings_path() else { return changed };
     let mut all = list(settings);
     let mut total: u64 = all.iter().map(|m| m["sizeBytes"].as_u64().unwrap_or(0)).sum();
     all.reverse(); // oldest first
@@ -554,16 +658,30 @@ pub fn enforce_quota(settings: &Settings, protect: Option<&str>) -> Vec<String> 
             break;
         }
         let id = m["id"].as_str().unwrap_or("");
-        if m["keep"] == json!(true) || Some(id) == protect {
+        if !valid_id(id) || m["keep"] == json!(true) || Some(id) == protect {
             continue;
         }
-        if delete(settings, id).is_ok() {
-            total = total.saturating_sub(m["sizeBytes"].as_u64().unwrap_or(0));
-            log(format!("[storage] removed {id} to stay under {} GB", settings.quota_gb));
-            removed.push(id.to_string());
+        // A screen recording: no game, so no stats to keep.
+        if m["mode"] == json!("manual") && m["game"]["me"].is_null() {
+            if delete(settings, id).is_ok() {
+                total = total.saturating_sub(m["sizeBytes"].as_u64().unwrap_or(0));
+                log(format!("[storage] removed the screen recording {id} to stay under the size limit"));
+                changed.push(id.to_string());
+            }
+        } else {
+            match delete_video_in(&root.join(id), "limit") {
+                // Only the stats were left: nothing to free here.
+                Ok(0) => {}
+                Ok(freed) => {
+                    total = total.saturating_sub(freed);
+                    log(format!("[storage] deleted the video of {id} ({} MB) to stay under the size limit; its stats stay", freed / 1_000_000));
+                    changed.push(id.to_string());
+                }
+                Err(e) => log(format!("[storage] {id}: {e}")),
+            }
         }
     }
-    removed
+    changed
 }
 
 /// Compute a video bitrate (in kbps) so a clip of `len_secs` with `audio_kbps` audio
@@ -612,7 +730,7 @@ pub fn export_clip(
     };
 
     let mut inputs: Vec<String> = ["-y", "-hide_banner", "-loglevel", "error"].map(String::from).to_vec();
-    seek(&mut inputs, &source_video(&dir));
+    seek(&mut inputs, &video_to_cut(&dir)?);
     let mut labels: Vec<String> = Vec::new();
     if tracks.iter().any(|t| t == "game") {
         labels.push("[0:a]".into());
@@ -687,7 +805,7 @@ pub fn export_full(settings: &Settings, id: &str) -> Result<String> {
     let p = |x: &Path| x.to_string_lossy().to_string();
     let out = dir.join(format!("{id}_all-tracks.mp4"));
     let mut args: Vec<String> = ["-y", "-hide_banner", "-loglevel", "error", "-i"].map(String::from).to_vec();
-    args.push(p(&source_video(&dir)));
+    args.push(p(&video_to_cut(&dir)?));
     let mut titles = vec!["Game"];
     for (name, title) in [("discord", "Discord"), ("mic", "Microphone (raw)")] {
         if let Some(file) = side_track(&dir, name) {
@@ -758,6 +876,7 @@ pub fn export_split(
             return Err(anyhow!("That view cannot be used in a clip"));
         }
     }
+    let mine = video_to_cut(&dir)?;
     let (ffmpeg, _) = settings.ffmpeg_tools();
     let len = (end - start).clamp(0.5, 600.0);
     let start = start.max(0.0);
@@ -772,7 +891,7 @@ pub fn export_split(
     let mut add = |at: f64, source: String| {
         inputs.extend(["-ss".into(), format!("{:.3}", at.max(0.0)), "-t".into(), format!("{len:.3}"), "-i".into(), source]);
     };
-    add(start, p(&source_video(&dir)));
+    add(start, p(&mine));
     for v in views {
         add(start + v.shift, v.source.clone());
     }
@@ -854,7 +973,117 @@ pub fn export_split(
 
 #[cfg(test)]
 mod tests {
-    use super::{capped_rates, losing_streak_of, split_layout, target_video_kbps};
+    use super::{capped_rates, delete_video, enforce_quota, fit_under, has_video, list, losing_streak_of, split_layout, target_video_kbps};
+    use crate::settings::Settings;
+    use serde_json::{json, Value};
+    use std::path::{Path, PathBuf};
+
+    /// A recordings folder of its own for one test.
+    fn folder(name: &str) -> PathBuf {
+        let root = std::env::temp_dir().join(format!("rewatch_{name}_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).unwrap();
+        root
+    }
+
+    /// A game folder: match.json, Riot's record, a review, and a video of `video_bytes`
+    /// with Discord, microphone and a highlight clip.
+    fn game(root: &Path, id: &str, mode: &str, video_bytes: usize, keep: bool) -> PathBuf {
+        let dir = root.join(id);
+        std::fs::create_dir_all(&dir).unwrap();
+        let doc = json!({ "id": id, "mode": mode, "video": "game.mp4", "startedEpochMs": 1, "duration": 1800.0, "game": { "me": { "champion": "Ahri", "kills": 7 } } });
+        std::fs::write(dir.join("match.json"), doc.to_string()).unwrap();
+        std::fs::write(dir.join("review.json"), json!({ "keep": keep, "notes": [{ "id": "a", "t": 61.0, "text": "ward first" }], "drawings": [] }).to_string()).unwrap();
+        std::fs::write(dir.join("riot_match.json"), b"{}").unwrap();
+        std::fs::write(dir.join("postgame.json"), b"{}").unwrap();
+        std::fs::write(dir.join("mouse.csv"), b"t,x,y").unwrap();
+        std::fs::write(dir.join("thumb.jpg"), b"jpg").unwrap();
+        std::fs::write(dir.join("game.mp4"), vec![0u8; video_bytes]).unwrap();
+        std::fs::write(dir.join("discord.m4a"), vec![0u8; 100]).unwrap();
+        std::fs::write(dir.join("mic.m4a"), vec![0u8; 100]).unwrap();
+        std::fs::write(dir.join("highlight_05m00s_your-double-kill.mp4"), vec![0u8; 100]).unwrap();
+        std::fs::write(dir.join("pov_ab12cd34ef56.mp4.part"), vec![0u8; 50]).unwrap();
+        dir
+    }
+
+    fn names(dir: &Path) -> Vec<String> {
+        let mut all: Vec<String> = std::fs::read_dir(dir).unwrap().flatten().map(|e| e.file_name().to_string_lossy().to_string()).collect();
+        all.sort();
+        all
+    }
+
+    #[test]
+    fn deleting_the_video_keeps_the_stats() {
+        let root = folder("delete_video");
+        let dir = game(&root, "2026-11-01_20-00-00", "game", 1000, false);
+        let mut s = Settings::default();
+        s.recordings_dir = root.to_string_lossy().to_string();
+        assert!(has_video(&dir, None));
+        assert_eq!(list(&s)[0]["videoBytes"], 1000 + 100 + 100 + 100 + 50);
+
+        let freed = delete_video(&s, "2026-11-01_20-00-00").unwrap();
+        assert_eq!(freed, 1000 + 100 + 100 + 100 + 50);
+        assert_eq!(names(&dir), ["match.json", "mouse.csv", "postgame.json", "review.json", "riot_match.json", "thumb.jpg"]);
+        let doc: Value = serde_json::from_str(&std::fs::read_to_string(dir.join("match.json")).unwrap()).unwrap();
+        assert!(doc["videoDeletedAt"].as_i64().unwrap() > 0);
+        assert_eq!(doc["videoDeletedBy"], "you");
+        assert_eq!(doc["game"]["me"]["kills"], 7);
+
+        // Still in the library, with its notes, and saying it has no video.
+        let all = list(&s);
+        assert_eq!(all.len(), 1);
+        assert_eq!(all[0]["hasVideo"], false);
+        assert_eq!(all[0]["videoBytes"], 0);
+        assert_eq!(all[0]["noteCount"], 1);
+        // Again: nothing left to free, and the first time is remembered.
+        assert_eq!(delete_video(&s, "2026-11-01_20-00-00").unwrap(), 0);
+        let again: Value = serde_json::from_str(&std::fs::read_to_string(dir.join("match.json")).unwrap()).unwrap();
+        assert_eq!(again["videoDeletedAt"], doc["videoDeletedAt"]);
+        // An id that tries to leave the recordings folder is refused.
+        assert!(delete_video(&s, "..").is_err());
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn the_size_limit_deletes_old_videos_and_keeps_their_games() {
+        let root = folder("quota_videos");
+        let mut s = Settings::default();
+        s.recordings_dir = root.to_string_lossy().to_string();
+        // Oldest first: a kept game, a screen recording, two games, and the newest game,
+        // just recorded.
+        let kept = game(&root, "2026-11-01_10-00-00", "game", 1000, true);
+        let screen = game(&root, "2026-11-02_10-00-00", "manual", 1000, false);
+        std::fs::write(screen.join("match.json"), json!({ "id": "2026-11-02_10-00-00", "mode": "manual", "video": "game.mp4" }).to_string()).unwrap();
+        let old = game(&root, "2026-11-03_10-00-00", "game", 1000, false);
+        let mid = game(&root, "2026-11-04_10-00-00", "game", 1000, false);
+        let new = game(&root, "2026-11-05_10-00-00", "game", 1000, false);
+        let total = || list(&s).iter().map(|m| m["sizeBytes"].as_u64().unwrap()).sum::<u64>();
+        let newest = Some("2026-11-05_10-00-00");
+
+        // Without a limit set, nothing happens.
+        assert!(enforce_quota(&s, newest).is_empty());
+        // 1,000 bytes over: the kept game is passed over and the screen recording goes
+        // whole, which is enough.
+        assert_eq!(fit_under(&s, total() - 1000, newest), ["2026-11-02_10-00-00"]);
+        assert!(!screen.exists());
+        assert!(kept.join("game.mp4").exists() && old.join("game.mp4").exists());
+
+        // As small as can be: every video that may go goes, the games stay.
+        assert_eq!(fit_under(&s, 0, newest), ["2026-11-03_10-00-00", "2026-11-04_10-00-00"]);
+        for d in [&old, &mid] {
+            assert!(!d.join("game.mp4").exists() && !d.join("discord.m4a").exists());
+            let doc: Value = serde_json::from_str(&std::fs::read_to_string(d.join("match.json")).unwrap()).unwrap();
+            assert_eq!(doc["videoDeletedBy"], "limit");
+            assert!(d.join("match.json").exists() && d.join("review.json").exists() && d.join("riot_match.json").exists());
+        }
+        assert!(new.join("game.mp4").exists() && kept.join("game.mp4").exists());
+        // Nothing more to free, so nothing changes the second time.
+        assert!(fit_under(&s, 0, newest).is_empty());
+        let left = list(&s);
+        assert_eq!(left.len(), 4);
+        assert_eq!(left.iter().filter(|m| m["hasVideo"] == false).count(), 2);
+        let _ = std::fs::remove_dir_all(&root);
+    }
 
     #[test]
     fn a_losing_streak_ends_with_a_win_or_a_break() {

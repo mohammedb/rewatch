@@ -155,7 +155,7 @@ const base = (id: string, ms: number, result: "Win" | "Lose", champ: PlayerRow, 
   bookmarks: [{ t: 45 }, { t: 90 }],
   mouse: { file: "mouse.csv", offset: 0, w: 1280, h: 720 },
   keys: { file: "keys.csv", offset: 0, names: ["Q", "W", "E", "R", "D", "F", "1", "2", "3", "4", "5", "6", "7", "B", "A", "S", "Tab", "Space", "Ctrl", "Shift"] },
-  dir: "/mock", sizeBytes: 6.4 * 1024 ** 3, keep: false, tags, notesText: "", noteCount: 0, thumb: null, reel: null,
+  dir: "/mock", sizeBytes: 6.4 * 1024 ** 3, videoBytes: 6.39 * 1024 ** 3, hasVideo: true, keep: false, tags, notesText: "", noteCount: 0, thumb: null, reel: null,
   summary: { deaths: champ.deaths, bookmarks: 2 },
 });
 
@@ -210,6 +210,7 @@ const matches: MatchSummary[] = SPEC.map(([h, c, result, k, d, a, cs, min, q, ta
   const m = base(idOf(ms), ms, result, me, tags);
   m.game = { ...m.game, queueId: QUEUES[q][0], queueName: QUEUES[q][1], length: min * 60 + 17 * (i % 4) };
   m.sizeBytes = (4.2 + ((i * 37) % 36) / 10) * 1024 ** 3;
+  m.videoBytes = m.sizeBytes - 2.4 * 1024 ** 2;
   const done = !UNREVIEWED.has(i);
   const setAt = ms + (min + 25) * 60e3;
   const review: Review = {
@@ -225,6 +226,10 @@ const matches: MatchSummary[] = SPEC.map(([h, c, result, k, d, a, cs, min, q, ta
   return {
     ...m, keep: review.keep, reviewed: done, nextFocus: review.nextFocus, focusCheck: review.focusCheck, noteCount: review.notes.length, notesText: review.notes.map((n) => n.text).join("\n"),
     story: storyOf(i, result === "Win"),
+    // The two oldest games have only their stats left: one video deleted by hand, one by the size limit.
+    ...(i >= SPEC.length - 2
+      ? { hasVideo: false, sizeBytes: 2.4 * 1024 ** 2, videoBytes: 0, videoDeletedAt: now - 20 * 3600e3, videoDeletedBy: i === SPEC.length - 1 ? ("limit" as const) : ("you" as const) }
+      : {}),
   };
 });
 // The newest game has the full sample review: notes, a drawing and tags.
@@ -244,7 +249,7 @@ watchPeers[0].matchId = matches[0].id;
 // One screen recording, between games.
 {
   const ms = now - 52 * 3600e3;
-  matches.splice(4, 0, { ...base(idOf(ms), ms, "Win", players[0]), mode: "manual", game: { result: null } as unknown as MatchSummary["game"], noteCount: 0, summary: { deaths: 0, bookmarks: 0 }, sizeBytes: 0.4 * 1024 ** 3 });
+  matches.splice(4, 0, { ...base(idOf(ms), ms, "Win", players[0]), mode: "manual", game: { result: null } as unknown as MatchSummary["game"], noteCount: 0, summary: { deaths: 0, bookmarks: 0 }, sizeBytes: 0.4 * 1024 ** 3, videoBytes: 0.4 * 1024 ** 3 });
 }
 
 // ---- Riot's record of each game: ranks, damage, gold, and kills on the map.
@@ -566,6 +571,14 @@ export async function mock<T>(cmd: string, args?: Record<string, unknown>): Prom
         if (i >= 0) matches.splice(i, 1);
         return null;
       }
+      case "delete_video": {
+        const i = matches.findIndex((m) => m.id === args!.id);
+        if (i < 0) return 0;
+        const m = matches[i];
+        const freed = m.videoBytes ?? 0;
+        matches[i] = { ...m, hasVideo: false, sizeBytes: m.sizeBytes - freed, videoBytes: 0, videoDeletedAt: m.videoDeletedAt ?? Date.now(), videoDeletedBy: m.videoDeletedBy ?? "you" };
+        return freed;
+      }
       case "list_microphones": return [{ id: "a", name: "Headset Microphone", isDefault: true, isDefaultComms: true, level: 0.2 }, { id: "b", name: "Webcam Microphone", isDefault: false, isDefaultComms: false, level: 0 }];
       case "list_matches": return matches;
       case "get_match": {
@@ -638,6 +651,7 @@ export async function mock<T>(cmd: string, args?: Record<string, unknown>): Prom
             allies: (m.game.players ?? []).filter((p) => !p.isMe && p.team === me.team).map((p) => ({ name: p.name, champion: p.champion })),
             tags: m.tags ?? [],
             keep: m.keep,
+            hasVideo: m.hasVideo !== false,
             reviewed: !!r?.reviewedAt,
             focus: r?.focusCheck ?? null,
             deathCauses: causes,

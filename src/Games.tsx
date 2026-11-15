@@ -1,4 +1,4 @@
-import { Bookmark, Check, CircleCheck, CircleDashed, CircleDot, Crosshair, Film, HardDrive, LayoutGrid, List, MessageSquare, Play, Search, Skull, Star, Trash2, Video, X } from "lucide-react";
+import { Bookmark, Check, CircleCheck, CircleDashed, CircleDot, Crosshair, Film, HardDrive, LayoutGrid, List, MessageSquare, Play, Search, Skull, Star, Trash2, Video, VideoOff, X } from "lucide-react";
 import { useEffect, useMemo, useRef, useState } from "react";
 import { absoluteFileUrl, api, fileUrl, pickFolder } from "./api";
 import { Portrait } from "./ChampIcon";
@@ -6,7 +6,7 @@ import { ago, bytes, clock, dayLabel, timeOfDay, toReview } from "./format";
 import { Logo } from "./icons";
 import { STORY_HINT, storyLabel } from "./Insights";
 import { LpDelta, queueLabel, standing } from "./Rank";
-import { ItemSlots, Kda, KdaRatio } from "./Stats";
+import { Crest, ItemSlots, Kda, KdaRatio } from "./Stats";
 import type { Environment, MatchSummary, NextFocus, Review, Settings, Story } from "./types";
 import { humanError, ownsKeys, Popover, Select, Skeleton, useToast } from "./ui";
 
@@ -20,6 +20,8 @@ interface Props {
   onSaveSettings: (s: Settings) => Promise<void>;
   /** Delete games (the app offers an undo for a few seconds). */
   onDelete: (ids: string[], what?: string) => void;
+  /** Delete games' videos and keep their stats (with an undo too). */
+  onDeleteVideo: (ids: string[], what?: string) => void;
   /** Reviews were changed here: load the list again. */
   onChanged: () => void;
   onSettings: () => void;
@@ -77,6 +79,12 @@ function Teams({ m }: { m: MatchSummary }) {
   );
 }
 
+/** Why a game has no video, for a tooltip. */
+function noVideoWhy(m: MatchSummary): string {
+  const how = m.videoDeletedBy === "limit" ? "The size limit deleted its video" : m.videoDeletedBy === "you" ? "You deleted its video" : "Its video file is missing";
+  return `${how}. The stats, notes and LP are kept.`;
+}
+
 /** A thumbnail that plays through the recording as the pointer moves across it. */
 function Thumb({ m, flags = true }: { m: MatchSummary; flags?: boolean }) {
   const [live, setLive] = useState(false);
@@ -109,8 +117,9 @@ function Thumb({ m, flags = true }: { m: MatchSummary; flags?: boolean }) {
 
   return (
     <span
-      className={`shot ${m.thumb ? "" : "blank"}`}
+      className={`shot ${m.thumb ? "" : "blank"} ${m.hasVideo === false ? "novid" : ""}`}
       onPointerEnter={() => {
+        if (m.hasVideo === false) return;
         // A short wait, so moving across the page does not open every video on the way.
         timer.current = window.setTimeout(() => setLive(true), 160);
       }}
@@ -159,10 +168,16 @@ function Thumb({ m, flags = true }: { m: MatchSummary; flags?: boolean }) {
               <Star size={12} fill="currentColor" aria-label="Kept" />
             </span>
           )}
-          {m.trimmedToHighlights && (
+          {m.trimmedToHighlights && m.hasVideo !== false && (
             <span title="Trimmed to its highlights">
               <Film size={12} aria-hidden />
               Reel
+            </span>
+          )}
+          {m.hasVideo === false && (
+            <span title={noVideoWhy(m)}>
+              <VideoOff size={12} aria-hidden />
+              No video
             </span>
           )}
           {m.noteCount > 0 && (
@@ -197,8 +212,12 @@ function Storage({ matches, settings, env, onSettings }: { matches: MatchSummary
   const cap = limit ?? (free !== null ? used + free : null);
   const pct = cap ? Math.min(1, used / cap) : 0;
   const tone = pct > 0.9 ? "full" : pct > 0.75 ? "high" : "";
-  const next = limit ? [...matches].filter((m) => !m.keep).sort((a, b) => a.startedEpochMs - b.startedEpochMs)[0] : undefined;
+  // What the limit frees from a recording: a game's video (its stats stay), or the whole of a screen recording.
+  const screen = (m: MatchSummary) => m.mode === "manual" && !m.game?.me;
+  const frees = (m: MatchSummary) => (screen(m) ? m.sizeBytes : (m.videoBytes ?? m.sizeBytes));
+  const next = limit ? [...matches].filter((m) => !m.keep && frees(m) > 0).sort((a, b) => a.startedEpochMs - b.startedEpochMs)[0] : undefined;
   const kept = matches.filter((m) => m.keep);
+  const statsOnly = matches.filter((m) => m.hasVideo === false && !screen(m));
   return (
     <>
       <button ref={btn} className={`storage ${tone}`} aria-expanded={open} onClick={() => setOpen((o) => !o)} title="Storage">
@@ -223,14 +242,22 @@ function Storage({ matches, settings, env, onSettings }: { matches: MatchSummary
           </p>
           {limit ? (
             <p>
-              Past the limit, the oldest games you have not kept are deleted first.
+              Past the limit, the videos of your oldest games are deleted first. Their stats, notes and LP stay, and games you keep are never touched.
               {next ? (
                 <>
                   {" "}
-                  Next to go: <b>{champName(next)}</b>, {new Date(next.startedEpochMs).toLocaleDateString([], { day: "numeric", month: "short" })} ({bytes(next.sizeBytes)}).
+                  Next to go:{" "}
+                  {screen(next) ? (
+                    <b>{champName(next)}</b>
+                  ) : (
+                    <>
+                      the video of your <b>{champName(next)}</b> game
+                    </>
+                  )}
+                  , {new Date(next.startedEpochMs).toLocaleDateString([], { day: "numeric", month: "short" })} ({bytes(frees(next))}).
                 </>
               ) : (
-                " Every game is kept, so nothing can be deleted."
+                " Nothing is left to delete: every game is kept or has no video."
               )}
             </p>
           ) : (
@@ -239,6 +266,11 @@ function Storage({ matches, settings, env, onSettings }: { matches: MatchSummary
           {kept.length > 0 && (
             <p className="muted">
               {kept.length} kept {kept.length === 1 ? "game uses" : "games use"} {bytes(kept.reduce((n, m) => n + m.sizeBytes, 0))}.
+            </p>
+          )}
+          {statsOnly.length > 0 && (
+            <p className="muted">
+              {statsOnly.length} {statsOnly.length === 1 ? "game has only its" : "games have only their"} stats left, {bytes(statsOnly.reduce((n, m) => n + m.sizeBytes, 0))}.
             </p>
           )}
           <div className="pop-acts">
@@ -386,7 +418,10 @@ function Recap({ m, focus, onOpen }: { m: MatchSummary; focus: NextFocus | null;
           {m.rank?.tier && (
             <div>
               <dt>{queueLabel(m.rank.queue)}</dt>
-              <dd className="num">{standing(m.rank)}</dd>
+              <dd className="num rh-rank">
+                <Crest tier={m.rank.tier} size={22} />
+                {standing(m.rank)}
+              </dd>
             </div>
           )}
         </dl>
@@ -403,7 +438,7 @@ function Recap({ m, focus, onOpen }: { m: MatchSummary; focus: NextFocus | null;
             <Play size={15} fill="currentColor" aria-hidden />
             Review this game
           </button>
-          {me.deaths > 0 && (
+          {me.deaths > 0 && m.hasVideo !== false && (
             <button className="btn" onClick={() => onOpen(m.id, "deaths")}>
               <Skull size={15} aria-hidden />
               Watch your {me.deaths === 1 ? "death" : `${me.deaths} deaths`}
@@ -417,7 +452,7 @@ function Recap({ m, focus, onOpen }: { m: MatchSummary; focus: NextFocus | null;
 
 const FOCUS_WORD = { yes: "Did it", partly: "Partly", no: "Not really" } as const;
 
-export function Games({ matches, settings, busy, onOpen, onRecord, onSaveSettings, onDelete, onChanged, onSettings }: Props) {
+export function Games({ matches, settings, busy, onOpen, onRecord, onSaveSettings, onDelete, onDeleteVideo, onChanged, onSettings }: Props) {
   const toast = useToast();
   const [filter, setFilter] = useState<Filter>("all");
   const [activeTag, setActiveTag] = useState("");
@@ -560,6 +595,7 @@ export function Games({ matches, settings, busy, onOpen, onRecord, onSaveSetting
   const selMatches = all.filter((m) => visibleSel.includes(m.id));
   const allKept = selMatches.length > 0 && selMatches.every((m) => m.keep);
   const unreviewed = selMatches.filter((m) => m.mode === "game" && !m.reviewed);
+  const withVideo = selMatches.filter((m) => m.mode === "game" && m.hasVideo !== false);
 
   const open = (m: MatchSummary, e: React.MouseEvent) => {
     if (selecting || e.shiftKey || e.ctrlKey || e.metaKey) toggle(m.id, e.shiftKey);
@@ -841,6 +877,11 @@ export function Games({ matches, settings, busy, onOpen, onRecord, onSaveSetting
                             <Teams m={m} />
                             <span className="lflags">
                               {m.keep && <Star size={13} fill="currentColor" className="kept" aria-label="Kept" />}
+                              {m.hasVideo === false && (
+                                <span title={noVideoWhy(m)}>
+                                  <VideoOff size={13} aria-label="No video" />
+                                </span>
+                              )}
                               {m.noteCount > 0 && (
                                 <span title={`${m.noteCount} notes`}>
                                   <MessageSquare size={12} aria-hidden />
@@ -888,8 +929,22 @@ export function Games({ matches, settings, busy, onOpen, onRecord, onSaveSetting
               Mark reviewed
             </button>
             <button
+              className="btn sm"
+              disabled={working || withVideo.length === 0}
+              title="Deletes the video and sound and keeps the stats, notes and LP, so the games stay in your library and Trends"
+              onClick={() => {
+                const ids = withVideo.map((m) => m.id);
+                setSelected([]);
+                onDeleteVideo(ids);
+              }}
+            >
+              <VideoOff size={14} aria-hidden />
+              {withVideo.length > 1 ? `Delete ${withVideo.length} videos` : "Delete video"}
+            </button>
+            <button
               className="btn sm danger"
               disabled={working}
+              title="Deletes the games completely: video, stats and notes"
               onClick={() => {
                 const ids = visibleSel;
                 setSelected([]);
@@ -897,7 +952,7 @@ export function Games({ matches, settings, busy, onOpen, onRecord, onSaveSetting
               }}
             >
               <Trash2 size={14} aria-hidden />
-              Delete
+              {visibleSel.length === 1 ? "Delete game" : "Delete games"}
             </button>
             <button className="btn sm sq quiet" aria-label="Clear the selection" title="Clear (Esc)" onClick={() => setSelected([])}>
               <X size={15} />

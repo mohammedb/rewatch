@@ -47,7 +47,8 @@ Nothing from the RiftRec installer, code, name or artwork is used.
 8. **Clips**: cut a range, or the seconds around an event or bookmark, into a
    standalone MP4 with the sound tracks you choose.
 9. **Storage control**: choose the recordings folder; a size cap that deletes
-   the oldest recordings first; a "keep" flag that protects a game from that.
+   the videos of the oldest games first (their stats stay); a "keep" flag that
+   protects a game from that.
 
 ## Second stage (after the first version is in daily use)
 

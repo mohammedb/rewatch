@@ -55,6 +55,7 @@ export function NotesPanel({
   onAdd,
   onDelete,
   onPause,
+  noVideo,
 }: {
   notes: Note[];
   drawings: Drawing[];
@@ -67,6 +68,8 @@ export function NotesPanel({
   onAdd: (text: string, replyTo?: string) => void;
   onDelete: (id: string) => void;
   onPause: () => void;
+  /** The game's video was deleted: notes can be read and deleted, not added, and their moments can't be played. */
+  noVideo?: boolean;
 }) {
   const [text, setText] = useState("");
   const [replyTo, setReplyTo] = useState<Entry | null>(null);
@@ -96,18 +99,18 @@ export function NotesPanel({
   };
 
   const row = (e: Entry, reply = false) => (
-    <article key={e.key} className={`nt ${e.mine ? "mine" : "theirs"} ${reply ? "reply" : ""} ${Math.abs(e.t - time) < 2 ? "now" : ""}`}>
+    <article key={e.key} className={`nt ${e.mine ? "mine" : "theirs"} ${reply ? "reply" : ""} ${!noVideo && Math.abs(e.t - time) < 2 ? "now" : ""}`}>
       <header>
         {reply && <CornerDownRight size={13} className="muted" aria-hidden />}
         {e.championKey ? <Portrait championKey={e.championKey} name={e.champion ?? e.who} size={20} side={e.mine ? undefined : "ally"} /> : <span className="glyph" style={{ width: 20, height: 20 }} />}
         <b>{e.who}</b>
         {!reply && (
-          <button className="tchip num" onClick={() => onSeek(e.t - 3)} title="Go to this moment">
+          <button className="tchip num" onClick={() => onSeek(e.t - 3)} title={noVideo ? undefined : "Go to this moment"} disabled={noVideo}>
             {clock(e.t)}
           </button>
         )}
         <span className="grow" />
-        {!reply && e.text && (
+        {!reply && e.text && !noVideo && (
           <button
             className="btn quiet xs sq"
             aria-label={`Reply to ${e.who}`}
@@ -129,7 +132,7 @@ export function NotesPanel({
       </header>
       {e.text && <p>{e.text}</p>}
       {e.shapes > 0 && (
-        <button className="drawn" onClick={() => onSeek(e.t)} title="Show the drawing">
+        <button className="drawn" onClick={() => onSeek(e.t)} title={noVideo ? undefined : "Show the drawing"} disabled={noVideo}>
           <PenLine size={12} aria-hidden />
           {e.text ? `Drawing, ${e.shapes} ${e.shapes === 1 ? "mark" : "marks"}` : `Drew ${e.shapes} ${e.shapes === 1 ? "mark" : "marks"} on the video`}
         </button>
@@ -167,7 +170,7 @@ export function NotesPanel({
         {top.length === 0 && (
           <div className="side-empty">
             <MessageSquare size={20} aria-hidden />
-            <p>Pause on a moment and write what you see. Notes show on the timeline, and teammates who recorded this game see them too.</p>
+            <p>{noVideo ? "No notes on this game." : "Pause on a moment and write what you see. Notes show on the timeline, and teammates who recorded this game see them too."}</p>
           </div>
         )}
         {top.map((e) => (
@@ -177,39 +180,41 @@ export function NotesPanel({
           </div>
         ))}
       </div>
-      <div className="noteadd">
-        {replyTo && (
-          <div className="replying">
-            <CornerDownRight size={13} aria-hidden />
-            <span>
-              Replying to <b>{replyTo.who}</b> at {clock(replyTo.t)}
-            </span>
-            <button className="btn quiet xs sq" aria-label="Stop replying" onClick={() => setReplyTo(null)}>
-              <X size={13} />
+      {!noVideo && (
+        <div className="noteadd">
+          {replyTo && (
+            <div className="replying">
+              <CornerDownRight size={13} aria-hidden />
+              <span>
+                Replying to <b>{replyTo.who}</b> at {clock(replyTo.t)}
+              </span>
+              <button className="btn quiet xs sq" aria-label="Stop replying" onClick={() => setReplyTo(null)}>
+                <X size={13} />
+              </button>
+            </div>
+          )}
+          <textarea
+            ref={box}
+            value={text}
+            placeholder={replyTo ? "Your reply" : "What happened here?"}
+            aria-label={replyTo ? "Reply" : "New note"}
+            onChange={(e) => setText(e.target.value)}
+            onFocus={onPause}
+            onKeyDown={(e) => {
+              e.stopPropagation();
+              if (e.key === "Enter" && (e.ctrlKey || e.metaKey)) send();
+              if (e.key === "Escape") setReplyTo(null);
+            }}
+          />
+          <div className="noteadd-foot">
+            <span className="muted">Ctrl + Enter</span>
+            <span className="grow" />
+            <button className="btn sm primary" disabled={!text.trim()} onClick={send}>
+              {replyTo ? "Reply" : `Add note at ${clock(time)}`}
             </button>
           </div>
-        )}
-        <textarea
-          ref={box}
-          value={text}
-          placeholder={replyTo ? "Your reply" : "What happened here?"}
-          aria-label={replyTo ? "Reply" : "New note"}
-          onChange={(e) => setText(e.target.value)}
-          onFocus={onPause}
-          onKeyDown={(e) => {
-            e.stopPropagation();
-            if (e.key === "Enter" && (e.ctrlKey || e.metaKey)) send();
-            if (e.key === "Escape") setReplyTo(null);
-          }}
-        />
-        <div className="noteadd-foot">
-          <span className="muted">Ctrl + Enter</span>
-          <span className="grow" />
-          <button className="btn sm primary" disabled={!text.trim()} onClick={send}>
-            {replyTo ? "Reply" : `Add note at ${clock(time)}`}
-          </button>
         </div>
-      </div>
+      )}
     </>
   );
 }

@@ -223,6 +223,13 @@ export interface MatchSummary {
   keys?: KeysMeta | null;
   dir: string;
   sizeBytes: number;
+  /** The part of sizeBytes that is video and sound: what deleting the video frees. */
+  videoBytes?: number;
+  /** False once the video is deleted or missing. The game's stats, notes and LP stay. */
+  hasVideo?: boolean;
+  /** When the video was deleted, and by whom: "you", or "limit" for the size limit. */
+  videoDeletedAt?: number | null;
+  videoDeletedBy?: "you" | "limit" | null;
   keep: boolean;
   tags?: string[];
   /** Marked as reviewed in the app. */
@@ -700,6 +707,8 @@ export interface TrendMatch {
   rank?: RankChange | null;
   /** From Riot's record of the game, once fetched. */
   pg?: TrendPg | null;
+  /** False once the game's video is deleted: its numbers stay, its moments can't be played. */
+  hasVideo?: boolean;
 }
 
 export interface MatchFull extends Omit<MatchSummary, "keep" | "noteCount" | "thumb" | "summary" | "reviewed" | "nextFocus" | "focusCheck"> {

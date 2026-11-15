@@ -78,7 +78,10 @@ const GB = 1024 ** 3;
 const plural = (n: number, one: string, many = `${one}s`) => `${n} ${n === 1 ? one : many}`;
 const shortCode = (code: string) => (code.length > 18 ? `${code.slice(0, 10)}…${code.slice(-6)}` : code);
 
-/** What lowering the size limit would delete, the way the recorder does it: oldest first, kept games never. */
+/**
+ * What lowering the size limit would delete, the way the recorder does it: oldest first, a
+ * game's video (its stats stay) or the whole of a screen recording, kept ones never.
+ */
 function overLimit(matches: MatchSummary[], gb: number): { count: number; bytes: number } {
   const cap = gb * GB;
   let total = matches.reduce((s, m) => s + m.sizeBytes, 0);
@@ -87,8 +90,10 @@ function overLimit(matches: MatchSummary[], gb: number): { count: number; bytes:
   for (const m of [...matches].sort((a, b) => a.startedEpochMs - b.startedEpochMs)) {
     if (total <= cap) break;
     if (m.keep) continue;
-    total -= m.sizeBytes;
-    freed += m.sizeBytes;
+    const gain = m.mode === "manual" && !m.game?.me ? m.sizeBytes : (m.videoBytes ?? m.sizeBytes);
+    if (gain <= 0) continue;
+    total -= gain;
+    freed += gain;
     count++;
   }
   return { count, bytes: freed };
@@ -601,8 +606,8 @@ export function SettingsPage({ settings, onSave, matches }: { settings: Settings
         title: `Lower the limit to ${gb} GB?`,
         body: (
           <p>
-            After your next game, Rewatch deletes your oldest games until the folder fits: about <b>{plural(doomed.count, "game")}</b>, {bytes(doomed.bytes)}. Games you keep are never
-            deleted.
+            After your next game, Rewatch deletes the videos of your oldest games until the folder fits: about <b>{plural(doomed.count, "video")}</b>, {bytes(doomed.bytes)}.
+            Their stats, notes and LP stay in your library and Trends. Games you keep are never touched.
           </p>
         ),
         confirm: "Lower the limit",
@@ -819,7 +824,7 @@ export function SettingsPage({ settings, onSave, matches }: { settings: Settings
             <Opt
               id="opt-quota"
               title="Size limit"
-              hint={`Past this, the oldest games go first. Kept games never do. 0 means no limit. Recordings use ${bytes(used)} now.`}
+              hint={`Past this, the videos of the oldest games are deleted first; their stats stay. Kept games are never touched. 0 means no limit. Recordings use ${bytes(used)} now.`}
             >
               <Field key={quotaKey} className="num quota" type="number" min={0} inputMode="numeric" value={String(s.quotaGb)} aria-label="Size limit in GB" onCommit={commitQuota} />
               <span className="muted">GB</span>

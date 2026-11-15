@@ -32,6 +32,8 @@ export const api = {
   getMatch: (id: string) => call<MatchFull>("get_match", { id }),
   saveReview: (id: string, review: Review) => call<void>("save_review", { id, review }),
   deleteMatch: (id: string) => call<void>("delete_match", { id }),
+  /** Delete a game's video and sound and keep its stats. Returns the bytes freed. */
+  deleteVideo: (id: string) => call<number>("delete_video", { id }),
   startManualRecording: () => call<void>("start_manual_recording"),
   stopRecording: () => call<string | null>("stop_recording"),
   exportClip: (id: string, start: number, end: number, tracks: TrackName[], maxMb?: number | null) =>

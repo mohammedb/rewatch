@@ -56,6 +56,10 @@ export default function App() {
   const [declined, setDeclined] = useState<string[]>([]);
   /** Games deleted a moment ago, hidden while their "Undo" is still offered. */
   const [hidden, setHidden] = useState<string[]>([]);
+  const hiddenRef = useRef(hidden);
+  hiddenRef.current = hidden;
+  /** Games whose video was deleted a moment ago, shown without it while their "Undo" is still offered. */
+  const [videoGone, setVideoGone] = useState<string[]>([]);
   /** The recording being watched together right now, if any. */
   const [session, setSession] = useState<string | null>(null);
   const [updOpen, setUpdOpen] = useState(false);
@@ -111,7 +115,15 @@ export default function App() {
     refreshMatches();
   };
 
-  const matches = useMemo(() => (allMatches ? allMatches.filter((m) => !hidden.includes(m.id)) : null), [allMatches, hidden]);
+  const matches = useMemo(
+    () =>
+      allMatches
+        ? allMatches
+            .filter((m) => !hidden.includes(m.id))
+            .map((m) => (videoGone.includes(m.id) && m.hasVideo !== false ? { ...m, hasVideo: false, videoBytes: 0, sizeBytes: m.sizeBytes - (m.videoBytes ?? 0), videoDeletedBy: "you" as const } : m))
+        : null,
+    [allMatches, hidden, videoGone],
+  );
   const recording = status?.state === "recording" || status?.state === "starting";
   const saving = status?.state === "finalizing";
   const stop = async () => {
@@ -166,7 +178,55 @@ export default function App() {
       const next = h.filter((x) => allMatches.some((m) => m.id === x));
       return next.length === h.length ? h : next;
     });
+    // Once the list itself has a game without its video, it no longer needs marking here.
+    setVideoGone((g) => {
+      const next = g.filter((x) => allMatches.some((m) => m.id === x && m.hasVideo !== false));
+      return next.length === g.length ? g : next;
+    });
   }, [allMatches]);
+
+  /** Delete games' videos after a few seconds, unless "Undo" is pressed first. Their stats, notes and LP stay. */
+  const removeVideos = useCallback(
+    (ids: string[], what?: string) => {
+      if (!ids.length) return;
+      setVideoGone((g) => [...g, ...ids]);
+      let undone = false;
+      toast.show({
+        text: what ? `Deleted the video of ${what}` : ids.length === 1 ? "Deleted the video" : `Deleted ${ids.length} videos`,
+        detail: ids.length === 1 ? "The game's stats, notes and LP stay." : "The games' stats, notes and LP stay.",
+        kind: "info",
+        ms: 7000,
+        actions: [
+          {
+            label: "Undo",
+            run: () => {
+              undone = true;
+              setVideoGone((g) => g.filter((x) => !ids.includes(x)));
+            },
+          },
+        ],
+        onClose: async () => {
+          if (undone) return;
+          const back: string[] = [];
+          for (const id of ids) {
+            // Being deleted whole right now, video and all; if that is undone, the video is still there.
+            if (hiddenRef.current.includes(id)) {
+              back.push(id);
+              continue;
+            }
+            await api.deleteVideo(id).catch((e) => {
+              back.push(id);
+              toast.show({ kind: "error", text: `Could not delete a video. ${humanError(e)}` });
+            });
+          }
+          // A video that is still there shows again; the rest stay marked until the list has them without.
+          if (back.length) setVideoGone((g) => g.filter((x) => !back.includes(x)));
+          refreshMatches();
+        },
+      });
+    },
+    [toast, refreshMatches],
+  );
 
   /** The walk-through moved on to another game, or ended. Stable, so the player doesn't redo its work on every redraw. */
   const onPlaylist = useCallback((p: Playlist | null) => {
@@ -398,6 +458,8 @@ export default function App() {
               setView({ name: "library" });
               removeGames([id], what);
             }}
+            videoGone={videoGone.includes(view.id)}
+            onDeleteVideo={(id, what) => removeVideos([id], what)}
             onReviewed={refreshMatches}
             onBack={() => {
               setView({ name: "library" });
@@ -422,6 +484,7 @@ export default function App() {
             onRecord={startManual}
             onSaveSettings={saveSettings}
             onDelete={removeGames}
+            onDeleteVideo={removeVideos}
             onChanged={refreshMatches}
             onSettings={() => goTo("settings")}
           />

@@ -383,7 +383,8 @@ function TeamTable({
 }
 
 /** Both teams in full, over the video: the post-game screen, with what Riot's record adds. */
-export function MatchBoard({ match, titles, onClose }: { match: MatchFull; titles: Map<string, PlayerTitle>; onClose: () => void }) {
+/** Both teams in full. Over the video with a close button, or in the page when there is no `onClose` (a game without its video). */
+export function MatchBoard({ match, titles, onClose }: { match: MatchFull; titles: Map<string, PlayerTitle>; onClose?: () => void }) {
   const { rows, myTeam, teams } = useBoard(match, titles);
   const pg = match.postgame ?? null;
   const len = pg?.duration ?? match.game?.length ?? match.duration;
@@ -394,7 +395,7 @@ export function MatchBoard({ match, titles, onClose }: { match: MatchFull; title
   const queue = match.game?.queueName || (match.rank ? queueLabel(match.rank.queue) : "") || pg?.mode || "Game";
   const date = new Date(match.startedEpochMs).toLocaleString([], { weekday: "short", day: "numeric", month: "short", hour: "2-digit", minute: "2-digit" });
   return (
-    <div className="mb" role="region" aria-label="Scoreboard">
+    <div className={`mb ${onClose ? "" : "inline"}`} role="region" aria-label="Scoreboard">
       <header className={`mb-h ${res}`}>
         <div className="mb-res">{RES_WORD[res] || "Game over"}</div>
         <div className="mb-meta">
@@ -416,9 +417,11 @@ export function MatchBoard({ match, titles, onClose }: { match: MatchFull; title
           </div>
         )}
         <span className="grow" />
-        <button className="btn sq quiet" onClick={onClose} aria-label="Close the scoreboard" title="Close (Esc or O)">
-          <X size={18} />
-        </button>
+        {onClose && (
+          <button className="btn sq quiet" onClick={onClose} aria-label="Close the scoreboard" title="Close (Esc or O)">
+            <X size={18} />
+          </button>
+        )}
       </header>
       {teams.map((team) => (
         <TeamTable

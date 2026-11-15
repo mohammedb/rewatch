@@ -796,6 +796,15 @@ fn delete_match(app: AppHandle, state: State<AppState>, id: String) -> CmdResult
     Ok(())
 }
 
+/// Delete a game's video and sound and keep its stats, notes and Riot's record.
+#[tauri::command(async)]
+fn delete_video(app: AppHandle, state: State<AppState>, id: String) -> CmdResult<u64> {
+    let s = state.settings.lock().unwrap().clone();
+    let freed = library::delete_video(&s, &id).map_err(err)?;
+    let _ = app.emit("library-changed", ());
+    Ok(freed)
+}
+
 #[tauri::command(async)]
 fn start_manual_recording(app: AppHandle) -> CmdResult<()> {
     start_session(&app, None, liveclient::ClientInfo::default())
@@ -1136,6 +1145,7 @@ pub fn run() {
             get_match,
             save_review,
             delete_match,
+            delete_video,
             start_manual_recording,
             stop_recording,
             add_bookmark,

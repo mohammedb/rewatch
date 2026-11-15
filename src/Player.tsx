@@ -1,6 +1,6 @@
 import {
   ArrowLeft, Bookmark, Circle, Download, Eraser, FolderOpen, Grid2x2, HardDriveDownload, ImageDown, LayoutGrid, LayoutPanelLeft, Maximize2, MoreHorizontal, MoveUpRight,
-  PanelRightClose, PanelRightOpen, Pause, Pencil, Play, Presentation, Scissors, SkipBack, SkipForward, Skull, Star, Swords, Table2, Trash2, Undo2, Users, Volume2, Wand2, X,
+  PanelRightClose, PanelRightOpen, Pause, Pencil, Play, Presentation, Scissors, SkipBack, SkipForward, Skull, Star, Swords, Table2, Trash2, Undo2, Users, VideoOff, Volume2, Wand2, X,
   type LucideIcon,
 } from "lucide-react";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
@@ -195,6 +195,10 @@ interface PlayerProps {
   onJoin?: () => void;
   /** Delete this recording (the app offers an undo). */
   onDelete?: (id: string, what: string) => void;
+  /** Delete this game's video and keep its stats (the app offers an undo). */
+  onDeleteVideo?: (id: string, what: string) => void;
+  /** The video is being deleted, with the undo still on offer: show the game without it. */
+  videoGone?: boolean;
   /** The review was marked done or reopened. */
   onReviewed?: () => void;
   /** Open straight into a walk-through of this game's deaths. */
@@ -212,7 +216,7 @@ function otherGame(p: Playlist): { index: number; back: boolean } | null {
   return end < p.items.length ? { index: end, back: false } : null;
 }
 
-export function Player({ id, onBack, friends, matches, joinTogether, onTogether, hintsOn, peers = [], playlist, onPlaylist, onDelete, onReviewed, start }: PlayerProps) {
+export function Player({ id, onBack, friends, matches, joinTogether, onTogether, hintsOn, peers = [], playlist, onPlaylist, onDelete, onDeleteVideo, videoGone, onReviewed, start }: PlayerProps) {
   const toast = useToast();
   const [match, setMatch] = useState<MatchFull | null>(null);
   const [loadError, setLoadError] = useState<string | null>(null);
@@ -315,6 +319,8 @@ export function Player({ id, onBack, friends, matches, joinTogether, onTogether,
   listenRef.current = listen;
   const playlistRef = useRef(playlist);
   playlistRef.current = playlist;
+  const goneRef = useRef(videoGone);
+  goneRef.current = videoGone;
   /** This game can't be a stop of the walk-through: go on to the next game in it (or back, the way it came), or end it. */
   const leaveStop = (p: Playlist, why: string) => {
     const next = otherGame(p);
@@ -369,6 +375,8 @@ export function Player({ id, onBack, friends, matches, joinTogether, onTogether,
         if (!live) return;
         setMatch(m);
         setReview(m.review ?? { keep: false, notes: [], drawings: [] });
+        // Its video was deleted: the stats are all there is.
+        const novid = m.hasVideo === false || !!goneRef.current;
         if (m.mouse && !m.trimmedToHighlights) {
           fetch(fileUrl(m.dir, m.mouse.file))
             .then((r) => r.text())
@@ -382,12 +390,14 @@ export function Player({ id, onBack, friends, matches, joinTogether, onTogether,
             .catch(() => setKeys(null));
         }
         // A game trimmed to its highlight reel no longer lines up with teammates' views.
-        if (!m.trimmedToHighlights) api.povList(id).then(setPovs).catch(() => setPovs([]));
+        if (!m.trimmedToHighlights && !novid) api.povList(id).then(setPovs).catch(() => setPovs([]));
         // A screen recording has nothing to review: start on its moments.
         if (m.mode === "manual") setTab("moments");
         // Opened as one stop of a walk-through across games: go straight to it.
         const p = playlistRef.current;
-        if (p && p.items[p.index]?.matchId === m.id && m.trimmedToHighlights) {
+        if (p && p.items[p.index]?.matchId === m.id && novid) {
+          leaveStop(p, "has no video any more");
+        } else if (p && p.items[p.index]?.matchId === m.id && m.trimmedToHighlights) {
           // The stops' times are in the full recording, which is gone.
           leaveStop(p, "was trimmed to its highlights");
         } else if (p && p.items[p.index]?.matchId === m.id) {
@@ -400,7 +410,7 @@ export function Player({ id, onBack, friends, matches, joinTogether, onTogether,
           const idx = p.index - base;
           pendingRef.current = { t: items[idx].start, play: true };
           setQueue({ title: p.title, items, idx, across: { base, total: p.items.length, go: (index) => onPlaylist?.({ ...p, index, back: index < p.index, skipped: 0 }) } });
-        } else if (start === "deaths" && !m.trimmedToHighlights) {
+        } else if (start === "deaths" && !m.trimmedToHighlights && !novid) {
           // Opened from "Watch your deaths": play the run-up to each one.
           const items = deathItems(m.events);
           if (items.length) {
@@ -564,7 +574,7 @@ export function Player({ id, onBack, friends, matches, joinTogether, onTogether,
     setHighlights(match.highlights ?? []);
     setMyTeam(match.team ?? []);
     if (match.voice) setVoice(match.voice);
-    else if (!match.trimmedToHighlights && match.tracks.some((t) => t.name !== "game")) api.voice(match.id).then(setVoice).catch(() => {});
+    else if (!match.trimmedToHighlights && match.hasVideo !== false && match.tracks.some((t) => t.name !== "game")) api.voice(match.id).then(setVoice).catch(() => {});
   }, [match]);
 
   // ---- follow the saving of teammates' views, and refresh the list when one lands
@@ -1309,6 +1319,187 @@ export function Player({ id, onBack, friends, matches, joinTogether, onTogether,
     api.saveReview(match.id, next).then(() => onReviewed?.()).catch(() => {});
   };
 
+  const pgMe = match.postgame?.players.find((p) => p.isMe) ?? null;
+  const myScore = pgMe && match.postgame ? (scoresOf(match.postgame).get(pgMe.id) ?? null) : null;
+  const canBoard = match.mode === "game" && !!(match.postgame?.players.length || match.game?.players?.length);
+  /** Who played, how it went, and a line of details, for the top bar. */
+  const pid = (details: (string | null | undefined)[]) => (
+    <div className="pid">
+      {me && <Portrait championKey={me.championKey} name={me.champion} size={36} square level={me.level} />}
+      <div className="pid-t">
+        <div className="pid-l1">
+          <span className="title">{champName}</span>
+          {result && <span className={`res ${result === "Win" ? "ally" : "enemy"}`}>{result === "Win" ? "Victory" : "Defeat"}</span>}
+          {me && <Kda k={me.kills} d={me.deaths} a={me.assists} />}
+          {me && <KdaRatio k={me.kills} d={me.deaths} a={me.assists} />}
+          {myScore && <ScoreBadge s={myScore} size="sm" />}
+          {me && titles.get(me.champion) && (
+            <span className="mytitle" title={titles.get(me.champion)!.why}>
+              {titles.get(me.champion)!.title}
+            </span>
+          )}
+        </div>
+        <div className="pid-l2">{details.filter(Boolean).join(" · ")}</div>
+      </div>
+    </div>
+  );
+  const keepBtn = (
+    <button className={`btn sm ${review.keep ? "on" : ""}`} aria-pressed={review.keep} onClick={() => setReview((r) => ({ ...r, keep: !r.keep }))} title="Kept games are never deleted to make room">
+      <Star size={15} fill={review.keep ? "currentColor" : "none"} aria-hidden />
+      <span className="w">{review.keep ? "Kept" : "Keep"}</span>
+    </button>
+  );
+  const deleteItem = {
+    label: match.mode === "game" ? "Delete the whole game" : "Delete recording",
+    hint: match.mode === "game" ? "The video, stats and notes" : undefined,
+    icon: <Trash2 size={15} />,
+    danger: true,
+    onSelect: () => onDelete?.(match.id, what),
+  };
+  const finalBuild = (pgMe?.items.some((x) => x > 0) || (me && me.items.length > 0)) && (
+    <>
+      <h3 className="sub">Your final build</h3>
+      <div className="finalbuild">
+        <ItemSlots items={pgMe?.items.some((x) => x > 0) ? pgMe.items : me!.items} size={32} />
+      </div>
+    </>
+  );
+  const onFetched = (pg: NonNullable<MatchFull["postgame"]>) => setMatch((m) => (m && m.id === match.id ? { ...m, postgame: pg, postgameNote: null } : m));
+
+  // The library's entry for this game: it knows first when the video was deleted while the game is open.
+  const entry = matches?.find((m) => m.id === match.id);
+  // The video was deleted, or its file is missing: the game's numbers, review and notes, with nothing to play.
+  if (match.hasVideo === false || videoGone || entry?.hasVideo === false) {
+    const deletedAt = match.videoDeletedAt ?? entry?.videoDeletedAt;
+    const deletedBy = match.videoDeletedBy ?? entry?.videoDeletedBy;
+    const on = deletedAt ? new Date(deletedAt).toLocaleDateString([], { day: "numeric", month: "long" }) : "";
+    const why =
+      videoGone && !deletedAt
+        ? "Deleting this game's video."
+        : deletedBy === "limit"
+          ? `The size limit deleted this game's video${on ? ` on ${on}` : ""} to make room.`
+          : deletedAt
+            ? `You deleted this game's video${on ? ` on ${on}` : ""}.`
+            : "This game's video file is missing. It may have been moved or deleted outside Rewatch.";
+    const side = tab === "moments" ? "review" : tab;
+    return (
+      <div className="player novid">
+        <div className="ptop">
+          <button className="btn quiet sq" onClick={onBack} aria-label="Back to games" title="Back to games">
+            <ArrowLeft size={18} />
+          </button>
+          {pid([match.game?.queueName, when(match.startedEpochMs), "No video", bytes(entry?.sizeBytes ?? match.sizeBytes)])}
+          <span className="grow" />
+          {keepBtn}
+          <Menu
+            label="More"
+            items={[
+              { label: "Show in folder", icon: <FolderOpen size={15} />, onSelect: () => showInFolder(`${match.dir}\\match.json`) },
+              ...(canShare(match)
+                ? [{ label: "Copy a picture of the game", hint: "Result, LP, KDA, damage share and where you died, to paste in Discord", icon: <ImageDown size={15} />, onSelect: copyCard }]
+                : []),
+              "-",
+              deleteItem,
+            ]}
+          >
+            <MoreHorizontal size={17} />
+          </Menu>
+        </div>
+        <div className="pbody" style={{ gridTemplateColumns: `minmax(0, 1fr) 8px ${prefs.sideWidth}px` }}>
+          <div className="nv-main">
+            <p className="nv-note">
+              <VideoOff size={16} aria-hidden />
+              <span>
+                {why} Its stats, notes and LP are kept{match.mode === "game" ? ", and it still counts in Trends" : ""}.
+                {deletedBy === "limit" && <small>Keep a game with the star and the size limit leaves its video alone.</small>}
+              </span>
+            </p>
+            {canBoard && <MatchBoard match={match} titles={titles} />}
+          </div>
+          <Splitter label="Width of the side panel" onMove={(x, r) => updatePrefs({ sideWidth: Math.round(Math.min(Math.max(r.right - x, 300), 640)) })} />
+          <aside className="side">
+            <div className="tabs" role="tablist">
+              {(["review", "notes", "players"] as const).map((t) => {
+                const n = t === "notes" ? review.notes.length + teamNotes.length : 0;
+                return (
+                  <button key={t} role="tab" aria-selected={side === t} onClick={() => setTab(t)}>
+                    {t === "review" ? "Review" : t === "notes" ? "Notes" : "Players"}
+                    {n > 0 && <span className="cnt num">{n}</span>}
+                    {t === "review" && !review.reviewedAt && match.mode === "game" && <span className="dot" title="Not reviewed yet" />}
+                  </button>
+                );
+              })}
+            </div>
+            {side === "review" && (
+              <ReviewTab
+                noVideo
+                events={match.events}
+                fights={fights}
+                bookmarks={[]}
+                queue={null}
+                champKey={champKey}
+                onStart={() => {}}
+                insights={insights}
+                coach={coach}
+                hintState="off"
+                hintError={null}
+                onAskHints={() => {}}
+                highlights={[]}
+                savingClips={false}
+                onSaveClips={() => {}}
+                onShowClip={showInFolder}
+                team={teamReviews}
+                teamViews={1}
+                teamBusy={null}
+                onTeamReview={() => {}}
+                stats={match.stats ?? null}
+                players={match.game?.players ?? []}
+                keys={keys}
+                cpm={cpm}
+                duration={duration}
+                gameLength={match.game?.length ?? null}
+                focus={match.mode === "game" ? activeFocus : null}
+                focusCheck={review.focusCheck ?? null}
+                onFocusCheck={setFocusCheck}
+                reviewedAt={review.reviewedAt ?? null}
+                nextFocus={review.nextFocus ?? null}
+                onFinish={match.mode === "game" ? finishReview : undefined}
+                onReopen={reopenReview}
+                usual={usual}
+                postgame={match.postgame ?? null}
+                clockSamples={match.clock}
+                story={match.story ?? null}
+              />
+            )}
+            {side === "notes" && (
+              <NotesPanel
+                noVideo
+                notes={review.notes}
+                drawings={review.drawings}
+                team={extras.map((e) => ({ friend: e.friend, code: e.code, champion: e.champion, championKey: e.championKey, notes: e.notes, drawings: e.drawings }))}
+                me={me}
+                time={0}
+                tags={review.tags ?? []}
+                onTags={(tags) => setReview((r) => ({ ...r, tags }))}
+                onSeek={() => {}}
+                onAdd={addNote}
+                onDelete={deleteNote}
+                onPause={() => {}}
+              />
+            )}
+            {side === "players" && (
+              <div className="sidebody">
+                {match.rank && <RankLine rank={match.rank} />}
+                {finalBuild}
+                <PostGamePanel key={match.id} match={match} onPlay={null} onFetched={onFetched} />
+              </div>
+            )}
+          </aside>
+        </div>
+      </div>
+    );
+  }
+
   const drawH = Math.round((1000 * match.height) / match.width);
   const ratio = `${match.width} / ${match.height}`;
   const videoSrc = fileUrl(match.dir, match.video);
@@ -1335,36 +1526,13 @@ export function Player({ id, onBack, friends, matches, joinTogether, onTogether,
     ...((match.stats || match.postgame?.teamGold) && !trimmed ? [{ key: "graph" as const, label: "Graph", hint: "CS, level, gold leads and more over the game, under the timeline", on: prefs.graph }] : []),
   ];
 
-  const pgMe = match.postgame?.players.find((p) => p.isMe) ?? null;
-  const myScore = pgMe && match.postgame ? (scoresOf(match.postgame).get(pgMe.id) ?? null) : null;
-  const canBoard = match.mode === "game" && !!(match.postgame?.players.length || match.game?.players?.length);
-
   return (
     <div className={`player ${share ? "share" : ""}`}>
       <div className="ptop">
         <button className="btn quiet sq" onClick={onBack} aria-label="Back to games" title="Back to games">
           <ArrowLeft size={18} />
         </button>
-        <div className="pid">
-          {me && <Portrait championKey={me.championKey} name={me.champion} size={36} square level={me.level} />}
-          <div className="pid-t">
-            <div className="pid-l1">
-              <span className="title">{champName}</span>
-              {result && <span className={`res ${result === "Win" ? "ally" : "enemy"}`}>{result === "Win" ? "Victory" : "Defeat"}</span>}
-              {me && <Kda k={me.kills} d={me.deaths} a={me.assists} />}
-              {me && <KdaRatio k={me.kills} d={me.deaths} a={me.assists} />}
-              {myScore && <ScoreBadge s={myScore} size="sm" />}
-              {me && titles.get(me.champion) && (
-                <span className="mytitle" title={titles.get(me.champion)!.why}>
-                  {titles.get(me.champion)!.title}
-                </span>
-              )}
-            </div>
-            <div className="pid-l2">
-              {[match.game?.queueName, trimmed ? "Highlights reel" : null, when(match.startedEpochMs), bytes(match.sizeBytes)].filter(Boolean).join(" · ")}
-            </div>
-          </div>
-        </div>
+        {pid([match.game?.queueName, trimmed ? "Highlights reel" : null, when(match.startedEpochMs), bytes(match.sizeBytes)])}
         <span className="grow" />
         {!together && here.length > 0 && (
           <button className="btn sm presence" onClick={() => setTogether(true)} title="They have this game open. Join to watch in step: pausing and jumping moves you both.">
@@ -1388,10 +1556,7 @@ export function Player({ id, onBack, friends, matches, joinTogether, onTogether,
             <span className="w">{together ? (mates.length ? `With ${mates.join(", ")}` : "Waiting for teammates") : "Watch together"}</span>
           </button>
         )}
-        <button className={`btn sm ${review.keep ? "on" : ""}`} aria-pressed={review.keep} onClick={() => setReview((r) => ({ ...r, keep: !r.keep }))} title="Kept games are never deleted to make room">
-          <Star size={15} fill={review.keep ? "currentColor" : "none"} aria-hidden />
-          <span className="w">{review.keep ? "Kept" : "Keep"}</span>
-        </button>
+        {keepBtn}
         {canBoard && (
           <button className={`btn sm ${board ? "on" : ""}`} aria-pressed={board} onClick={() => setBoard((b) => !b)} title="Both teams in full: score, KDA, damage, gold, vision, runes and items (O)">
             <Table2 size={15} aria-hidden />
@@ -1411,7 +1576,18 @@ export function Player({ id, onBack, friends, matches, joinTogether, onTogether,
               ? [{ label: "Copy a picture of the game", hint: "Result, LP, KDA, damage share and where you died, to paste in Discord", icon: <ImageDown size={15} />, onSelect: copyCard }]
               : []),
             "-",
-            { label: "Delete recording", icon: <Trash2 size={15} />, danger: true, onSelect: () => onDelete?.(match.id, what) },
+            ...(match.mode === "game" && onDeleteVideo
+              ? [
+                  {
+                    label: "Delete the video, keep the stats",
+                    hint: `Frees ${bytes(match.videoBytes ?? match.sizeBytes)}. The game stays in your library and Trends.`,
+                    icon: <VideoOff size={15} />,
+                    danger: true,
+                    onSelect: () => onDeleteVideo?.(match.id, what),
+                  },
+                ]
+              : []),
+            deleteItem,
           ]}
         >
           <MoreHorizontal size={17} />
@@ -1875,20 +2051,13 @@ export function Player({ id, onBack, friends, matches, joinTogether, onTogether,
           {tab === "players" && (
             <div className="sidebody">
               {match.rank && <RankLine rank={match.rank} />}
-              {(pgMe?.items.some((x) => x > 0) || (me && me.items.length > 0)) && (
-                <>
-                  <h3 className="sub">Your final build</h3>
-                  <div className="finalbuild">
-                    <ItemSlots items={pgMe?.items.some((x) => x > 0) ? pgMe.items : me!.items} size={32} />
-                  </div>
-                </>
-              )}
+              {finalBuild}
               <TeamBoard match={match} titles={titles} onOpenFull={canBoard ? () => setBoard(true) : undefined} />
               <PostGamePanel
                 key={match.id}
                 match={match}
                 onPlay={playGame}
-                onFetched={(pg) => setMatch((m) => (m && m.id === match.id ? { ...m, postgame: pg, postgameNote: null } : m))}
+                onFetched={onFetched}
               />
             </div>
           )}

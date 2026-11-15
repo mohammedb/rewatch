@@ -94,7 +94,8 @@ pub struct Settings {
     /// game, and after it the match details, timeline and rank.
     pub use_client_api: bool,
     pub queues: QueueToggles,
-    /// Delete oldest recordings when the folder grows past this. 0 disables the cap.
+    /// Delete the videos of the oldest games (screen recordings whole) when the folder
+    /// grows past this; the games' stats stay. 0 disables the cap.
     pub quota_gb: u64,
     /// Global hotkey that drops a bookmark while recording. Empty disables it.
     pub bookmark_hotkey: String,

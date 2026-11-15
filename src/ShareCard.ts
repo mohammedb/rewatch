@@ -1,11 +1,13 @@
 // A picture of one game to paste in Discord: the result, LP, KDA, damage share and
 // where you died. It is drawn on a canvas from what the app already has. Data Dragon
-// serves its pictures to any page, so a canvas with them on it can still be saved.
+// serves its pictures to any page, so a canvas with them on it can still be saved; the
+// rank emblem comes with the app.
 
 import { dataDragonVersion } from "./ChampIcon";
 import { clock, laneName } from "./format";
 import { BOUNDS } from "./MapView";
 import { queueLabel, standing } from "./Rank";
+import { emblemUrl } from "./Stats";
 import type { MatchFull } from "./types";
 
 const W = 1200;
@@ -59,9 +61,11 @@ export async function shareCardPng(match: MatchFull): Promise<string> {
   const kills = map && pg ? pg.kills.filter((x) => x.killer === pg.me) : [];
 
   const version = await dataDragonVersion();
-  const [portrait, minimap] = await Promise.all([
+  const emblemSrc = emblemUrl(match.rank?.tier);
+  const [portrait, minimap, emblem] = await Promise.all([
     version && championKey ? picture(`https://ddragon.leagueoflegends.com/cdn/${version}/img/champion/${championKey}.png`) : Promise.resolve(null),
     version && map ? picture(`https://ddragon.leagueoflegends.com/cdn/${version}/img/map/map${map}.png`) : Promise.resolve(null),
+    emblemSrc ? picture(emblemSrc) : Promise.resolve(null),
   ]);
   try {
     await Promise.all([document.fonts.load(`700 64px ${DISPLAY}`), document.fonts.load(`600 28px ${SANS}`), document.fonts.load(`400 22px ${SANS}`)]);
@@ -133,6 +137,10 @@ export async function shareCardPng(match: MatchFull): Promise<string> {
       c.fillStyle = delta > 0 ? WIN : delta < 0 ? LOSS : MUTED;
       c.fillText(text, x, y);
       x += c.measureText(text).width + 18;
+    }
+    if (emblem) {
+      c.drawImage(emblem, x, y - 31, 48, 36);
+      x += 48 + 8;
     }
     c.font = `500 24px ${SANS}`;
     c.fillStyle = MUTED;

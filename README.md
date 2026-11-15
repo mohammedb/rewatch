@@ -17,6 +17,11 @@ Games or anyone officially involved in producing or managing Riot Games properti
 Riot Games, and all associated properties are trademarks or registered trademarks of
 Riot Games, Inc.
 
+The rank emblems in `src/assets/ranks` are Riot's, from the ranked emblems download in
+the Riot Developer Portal's League of Legends docs
+(static.developer.riotgames.com/docs/lol/ranked-emblems-latest.zip), cropped to the art
+and made smaller.
+
 Rewatch records the Discord call. Tell the people you play with that calls are being
 recorded.
 
@@ -638,6 +643,38 @@ Trends, a matchup note and the playlist of early deaths. The page logged no erro
 no picture failed to load. The published installer was downloaded by 0.5.0's own
 updater, which accepted its signature. Not checked: the new screens in the app with real
 games, several new games read in one go, and the break notice after real losses.
+
+## Version 0.6.1 (2026-11-15)
+
+**Delete a game's video and keep its stats.** "Delete the video, keep the stats" in the
+player's More menu, and "Delete videos" for the games picked in the library, delete a
+game's video and sound and keep the rest of its folder: the live-game numbers, Riot's
+record of the game, rank and LP, the review, notes, tags, hints and the thumbnail. The
+game stays in the library, marked "No video", and in Trends. Opening it shows its
+scoreboard, review, notes and players with nothing to play, and walk-throughs skip it.
+An undo is offered for a few seconds, as for deleting a game.
+
+- **The size limit** works the same way now: past the limit it deletes the videos of
+  the oldest games instead of the games, and a screen recording (which has no stats)
+  whole. Kept games are never touched.
+- **Riot's rank emblems**: ranks show with Riot's own emblem for the tier instead of
+  the drawn crest, on both scoreboards, the Players tab, the rank card in Trends, "Your
+  last game" in the library and the picture of a game for Discord. The ten emblems come
+  with the app (120 KB together), so they show offline and nothing is fetched for them.
+  A player without a rank gets a plain outline.
+
+Checked: the unit tests (71, two of them new: deleting a video keeps the stats; the size
+limit deletes old videos and keeps their games, passes over kept games and the newest
+one, and removes a screen recording whole), the type check, a full build, and with the
+sample data in a browser: the "No video" marks in the grid and list, "Delete videos" for
+a selection with its undo and after it runs, deleting from the player (undone, and with
+the game left open while it goes through), the game without its video, the size limit's
+texts in Settings and the storage popover, Trends, and every place the emblems show (all
+ten tiers and the outline at each size the app uses, 12 to 56 px tall, on a normal and a
+2x screen, and the picture of a game drawn with the emblem on it). The page logged no
+errors and no picture failed to load. The published installer was downloaded by 0.6.0's
+own updater, which accepted its signature. Not checked: the app itself with real games,
+and a video that another program has open.
 
 ## Not built yet
 

@@ -2,9 +2,10 @@ import { useEffect, useState } from "react";
 import { dataDragonVersion, ItemIcon } from "./ChampIcon";
 import type { PgPlayer, PostGame } from "./types";
 
-// The pieces the tables of numbers are made of: KDA and its ratio, rank crests, item,
+// The pieces the tables of numbers are made of: KDA and its ratio, rank emblems, item,
 // spell and rune slots, and a score for each player's game. Pictures and names come
-// from Riot's public image host (Data Dragon), like the champions'.
+// from Riot's public image host (Data Dragon), like the champions', except the rank
+// emblems, which come with the app.
 
 const DD = "https://ddragon.leagueoflegends.com";
 
@@ -63,23 +64,22 @@ const TIER_COLOR: Record<string, string> = {
 
 export const tierColor = (tier?: string | null) => TIER_COLOR[(tier ?? "").toUpperCase()] ?? "#6f7684";
 
-/** A gem in the tier's colour, crowned from Master up; hollow when unranked. */
+// Riot's ranked emblems, from the Riot Developer Portal's download of them, cropped to
+// the art and made small (src/assets/ranks). They come with the app, so they show
+// offline and nothing is fetched for them.
+const EMBLEMS = import.meta.glob<string>("./assets/ranks/*.webp", { eager: true, query: "?url", import: "default" });
+
+/** The picture of Riot's emblem for a tier; undefined when unranked or unknown. */
+export const emblemUrl = (tier?: string | null): string | undefined => (tier ? EMBLEMS[`./assets/ranks/${tier.toLowerCase()}.webp`] : undefined);
+
+/** Riot's emblem for the tier, `size` tall and a third wider; an empty outline when unranked. */
 export function Crest({ tier, size = 20 }: { tier?: string | null; size?: number }) {
-  const t = (tier ?? "").toUpperCase();
-  const c = tierColor(t);
-  const ranked = t in TIER_COLOR;
-  const apex = t === "MASTER" || t === "GRANDMASTER" || t === "CHALLENGER";
+  const src = emblemUrl(tier);
+  const w = Math.round((size * 4) / 3);
+  if (src) return <img className="crest" src={src} width={w} height={size} alt="" draggable={false} />;
   return (
-    <svg className="crest" width={size} height={size} viewBox="0 0 24 24" aria-hidden>
-      {apex && <path d="M6.2 4.6 8.4 1.2 12 3.6 15.6 1.2 17.8 4.6Z" fill={c} />}
-      <path d="M12 2.6 20.2 7.3v9.4L12 21.4 3.8 16.7V7.3Z" fill={c} fillOpacity={ranked ? 0.18 : 0.05} stroke={c} strokeOpacity={ranked ? 0.95 : 0.55} strokeWidth="1.4" strokeLinejoin="round" />
-      {ranked && (
-        <>
-          <path d="M12 6.4 16.9 9.2v5.6L12 17.6 7.1 14.8V9.2Z" fill={c} />
-          <path d="M12 6.4 16.9 9.2 12 12 7.1 9.2Z" fill="#fff" fillOpacity="0.34" />
-          <path d="M12 12v5.6L7.1 14.8V9.2Z" fill="#000" fillOpacity="0.2" />
-        </>
-      )}
+    <svg className="crest un" width={w} height={size} viewBox="0 0 32 24" aria-hidden>
+      <path d="M3 5.5 10.5 9 16 3.5 21.5 9 29 5.5 25.5 15.5 16 21.5 6.5 15.5Z" fill="none" stroke="currentColor" strokeWidth="1.6" strokeLinejoin="round" />
     </svg>
   );
 }

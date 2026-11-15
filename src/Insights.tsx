@@ -2,7 +2,7 @@
 // numbers of the game as lines, and the lists of deaths and team fights to walk through.
 
 import { ArrowDownWideNarrow, Bookmark, Check, ChevronLeft, ChevronRight, Clapperboard, Crosshair, Film, FolderOpen, MoreHorizontal, Play, Repeat, RotateCcw, Skull, Sparkles, Swords, TrendingDown, TrendingUp, Trophy, Users, X, Zap } from "lucide-react";
-import { useEffect, useMemo, useRef, useState } from "react";
+import { type ReactNode, useEffect, useMemo, useRef, useState } from "react";
 import { api } from "./api";
 import { Portrait } from "./ChampIcon";
 import { clock, gameClockAt, laneName, videoTimeAt } from "./format";
@@ -308,6 +308,8 @@ interface ReviewTabProps {
   postgame?: PostGame | null;
   clockSamples?: [number, number][];
   story?: Story | null;
+  /** The game's video was deleted: its moments are listed with nothing to play. */
+  noVideo?: boolean;
 }
 
 /** Averages over recent games, for context next to this game's numbers. */
@@ -323,6 +325,17 @@ const ANSWERS: { key: FocusCheck["answer"]; label: string }[] = [
   { key: "partly", label: "Partly" },
   { key: "no", label: "Not really" },
 ];
+
+/** A row that plays its moment, or only shows it when the game's video is gone. */
+function MomentRow({ still, className, onClick, children }: { still?: boolean; className: string; onClick: () => void; children: ReactNode }) {
+  return still ? (
+    <div className={`${className} still`}>{children}</div>
+  ) : (
+    <button className={className} onClick={onClick}>
+      {children}
+    </button>
+  );
+}
 
 /** Side-panel tab with the things worth walking through after a game. */
 export function ReviewTab({
@@ -365,6 +378,7 @@ export function ReviewTab({
   postgame,
   clockSamples,
   story,
+  noVideo,
 }: ReviewTabProps) {
   const [focusDraft, setFocusDraft] = useState<string | null>(null);
   const turns = useMemo(() => (postgame && clockSamples ? turnsOf(postgame, clockSamples, fights, events, duration) : []), [postgame, clockSamples, fights, events, duration]);
@@ -456,8 +470,9 @@ export function ReviewTab({
     (keys?.spaceHoldPct !== null && keys?.spaceHoldPct !== undefined);
 
   const watchTime = (items: QueueItem[]) => clock(items.reduce((s, d) => s + (d.end - d.start), 0));
-  const startHere =
-    deaths.length > 0
+  const startHere = noVideo
+    ? null
+    : deaths.length > 0
       ? { label: `Watch your ${deaths.length} ${deaths.length === 1 ? "death" : "deaths"}`, sub: `${watchTime(deaths)} in all`, run: () => onStart("Deaths", deaths, 0) }
       : fightList.length > 0
         ? { label: `Watch the ${fightList.length} team ${fightList.length === 1 ? "fight" : "fights"}`, sub: `${watchTime(fightList)} in all`, run: () => onStart("Fights", fightList, 0) }
@@ -622,7 +637,7 @@ export function ReviewTab({
           </button>
         </div>
       )}
-      {wanted && hintState === "off" && <p className="hint-note">A written review of the game and hints on each death can be switched on in Settings, under AI review.</p>}
+      {wanted && hintState === "off" && !noVideo && <p className="hint-note">A written review of the game and hints on each death can be switched on in Settings, under AI review.</p>}
       {hintError && <p className="down hint-note">{humanError(hintError)}</p>}
       {nothing && !coach && <p className="hint-note">No deaths, team fights or bookmarks in this recording.</p>}
 
@@ -634,7 +649,7 @@ export function ReviewTab({
               Where the game turned{turns.length > 0 && <span className="num">{turns.length}</span>}
             </h3>
             <span className="grow" />
-            {turns.length > 1 && (
+            {turns.length > 1 && !noVideo && (
               <button className="btn sm" onClick={() => onStart("Turns", turnItems, 0)} title="Plays what happened in each of these minutes, then stops so you can think">
                 <Play size={12} fill="currentColor" aria-hidden />
                 Play all
@@ -650,7 +665,7 @@ export function ReviewTab({
             <LeadStrip pg={postgame} turns={turns} samples={clockSamples} duration={duration} />
           </div>
           {turns.map((tn, i) => (
-            <button key={i} className={`moment ${active("Turns", i) ? "now" : ""}`} onClick={() => onStart("Turns", turnItems, i)}>
+            <MomentRow key={i} still={noVideo} className={`moment ${active("Turns", i) ? "now" : ""}`} onClick={() => onStart("Turns", turnItems, i)}>
               <span className="t">{clock(tn.item.t)}</span>
               <span className="pic">
                 <span className={`glyph ${tn.swing > 0 ? "ally" : "enemy"}`} style={{ width: 26, height: 26 }}>
@@ -663,7 +678,7 @@ export function ReviewTab({
                   {tn.what} · the lead was {signedGold(tn.lead)} after
                 </small>
               </span>
-            </button>
+            </MomentRow>
           ))}
           {turns.length === 0 && <p className="hint-note">The team gold lead never moved by 1,500 within a minute you recorded.</p>}
         </section>
@@ -682,10 +697,12 @@ export function ReviewTab({
                 <ArrowDownWideNarrow size={14} />
               </button>
             )}
-            <button className="btn sm" onClick={() => onStart("Deaths", deaths, 0)} title="Plays the 12 seconds before each death, then stops so you can think">
-              <Play size={12} fill="currentColor" aria-hidden />
-              Play all
-            </button>
+            {!noVideo && (
+              <button className="btn sm" onClick={() => onStart("Deaths", deaths, 0)} title="Plays the 12 seconds before each death, then stops so you can think">
+                <Play size={12} fill="currentColor" aria-hidden />
+                Play all
+              </button>
+            )}
           </header>
 
           {deaths.map((d, i) => {
@@ -693,7 +710,7 @@ export function ReviewTab({
             const pre = preFightBits(d.t, e?.killer);
             const lateSumm = keys?.summonerPresses.find((s) => s.t >= d.t - 3.5 && s.t <= d.t + 0.3);
             return (
-              <button key={i} className={`moment ${active("Deaths", i) ? "now" : ""}`} onClick={() => onStart("Deaths", deaths, i)}>
+              <MomentRow key={i} still={noVideo} className={`moment ${active("Deaths", i) ? "now" : ""}`} onClick={() => onStart("Deaths", deaths, i)}>
                 <span className="t">{clock(d.t)}</span>
                 <span className="pic">
                   {e?.killerChamp ? (
@@ -735,7 +752,7 @@ export function ReviewTab({
                     ) : null;
                   })()}
                 </span>
-              </button>
+              </MomentRow>
             );
           })}
         </section>
@@ -748,10 +765,12 @@ export function ReviewTab({
               Team fights<span className="num">{fightList.length}</span>
             </h3>
             <span className="grow" />
-            <button className="btn sm" onClick={() => onStart("Fights", fightList, 0)}>
-              <Play size={12} fill="currentColor" aria-hidden />
-              Play all
-            </button>
+            {!noVideo && (
+              <button className="btn sm" onClick={() => onStart("Fights", fightList, 0)}>
+                <Play size={12} fill="currentColor" aria-hidden />
+                Play all
+              </button>
+            )}
           </header>
           {fights.map((f, i) => {
             const won = f.ours > f.theirs;
@@ -760,7 +779,7 @@ export function ReviewTab({
             const said = team.find((r) => Math.abs(r.t - f.start) < 6);
             return (
               <div key={i}>
-                <button className={`moment ${active("Fights", i) ? "now" : ""}`} onClick={() => onStart("Fights", fightList, i)}>
+                <MomentRow still={noVideo} className={`moment ${active("Fights", i) ? "now" : ""}`} onClick={() => onStart("Fights", fightList, i)}>
                   <span className="t">{clock(f.start)}</span>
                   <span className="pic">
                     <b className={`tally ${even ? "" : won ? "ally" : "enemy"}`}>
@@ -771,7 +790,7 @@ export function ReviewTab({
                     {even ? "Even trade" : won ? "Won" : "Lost"}, {Math.max(1, Math.round(f.end - f.start))} s{f.kills.some((k) => k.role === "death") ? ", you died" : ""}
                     {pre.length > 0 && <small className="prefight">{pre.join(" · ")}</small>}
                   </span>
-                </button>
+                </MomentRow>
                 {said ? (
                   <div className="teamrev">
                     <h4>
