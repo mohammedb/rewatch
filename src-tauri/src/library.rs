@@ -148,6 +148,8 @@ pub fn list(settings: &Settings) -> Vec<Value> {
             o.insert("thumb".into(), if thumb.exists() { json!(thumb.to_string_lossy()) } else { Value::Null });
             let reel = dir.join(crate::highlights::REEL_FILE);
             o.insert("reel".into(), if reel.exists() { json!(reel.to_string_lossy()) } else { Value::Null });
+            // LP won or lost, once Riot has it (see `riot`).
+            o.insert("rank".into(), crate::riot::status(&dir).0);
         }
         out.push(doc);
     }
@@ -176,8 +178,20 @@ pub fn get(settings: &Settings, id: &str) -> Result<Value> {
         o.insert("highlights".into(), json!(highlights));
         let reel = dir.join(crate::highlights::REEL_FILE);
         o.insert("reel".into(), if reel.exists() { json!(reel.to_string_lossy()) } else { Value::Null });
+        // Riot's record of the game, the LP it won or lost, and why the record is
+        // missing if it is (see `riot`).
+        o.insert("postgame".into(), crate::riot::load(&dir).unwrap_or(Value::Null));
+        let (rank, note) = crate::riot::status(&dir);
+        o.insert("rank".into(), rank);
+        o.insert("postgameNote".into(), note);
     }
     Ok(doc)
+}
+
+/// Fetch a game's post-game data from Riot now.
+pub fn postgame_fetch(settings: &Settings, id: &str) -> Result<Value> {
+    let dir = match_dir(settings, id)?;
+    crate::riot::fetch_now(settings, &dir)
 }
 
 /// Ask for hints about the deaths in a recording now (or return what is already there).
@@ -205,14 +219,20 @@ pub fn build_highlight_reel(settings: &Settings, id: &str, stop: &dyn Fn() -> bo
 }
 
 /// When the files a Trends row is made from last changed.
-type TrendStamp = [Option<std::time::SystemTime>; 3];
+type TrendStamp = [Option<std::time::SystemTime>; 5];
 
 /// Trends rows already worked out, by recording folder, with the stamp they were made at.
 static TREND_CACHE: std::sync::Mutex<Option<std::collections::HashMap<PathBuf, (TrendStamp, Value)>>> = std::sync::Mutex::new(None);
 
 fn trend_stamp(dir: &Path) -> TrendStamp {
     let changed = |name: &str| fs::metadata(dir.join(name)).and_then(|m| m.modified()).ok();
-    [changed("match.json"), changed("review.json"), changed(crate::insight::FILE)]
+    [
+        changed("match.json"),
+        changed("review.json"),
+        changed(crate::insight::FILE),
+        changed(crate::riot::FILE),
+        changed(crate::riot::RIOT_FILE),
+    ]
 }
 
 /// Compact cross-game metrics for the library Trends view. Each recording is read once
@@ -338,6 +358,10 @@ pub fn trends(settings: &Settings) -> Vec<Value> {
         let avg_avoidable = (!avoid_vals.is_empty()).then(|| avoid_vals.iter().sum::<f64>() / avoid_vals.len() as f64);
 
         let review = read_review(&dir);
+        // Riot's record: damage share, lane gold, where you died; and the LP.
+        let pg = crate::riot::load(&dir)
+            .map(|pg| crate::riot::trend_extras(&pg, &crate::riot::clock_of(&doc)))
+            .unwrap_or(Value::Null);
         let row = json!({
             "id": id,
             "startedEpochMs": doc.get("startedEpochMs"),
@@ -363,6 +387,8 @@ pub fn trends(settings: &Settings) -> Vec<Value> {
             "focus": review.get("focusCheck").cloned().unwrap_or(Value::Null),
             "deathCauses": death_causes,
             "avgAvoidable": avg_avoidable,
+            "rank": crate::riot::status(&dir).0,
+            "pg": pg,
         });
         cache.insert(dir, (stamp, row.clone()));
         out.push(row);

@@ -1084,3 +1084,147 @@ h3.sub { padding: 14px 6px 6px; margin: 0; font-size: 12px; font-weight: 600; co
 .who { display: grid; }
 .who b { font-weight: 600; }
 .who small { font-size: 12px; color: var(--muted); }
+
+/* LP won or lost: on game cards, rows, the recap and the rank chart. */
+.lp { font-weight: 600; font-variant-numeric: tabular-nums; white-space: nowrap; }
+.lp.up { color: var(--up); }
+.lp.down { color: var(--down); }
+.rankline { display: flex; align-items: center; gap: 6px 8px; flex-wrap: wrap; padding: 8px 6px 4px; font-size: 13px; }
+.rankline svg { color: var(--gold); }
+.rankline .rl-q { color: var(--muted); }
+
+/* A minimap with kills, deaths or players on it. */
+.mapview { position: relative; aspect-ratio: 1; width: 100%; border-radius: var(--radius); background: #0c1612; box-shadow: 0 0 0 1px var(--line); user-select: none; }
+.mapview.plain { background: linear-gradient(135deg, #0f1d17 0%, #0c1612 46%, #10222b 50%, #0c1612 54%, #141a12 100%); }
+.map-img { position: absolute; inset: 0; width: 100%; height: 100%; border-radius: inherit; object-fit: cover; opacity: 0.6; filter: saturate(0.55) brightness(0.85); pointer-events: none; }
+.mdot { position: absolute; z-index: 1; transform: translate(-50%, -50%); width: 18px; height: 18px; display: grid; place-items: center; padding: 0; border: 0; background: none; color: inherit; }
+button.mdot { cursor: pointer; }
+.mdot i { display: block; width: 9px; height: 9px; border-radius: 50%; background: var(--chart-dim); box-shadow: 0 0 0 1.5px rgb(0 0 0 / 0.7); transition: transform var(--fast); }
+.mdot.kill i { background: var(--ally); }
+.mdot.assist i { width: 7px; height: 7px; background: #9bb8f0; opacity: 0.75; }
+.mdot.death i { width: 8px; height: 8px; border-radius: 1.5px; background: var(--enemy); transform: rotate(45deg); }
+.mdot:hover i, .mdot.hot i, .mdot:focus-visible i { transform: scale(1.6); }
+.mdot.death:hover i, .mdot.death.hot i, .mdot.death:focus-visible i { transform: rotate(45deg) scale(1.6); }
+.mdot.hot, .mdot:focus-visible { z-index: 3; }
+.mdot:focus-visible { outline: 2px solid var(--focus); outline-offset: 0; border-radius: 50%; }
+.mdot.pic { width: auto; height: auto; }
+.mdot.pic .portrait { transition: transform var(--fast); }
+.mdot.pic.hot .portrait { transform: scale(1.25); }
+.map-tip { position: absolute; z-index: 4; transform: translate(14px, -50%); display: grid; gap: 2px; min-width: 130px; max-width: 220px; padding: 7px 10px; background: var(--raised); border: 1px solid var(--line-2); border-radius: var(--radius); box-shadow: var(--shadow-pop); pointer-events: none; font-size: 12px; }
+.map-tip.flip { transform: translate(calc(-100% - 14px), -50%); }
+.map-tip.below { transform: translate(14px, -6px); }
+.map-tip.flip.below { transform: translate(calc(-100% - 14px), -6px); }
+.map-tip b { font-weight: 600; }
+.map-tip span { color: var(--soft); }
+.map-tip small { color: var(--muted); font-size: 11px; }
+.map-empty { position: absolute; inset: 0; display: grid; place-items: center; padding: 24px; margin: 0; text-align: center; color: var(--soft); font-size: 12.5px; background: rgb(0 0 0 / 0.35); border-radius: inherit; }
+.map-key { display: flex; flex-wrap: wrap; gap: 6px 14px; padding: 8px 6px 0; font-size: 11.5px; color: var(--muted); }
+.map-key span { display: inline-flex; align-items: center; gap: 6px; }
+.map-key .mk-hint { margin-left: auto; }
+.mk { display: inline-block; width: 8px; height: 8px; border-radius: 50%; }
+.mk.kill { background: var(--ally); }
+.mk.assist { background: #9bb8f0; opacity: 0.75; width: 7px; height: 7px; }
+.mk.death { width: 7px; height: 7px; border-radius: 1.5px; background: var(--enemy); transform: rotate(45deg); }
+.lk { display: inline-block; width: 12px; height: 2px; border-radius: 1px; }
+.lk.lane { background: var(--chart-accent); }
+.lk.team { background: var(--chart-dim); }
+.sw { display: inline-block; width: 8px; height: 8px; border-radius: 2px; }
+
+/* The Players tab: Riot's record of the game. */
+.pg { display: grid; gap: 2px; padding-bottom: 8px; }
+.pg-sec { min-width: 0; padding-bottom: 6px; }
+.pg-h { display: flex; align-items: center; gap: 8px; padding-right: 6px; }
+.pg-h h3.sub { flex: 1; }
+.pg-h .seg { margin-top: 8px; }
+.pg-h .seg button { height: 22px; padding: 0 8px; font-size: 12px; }
+.pg-h .select { margin-top: 8px; }
+.pg-nums, .pg-lane { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 6px; margin: 0; padding: 0 6px; }
+.pg-lane { margin-top: 8px; }
+.pg-nums div, .pg-lane div { background: var(--raised); border-radius: var(--radius-s); padding: 7px 9px; min-width: 0; }
+.pg-nums dt, .pg-lane dt { font-size: 11.5px; color: var(--muted); }
+.pg-nums dd, .pg-lane dd { margin: 0; font-weight: 600; font-variant-numeric: tabular-nums; }
+.pg-nums dd { font-size: 14px; }
+.pg-lane dd { font-size: 12.5px; }
+.cmp { padding: 0 6px 8px; }
+.cmp-cap { display: flex; justify-content: space-between; padding: 4px 0; font-size: 12px; font-weight: 600; }
+.cmp-cap.ally { color: #8db1f5; }
+.cmp-cap.enemy { color: #f2798a; }
+.cmp-cap span { color: var(--muted); font-weight: 500; font-variant-numeric: tabular-nums; }
+.cmp-row { display: grid; grid-template-columns: 22px minmax(0, 74px) minmax(0, 1fr) 44px 30px; align-items: center; gap: 8px; padding: 3px 4px; margin: 0 -4px; border-radius: var(--radius-s); font-size: 12.5px; }
+.cmp-row.me { background: rgb(242 201 76 / 0.07); }
+.cmp-n { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.cmp-bar { height: 6px; border-radius: 3px; background: rgb(255 255 255 / 0.05); overflow: hidden; }
+.cmp-bar i { display: block; height: 100%; border-radius: 3px; background: var(--chart-dim); }
+.cmp-bar i.ally { background: var(--ally); }
+.cmp-bar i.enemy { background: var(--enemy); }
+.cmp-v { text-align: right; font-weight: 600; font-variant-numeric: tabular-nums; }
+.cmp-s { text-align: right; color: var(--muted); font-size: 11.5px; font-variant-numeric: tabular-nums; }
+.pg-sec > .mapview { margin: 0 6px; width: calc(100% - 12px); }
+.pg-min { display: flex; align-items: center; gap: 10px; padding: 8px 6px 0; }
+.pg-min input { flex: 1; min-width: 0; }
+.plot.gold { margin: 0 6px; }
+.plot.still { cursor: default; }
+.plot .grid.zero { stroke: var(--line-2); }
+.plot .gl { fill: none; stroke-width: 2; stroke-linejoin: round; stroke-linecap: round; }
+.plot .gl.lane { stroke: var(--chart-accent); }
+.plot .gl.team { stroke: var(--chart-dim); stroke-width: 1.5; }
+.plot .gh { stroke: var(--panel); stroke-width: 2; }
+.plot .gh.lane { fill: var(--chart-accent); }
+.plot .gh.team { fill: var(--chart-dim); }
+.tt .lk.team { background: var(--chart-dim); }
+.pg-deaths { list-style: none; margin: 0; padding: 0; display: grid; gap: 2px; }
+.pg-death { width: 100%; display: flex; align-items: center; gap: 8px; padding: 6px; border: 0; border-radius: var(--radius-s); background: transparent; color: inherit; cursor: pointer; text-align: left; font-size: 13px; transition: background var(--fast); }
+.pg-death:hover:not(:disabled), .pg-death:focus-visible { background: var(--raised); }
+.pg-death:disabled { cursor: default; }
+.pg-death .t { width: 36px; flex: none; color: var(--muted); font-weight: 500; }
+.pg-death .who { display: block; flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-weight: 600; }
+.pg-death .who small { color: var(--muted); font-weight: 400; font-size: 12px; }
+.pg-death .gold { color: var(--gold); font-size: 12px; }
+.pg-death .go { flex: none; color: var(--soft); opacity: 0; transition: opacity var(--fast); }
+.pg-death:hover .go, .pg-death:focus-visible .go { opacity: 1; }
+.pg-exec { width: 22px; height: 22px; flex: none; border-radius: 50%; background: var(--raised); box-shadow: 0 0 0 1.5px var(--line-2); }
+.recap { display: grid; gap: 5px; padding: 0 6px 8px 50px; }
+.rc-bar { display: flex; gap: 1px; height: 6px; border-radius: 3px; overflow: hidden; }
+.rc-bar i { display: block; min-width: 2px; flex-basis: 0; }
+.rc-bar i.physical, .sw.physical { background: var(--down); }
+.rc-bar i.magic, .sw.magic { background: var(--epic); }
+.rc-bar i.true, .sw.true { background: var(--text); }
+.rc-src { list-style: none; margin: 0; padding: 0; display: grid; gap: 2px; font-size: 12px; }
+.rc-src li { display: grid; grid-template-columns: auto minmax(0, 1fr) auto; align-items: baseline; gap: 8px; }
+.rc-n { font-weight: 500; }
+.rc-h { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--muted); font-size: 11.5px; }
+.rc-dealt { margin: 0; color: var(--muted); font-size: 11.5px; }
+.skillgrid { display: grid; gap: 2px; padding: 0 6px; font-size: 10.5px; }
+.sk-k { display: grid; place-items: center; color: var(--soft); font-weight: 600; }
+.sk-c { display: grid; place-items: center; height: 17px; border-radius: 3px; background: rgb(255 255 255 / 0.04); font-variant-numeric: tabular-nums; }
+.sk-c.on { background: rgb(57 135 229 / 0.4); color: var(--text); font-weight: 600; }
+.sk-c.r { background: rgb(242 201 76 / 0.4); }
+.pg-src { margin: 0; padding: 8px 6px 0; color: var(--muted); font-size: 11.5px; }
+.pg-missing { padding-bottom: 8px; }
+.pg-missing .btn { margin: 0 6px; }
+
+/* Trends: rank over time and where you die. */
+.rankcard .rk-h { display: flex; align-items: center; justify-content: space-between; gap: 8px 12px; flex-wrap: wrap; }
+.rk-now { display: flex; align-items: baseline; gap: 4px 14px; flex-wrap: wrap; font-size: 13px; }
+.rk-now b { font-size: 17px; font-weight: 600; }
+.rk-net { font-weight: 600; font-variant-numeric: tabular-nums; }
+.rk-net.up { color: var(--up); }
+.rk-net.down { color: var(--down); }
+.plot .grid.tier { stroke: var(--line-2); }
+.plot .rk-dot { fill: var(--chart-dim); stroke: var(--panel); stroke-width: 2; }
+.plot .rk-dot.up { fill: var(--up); }
+.plot .rk-dot.down { fill: var(--down); }
+.spots .sp-body { display: grid; grid-template-columns: minmax(0, 420px) minmax(0, 1fr); gap: 20px; align-items: start; }
+@media (max-width: 760px) { .spots .sp-body { grid-template-columns: minmax(0, 1fr); } }
+.sp-side { display: grid; gap: 12px; justify-items: start; align-content: start; min-width: 0; }
+.sp-filters { display: flex; gap: 8px; flex-wrap: wrap; }
+.sp-count { margin: 0; color: var(--soft); font-size: 13px; }
+.sp-count b { color: var(--text); font-size: 15px; }
+.sp-h { margin: 6px 0 0; color: var(--muted); font-size: 12px; font-weight: 600; }
+.sp-top { list-style: none; margin: 0; padding: 0; display: grid; gap: 7px; min-width: 200px; }
+.sp-top li { display: grid; grid-template-columns: 20px minmax(0, 1fr) auto; align-items: center; gap: 8px; font-size: 13px; }
+
+/* Settings: what Riot said about the API key. */
+.keycheck { display: flex; align-items: center; gap: 6px; margin-top: 6px; font-weight: 500; }
+.keycheck.ok { color: var(--up); }
+.keycheck.bad { color: var(--down); }

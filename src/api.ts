@@ -6,7 +6,7 @@ import { listen } from "@tauri-apps/api/event";
 import { open } from "@tauri-apps/plugin-dialog";
 import { revealItemInDir } from "@tauri-apps/plugin-opener";
 import { mock } from "./mock";
-import type { Coach, Environment, Extras, Highlight, TeamReview, Insights, LeagueBackup, MatchFull, MatchSummary, MicInfo, Pov, Review, Settings, ShareInfo, Status, TrackName, TrendMatch, UpdateInfo, Voice, WatchPeer } from "./types";
+import type { Coach, Environment, Extras, Highlight, TeamReview, Insights, LeagueBackup, MatchFull, MatchSummary, MicInfo, PostGame, Pov, Review, Settings, ShareInfo, Status, TrackName, TrendMatch, UpdateInfo, Voice, WatchPeer } from "./types";
 
 export const inApp = "__TAURI_INTERNALS__" in window;
 
@@ -45,6 +45,10 @@ export const api = {
   highlights: (id: string, save: boolean) => call<Highlight[]>("highlights", { id, save }),
   buildHighlightReel: (id: string) => call<string>("build_highlight_reel", { id }),
   libraryTrends: () => call<TrendMatch[]>("library_trends"),
+  /** Fetch a game's post-game data from Riot now. */
+  postgameFetch: (id: string) => call<PostGame>("postgame_fetch", { id }),
+  /** Whether Riot accepts an API key. */
+  riotCheck: (key: string) => call<{ ok: boolean; message: string }>("riot_check", { key }),
   listLeagueBackups: () => call<LeagueBackup[]>("list_league_backups"),
   createLeagueBackup: (label: string) => call<LeagueBackup>("create_league_backup", { label }),
   restoreLeagueBackup: (id: string) => call<LeagueBackup>("restore_league_backup", { id }),

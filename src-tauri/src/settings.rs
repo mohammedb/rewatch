@@ -90,7 +90,8 @@ pub struct Settings {
     pub key_tracking: bool,
     /// Custom key list for the overlay. Empty uses the standard League key set.
     pub key_map: Vec<KeySlot>,
-    /// Read the queue name from the League client's local API (read-only).
+    /// Read from the League client's local API (read-only): the queue name before a
+    /// game, and after it the match details, timeline and rank.
     pub use_client_api: bool,
     pub queues: QueueToggles,
     /// Delete oldest recordings when the folder grows past this. 0 disables the cap.
@@ -129,6 +130,10 @@ pub struct Settings {
     pub ai_review: bool,
     /// The user's own Gemini API key. Stays on this PC; sent only to Google.
     pub gemini_key: String,
+    /// The user's own Riot API key (developer.riotgames.com). With it, post-game data
+    /// comes from Riot's official web API instead of the League client. Stays on this
+    /// PC; sent only to Riot.
+    pub riot_api_key: String,
     pub friends: Vec<Friend>,
 }
 
@@ -167,6 +172,7 @@ impl Default for Settings {
             highlights_only: false,
             ai_review: false,
             gemini_key: String::new(),
+            riot_api_key: String::new(),
             friends: Vec::new(),
         }
     }

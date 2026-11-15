@@ -8,10 +8,12 @@ import type { Playlist } from "./App";
 import { api, fileUrl, onEvent, showInFolder } from "./api";
 import { ItemIcon, Portrait, type Side } from "./ChampIcon";
 import { ClipBar, FILTERS, ShortcutsButton, ShowControl, SoundControl, type Overlay } from "./Deck";
-import { bytes, categorize, clock, describe, gameClockAt, laneName, uid, when } from "./format";
+import { bytes, categorize, clock, describe, gameClockAt, laneName, uid, videoTimeAt, when } from "./format";
 import { eventGlyph } from "./icons";
 import { deathItems, DISCORD_COLOR, fightsOf, type Fight, Lanes, QueueBar, ReviewTab, VOICE_COLORS, type Metric, type Queue, type QueueItem, type Usual, type VoiceRow } from "./Insights";
 import { NotesPanel } from "./Notes";
+import { PostGamePanel } from "./PostGame";
+import { RankLine } from "./Rank";
 import { Timeline, type Marker } from "./Timeline";
 import type { AudioPrefs, Coach, Drawing, Extras, FocusCheck, Friend, Highlight, Insights, MatchFull, MatchSummary, NextFocus, PlayerRow, PlayerTitle, Pov, Review, Shape, TeamReview, Tool, TrackName, Voice, WatchEvent, WatchPeer } from "./types";
 import { humanError, Menu, ownsKeys, Select, Skeleton, useToast } from "./ui";
@@ -516,6 +518,18 @@ export function Player({ id, onBack, friends, matches, joinTogether, onTogether,
       setHintBusy(false);
     }
   }, [id]);
+  // Riot's record of the game and the LP it moved arrive in the background after it.
+  useEffect(
+    () =>
+      onEvent<string>("postgame", (which) => {
+        if (which !== id) return;
+        api
+          .getMatch(id)
+          .then((m) => setMatch((cur) => (cur && cur.id === m.id ? { ...cur, postgame: m.postgame, rank: m.rank, postgameNote: m.postgameNote } : cur)))
+          .catch(() => {});
+      }),
+    [id],
+  );
   // Highlight clips are made in the background a little after a game.
   useEffect(
     () =>
@@ -880,6 +894,17 @@ export function Player({ id, onBack, friends, matches, joinTogether, onTogether,
     if (videoRef.current) videoRef.current.playbackRate = r;
     announce(true);
   };
+  /** Play from a moment of game time, as Riot's record of the game gives it. */
+  const playGame = useMemo(() => {
+    const samples = match?.clock ?? [];
+    if (trimmed || !samples.length) return null;
+    return (g: number) => {
+      const v = videoTimeAt(samples, g);
+      if (v == null) return;
+      seek(v);
+      videoRef.current?.play().catch(() => {});
+    };
+  }, [match?.clock, trimmed, seek]);
   /** Start a walk-through in this game: jump to the stretch and play it. */
   const startQueue = useCallback(
     (title: string, items: QueueItem[], idx: number) => {
@@ -1858,6 +1883,7 @@ export function Player({ id, onBack, friends, matches, joinTogether, onTogether,
 
           {tab === "players" && (
             <div className="sidebody">
+              {match.rank && <RankLine rank={match.rank} />}
               {me && me.items.length > 0 && (
                 <>
                   <h3 className="sub">Your final build</h3>
@@ -1869,6 +1895,12 @@ export function Player({ id, onBack, friends, matches, joinTogether, onTogether,
                 </>
               )}
               {match.game?.players?.length ? <Scoreboard players={match.game.players} titles={titles} /> : <p className="hint-note">No scoreboard for this recording.</p>}
+              <PostGamePanel
+                key={match.id}
+                match={match}
+                onPlay={playGame}
+                onFetched={(pg) => setMatch((m) => (m && m.id === match.id ? { ...m, postgame: pg, postgameNote: null } : m))}
+              />
             </div>
           )}
         </aside>

@@ -1,10 +1,12 @@
-import { ArrowDown, ArrowUp, BarChart3, Crosshair, Loader2, Minus, Play, RotateCcw, Skull, Swords, Table2, Users, X } from "lucide-react";
+import { ArrowDown, ArrowUp, BarChart3, Crosshair, Loader2, MapPin, Minus, Play, RotateCcw, Skull, Swords, Table2, Users, X } from "lucide-react";
 import { useCallback, useEffect, useMemo, useRef, useState, type KeyboardEvent } from "react";
 import { api } from "./api";
 import type { Playlist, PlaylistItem } from "./App";
 import { Portrait } from "./ChampIcon";
-import { dayLabel, laneName, timeOfDay } from "./format";
-import type { FocusCheck, TrendMatch } from "./types";
+import { clock, dayLabel, laneName, timeOfDay } from "./format";
+import { hasMap, MapView, type MapDot } from "./MapView";
+import { LpDelta, RankCard } from "./Rank";
+import type { FocusCheck, TrendMatch, TrendSpot } from "./types";
 import { humanError, Select, Skeleton, useToast, type Option } from "./ui";
 
 interface Props {
@@ -206,13 +208,27 @@ interface Series {
   value: (r: TrendMatch) => number | null;
   fmt: (v: number) => string;
   pct?: boolean;
+  /** Only in games with Riot's record of them: hidden until there are some. */
+  riot?: boolean;
 }
+
+const signedNum = (v: number) => `${v > 0 ? "+" : v < 0 ? "−" : ""}${Math.abs(Math.round(v)).toLocaleString()}`;
 
 const SERIES: Series[] = [
   { key: "dead", label: "Time spent dead", better: "down", value: (r) => r.deadPct ?? null, fmt: (v) => `${Math.round(v)}%`, pct: true },
   { key: "cs10", label: "CS by 10 minutes", better: "up", value: (r) => r.cs10 ?? null, fmt: (v) => `${Math.round(v)}` },
   { key: "cspm", label: "CS per minute", better: "up", value: (r) => r.cs / minutes(r), fmt: (v) => v.toFixed(1) },
   { key: "vision", label: "Vision per minute", better: "up", value: (r) => (r.wards == null ? null : r.wards / minutes(r)), fmt: (v) => v.toFixed(2) },
+  { key: "gold15", label: "Gold lead at 15 minutes", better: "up", value: (r) => r.pg?.gold15 ?? null, fmt: signedNum, riot: true },
+  {
+    key: "dmg",
+    label: "Share of your team's damage",
+    better: "up",
+    value: (r) => (r.pg?.dmgShare == null ? null : r.pg.dmgShare * 100),
+    fmt: (v) => `${Math.round(v)}%`,
+    pct: true,
+    riot: true,
+  },
 ];
 
 /** The average of the last `win` games that have a number, at each game that has one. */
@@ -421,6 +437,149 @@ function TrendChart({
   );
 }
 
+// ------------------------------------------------------------------ where you die
+
+type Phase = "all" | "early" | "mid" | "late";
+const PHASES: { id: Phase; label: string; test: (t: number) => boolean }[] = [
+  { id: "all", label: "Whole game", test: () => true },
+  { id: "early", label: "First 14 min", test: (t) => t < 840 },
+  { id: "mid", label: "14 to 25 min", test: (t) => t >= 840 && t < 1500 },
+  { id: "late", label: "After 25 min", test: (t) => t >= 1500 },
+];
+const MAP_NAMES: Record<number, string> = { 11: "Summoner's Rift", 12: "Howling Abyss" };
+
+function spotWords(s: TrendSpot, deaths: boolean): string {
+  if (deaths) return s.other ? `${s.other} killed you` : "You were executed";
+  return s.other ? `You killed ${s.other}` : "You got a kill";
+}
+
+/** Every kill or death of yours in the games shown, on the map. Each plays that moment. */
+function SpotsCard({ rows, onPlaylist, onSettings }: { rows: TrendMatch[]; onPlaylist: (p: Playlist) => void; onSettings?: () => void }) {
+  const [what, setWhat] = useState<"deaths" | "kills">("deaths");
+  const [phase, setPhase] = useState<Phase>("all");
+  const [mapPick, setMapPick] = useState<number | null>(null);
+  const maps = useMemo(() => {
+    const m = new Map<number, number>();
+    for (const r of rows) if (r.pg && hasMap(r.pg.mapId)) m.set(r.pg.mapId, (m.get(r.pg.mapId) ?? 0) + 1);
+    return [...m.entries()].sort((a, b) => b[1] - a[1]).map(([id]) => id);
+  }, [rows]);
+  const mapId: number | undefined = mapPick != null && maps.includes(mapPick) ? mapPick : maps[0];
+  const deaths = what === "deaths";
+  const spots = useMemo(() => {
+    const test = PHASES.find((p) => p.id === phase)!.test;
+    if (mapId == null) return [];
+    return rows.flatMap((r) => (r.pg && r.pg.mapId === mapId ? (deaths ? r.pg.deaths : r.pg.kills).filter((s) => test(s.t)).map((s) => ({ r, s })) : []));
+  }, [rows, mapId, deaths, phase]);
+  const top = useMemo(() => {
+    const m = new Map<string, { name: string; key: string | null; n: number }>();
+    for (const { s } of spots) {
+      const name = s.other ?? (deaths ? "Executed" : "Unknown");
+      const e = m.get(name) ?? { name, key: s.otherKey, n: 0 };
+      e.n++;
+      m.set(name, e);
+    }
+    return [...m.values()].sort((a, b) => b.n - a.n).slice(0, 5);
+  }, [spots, deaths]);
+
+  const title = deaths ? "Where you die" : "Where you get kills";
+  const item = ({ r, s }: { r: TrendMatch; s: TrendSpot }): PlaylistItem => ({
+    matchId: r.id,
+    t: s.v!,
+    start: Math.max(0, s.v! - 12),
+    end: s.v! + 3,
+    label: `${spotWords(s, deaths)}, ${r.champion}, ${dayLabel(r.startedEpochMs)}`,
+  });
+  const playable = spots.filter((x) => x.s.v != null);
+  const watchAll = () => {
+    // Newest game first, and in the order they happened within each game.
+    const list = [...playable].sort((a, b) => b.r.startedEpochMs - a.r.startedEpochMs || a.s.t - b.s.t);
+    if (list.length) onPlaylist({ title, items: list.map(item), index: 0 });
+  };
+  const dots: MapDot[] = spots.map(({ r, s }, i) => ({
+    key: `${r.id}-${i}`,
+    x: s.x,
+    y: s.y,
+    tone: deaths ? "death" : "kill",
+    label: spotWords(s, deaths),
+    detail: `${r.champion}, ${dayLabel(r.startedEpochMs)}, ${clock(s.t)} into the game`,
+    onPick: s.v != null ? () => onPlaylist({ title, items: [item({ r, s })], index: 0 }) : undefined,
+  }));
+  const games = new Set(spots.map((x) => x.r.id)).size;
+
+  return (
+    <section className="tcard spots">
+      <header className="tc-h">
+        <h2>
+          <MapPin size={15} aria-hidden />
+          {title}
+        </h2>
+        {mapId != null && <p>Your {what} in the games shown, from Riot's record of each game. Pick one to watch it.</p>}
+      </header>
+      {mapId == null ? (
+        <div className="tc-empty">
+          <p>
+            After each game Rewatch reads where every kill happened, from the League client or from Riot with an API key. Once it has some of your games, your deaths show up
+            here on the map, and each one plays.
+          </p>
+          {onSettings && (
+            <button className="btn sm" onClick={onSettings}>
+              Open Settings
+            </button>
+          )}
+        </div>
+      ) : (
+        <div className="sp-body">
+          <MapView
+            mapId={mapId}
+            dots={dots}
+            label={`${title} on ${MAP_NAMES[mapId] ?? "the map"}: ${plural(spots.length, deaths ? "death" : "kill")}`}
+            empty={phase === "all" ? `No ${what} in these games.` : `No ${what} at this point of the game.`}
+          />
+          <div className="sp-side">
+            <div className="seg" role="group" aria-label="Deaths or kills">
+              <button aria-pressed={deaths} onClick={() => setWhat("deaths")}>
+                Deaths
+              </button>
+              <button aria-pressed={!deaths} onClick={() => setWhat("kills")}>
+                Kills
+              </button>
+            </div>
+            <div className="sp-filters">
+              <Select small label="When in the game" value={phase} onChange={setPhase} options={PHASES.map((p) => ({ value: p.id, label: p.label }))} />
+              {maps.length > 1 && (
+                <Select small label="Map" value={mapId} onChange={setMapPick} options={maps.map((m) => ({ value: m, label: MAP_NAMES[m] ?? `Map ${m}` }))} />
+              )}
+            </div>
+            <p className="sp-count">
+              <b className="num">{spots.length}</b> {deaths ? (spots.length === 1 ? "death" : "deaths") : spots.length === 1 ? "kill" : "kills"} in {plural(games, "game")}
+            </p>
+            {playable.length > 0 && (
+              <button className="btn sm" onClick={watchAll}>
+                <Play size={13} aria-hidden />
+                {playable.length === 1 ? "Watch it" : `Watch all ${playable.length}`}
+              </button>
+            )}
+            {top.length > 0 && (
+              <>
+                <h3 className="sp-h">{deaths ? "Who kills you most" : "Who you kill most"}</h3>
+                <ul className="sp-top">
+                  {top.map((e) => (
+                    <li key={e.name}>
+                      <Portrait championKey={e.key ?? undefined} name={e.name} size={20} />
+                      <span>{e.name}</span>
+                      <b className="num">{e.n}</b>
+                    </li>
+                  ))}
+                </ul>
+              </>
+            )}
+          </div>
+        </div>
+      )}
+    </section>
+  );
+}
+
 // ------------------------------------------------------------------ page
 
 export function Trends({ onOpen, onPlaylist, onSettings }: Props) {
@@ -563,7 +722,10 @@ export function Trends({ onOpen, onPlaylist, onSettings }: Props) {
       m.set(k, [...(m.get(k) ?? []), r]);
     }
     return [...m.entries()]
-      .map(([name, rs]) => ({ name, key: rs[0].championKey, t: totals(rs) }))
+      .map(([name, rs]) => {
+        const lp = rs.filter((r) => r.rank?.delta != null);
+        return { name, key: rs[0].championKey, t: totals(rs), lp: lp.length ? lp.reduce((s, r) => s + r.rank!.delta!, 0) : null };
+      })
       .sort((a, b) => b.t.n - a.t.n || (b.t.winRate ?? 0) - (a.t.winRate ?? 0));
   }, [chrono]);
 
@@ -649,6 +811,9 @@ export function Trends({ onOpen, onPlaylist, onSettings }: Props) {
   }
 
   const win = chrono.length > 60 ? 10 : 5;
+  const series = SERIES.filter((s) => !s.riot || chrono.some((r) => s.value(r) != null));
+  const anyLp = chrono.some((r) => r.rank?.delta != null);
+  const anyPg = chrono.some((r) => r.pg?.dmgShare != null);
   const games = allGames ? newest : newest.slice(0, 12);
   const champs = allChamps ? byChamp : byChamp.slice(0, 8);
   const maxCause = causes.items[0]?.deaths ?? 1;
@@ -740,12 +905,15 @@ export function Trends({ onOpen, onPlaylist, onSettings }: Props) {
                 <p className="tr-few">One game so far {rangeInfo.last}. Play another to start a trend line.</p>
               ) : (
                 <div className="charts">
-                  {SERIES.map((s) => (
+                  {series.map((s) => (
                     <TrendChart key={s.key} s={s} games={chrono} win={win} hover={hover} onHover={setHover} onOpen={onOpen} />
                   ))}
                 </div>
               )}
             </section>
+
+            <RankCard rows={chrono} onOpen={onOpen} />
+            <SpotsCard rows={chrono} onPlaylist={onPlaylist} onSettings={onSettings} />
 
             <div className="tr-two">
               <section className="tcard">
@@ -881,6 +1049,7 @@ export function Trends({ onOpen, onPlaylist, onSettings }: Props) {
                         <th className="n">KDA</th>
                         <th className="n">CS/min</th>
                         <th className="n">Dead</th>
+                        {anyLp && <th className="n">LP</th>}
                       </tr>
                     </thead>
                     <tbody>
@@ -897,6 +1066,9 @@ export function Trends({ onOpen, onPlaylist, onSettings }: Props) {
                           <td className="n">{c.t.kda?.toFixed(2) ?? "—"}</td>
                           <td className="n">{c.t.cspm?.toFixed(1) ?? "—"}</td>
                           <td className="n">{c.t.dead != null ? `${Math.round(c.t.dead)}%` : "—"}</td>
+                          {anyLp && (
+                            <td className="n">{c.lp != null ? <span className={`lp ${c.lp > 0 ? "up" : c.lp < 0 ? "down" : ""}`}>{signedNum(c.lp)}</span> : "—"}</td>
+                          )}
                         </tr>
                       ))}
                     </tbody>
@@ -974,6 +1146,8 @@ export function Trends({ onOpen, onPlaylist, onSettings }: Props) {
                       <th className="n">CS by 10</th>
                       <th className="n">Dead</th>
                       <th className="n">Vision/min</th>
+                      {anyPg && <th className="n">Damage share</th>}
+                      {anyLp && <th className="n">LP</th>}
                       <th>Focus</th>
                     </tr>
                   </thead>
@@ -1006,6 +1180,8 @@ export function Trends({ onOpen, onPlaylist, onSettings }: Props) {
                         <td className="n">{r.cs10 ?? "—"}</td>
                         <td className="n">{r.deadPct != null ? `${Math.round(r.deadPct)}%` : "—"}</td>
                         <td className="n">{r.wards != null ? (r.wards / minutes(r)).toFixed(2) : "—"}</td>
+                        {anyPg && <td className="n">{r.pg?.dmgShare != null ? `${Math.round(r.pg.dmgShare * 100)}%` : "—"}</td>}
+                        {anyLp && <td className="n">{r.rank?.delta != null ? <LpDelta rank={r.rank} unit={false} /> : "—"}</td>}
                         <td>{r.focus ? <span className={`fword ${r.focus.answer}`}>{FOCUS_WORD[r.focus.answer]}</span> : <span className="muted">—</span>}</td>
                       </tr>
                     ))}

@@ -51,6 +51,12 @@ fn main() {
     if let Some(dir) = value_of("--coach") {
         std::process::exit(rewatch_lib::cli_coach(dir, value_of("--key-file").unwrap_or_default()));
     }
+    if let Some(dir) = value_of("--postgame") {
+        std::process::exit(rewatch_lib::cli_postgame(dir, value_of("--key-file")));
+    }
+    if args.iter().any(|a| a == "--riot-probe") {
+        std::process::exit(rewatch_lib::cli_riot_probe());
+    }
     if let Some(dir) = value_of("--titles") {
         std::process::exit(rewatch_lib::cli_titles(dir));
     }

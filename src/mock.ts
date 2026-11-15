@@ -1,7 +1,10 @@
 // Sample data so the interface can be worked on in a plain browser. Never used
 // inside the desktop app.
 
-import type { Coach, Extras, GameEvent, Highlight, TeamReview, Insights, LeagueBackup, MatchFull, MatchSummary, PlayerRow, Review, Settings, Stats, Status, TrendMatch, UpdateInfo, Voice, WatchPeer } from "./types";
+import type {
+  Coach, Extras, GameEvent, Highlight, TeamReview, Insights, LeagueBackup, MatchFull, MatchSummary, PgKill, PgPlayer, PlayerRow, PostGame, RankChange, Review, Settings, Stats, Status, TrendMatch,
+  TrendPg, TrendSpot, UpdateInfo, Voice, WatchPeer,
+} from "./types";
 
 const LANE: Record<string, string> = { Rin: "MIDDLE", Vex1: "MIDDLE", Sindre: "JUNGLE", Rook: "JUNGLE", Kaja: "BOTTOM", Lumen: "BOTTOM", Tor: "UTILITY", Peel: "UTILITY", Ida: "TOP", Stone: "TOP" };
 const row = (name: string, champion: string, key: string, team: string, k: number, d: number, a: number, cs: number, isMe = false): PlayerRow => ({
@@ -183,6 +186,8 @@ let watchPeers: WatchPeer[] = [{ code: "kaja", name: "Kaja", playing: false, rat
 
 const now = Date.now();
 const reviews: Record<string, Review> = {};
+/** Games whose record was asked for by hand. */
+const fetched = new Set<string>();
 const matches: MatchSummary[] = SPEC.map(([h, c, result, k, d, a, cs, min, q, tags], i) => {
   const ms = now - h * 3600e3 - (i % 3) * 37 * 60e3;
   const me = { ...players[0], champion: CHAMPS[c][0], championKey: CHAMPS[c][1], kills: k, deaths: d, assists: a, cs };
@@ -223,6 +228,219 @@ watchPeers[0].matchId = matches[0].id;
   matches.splice(4, 0, { ...base(idOf(ms), ms, "Win", players[0]), mode: "manual", game: { result: null } as unknown as MatchSummary["game"], noteCount: 0, summary: { deaths: 0, bookmarks: 0 }, sizeBytes: 0.4 * 1024 ** 3 });
 }
 
+// ---- Riot's record of each game: ranks, damage, gold, and kills on the map.
+
+/** The same numbers every time for the same seed. */
+function seeded(seed: number): () => number {
+  let s = (seed * 2654435761) % 4294967296;
+  return () => {
+    s = (s * 1664525 + 1013904223) % 4294967296;
+    return s / 4294967296;
+  };
+}
+
+const TIERS = ["IRON", "BRONZE", "SILVER", "GOLD", "PLATINUM", "EMERALD", "DIAMOND"];
+const DIVS = ["IV", "III", "II", "I"];
+const standingAt = (ladder: number) => ({ tier: TIERS[Math.floor(ladder / 400)], division: DIVS[Math.floor((ladder % 400) / 100)], lp: ladder % 100 });
+
+// Ranks, oldest game first: Solo/Duo from Gold IV, Flex from Silver I.
+{
+  const ladders: Record<number, { queue: string; ladder: number; wins: number; losses: number }> = {
+    420: { queue: "RANKED_SOLO_5x5", ladder: 1240, wins: 41, losses: 38 },
+    440: { queue: "RANKED_FLEX_SR", ladder: 1130, wins: 12, losses: 10 },
+  };
+  matches
+    .map((x, i) => ({ x, i }))
+    .reverse()
+    .forEach(({ x, i }) => {
+      const q = ladders[x.game?.queueId ?? 0];
+      if (x.mode !== "game" || !q) return;
+      const won = x.game.result === "Win";
+      const before = q.ladder;
+      const delta = won ? 19 + ((i * 7) % 7) : -(16 + ((i * 5) % 5));
+      q.ladder = Math.max(0, q.ladder + delta);
+      if (won) q.wins++;
+      else q.losses++;
+      // One game whose LP could not be told: two games between the reads.
+      const known = i !== 9;
+      const rank: RankChange = {
+        queue: q.queue,
+        ...standingAt(q.ladder),
+        wins: q.wins,
+        losses: q.losses,
+        ladder: q.ladder,
+        delta: known ? delta : null,
+        won,
+        before: known ? standingAt(before) : null,
+      };
+      matches[i] = { ...x, rank };
+    });
+}
+
+const ENEMIES: [string, string][] = [["Zed", "Zed"], ["Vi", "Vi"], ["Kai'Sa", "Kaisa"], ["Nautilus", "Nautilus"], ["Garen", "Garen"]];
+/** Where a mid laner tends to fight on Summoner's Rift: x, y and spread. */
+const HOT: [number, number, number][] = [
+  [7400, 7300, 1200],
+  [5700, 5900, 800],
+  [9200, 9000, 900],
+  [9900, 4500, 900],
+  [4800, 10300, 900],
+  [10600, 7300, 1000],
+  [3900, 7600, 900],
+];
+const spotNear = (rnd: () => number): [number, number] => {
+  const [x, y, r] = HOT[Math.floor(rnd() * HOT.length)];
+  return [Math.round(x + (rnd() * 2 - 1) * r), Math.round(y + (rnd() * 2 - 1) * r)];
+};
+/** Video time for a game time, with the sample clock (video 0 is 10:00 in the game). */
+const videoAt = (t: number) => Math.min(110, Math.max(0, t - 600));
+
+function trendPgFor(i: number, me: PlayerRow, length: number): TrendPg {
+  const rnd = seeded(i + 11);
+  const mins = Math.max(1, length / 60);
+  const spot = (deaths: boolean): TrendSpot => {
+    const t = Math.round(120 + rnd() * (length - 180));
+    const [x, y] = spotNear(rnd);
+    const executed = deaths && rnd() < 0.08;
+    const e = ENEMIES[Math.floor(rnd() * ENEMIES.length)];
+    return { x, y, t, v: videoAt(t), other: executed ? null : e[0], otherKey: executed ? null : e[1] };
+  };
+  const damage = Math.round(14000 + me.kills * 1900 + rnd() * 8000);
+  const gold = Math.round(8000 + me.cs * 22 + me.kills * 300);
+  return {
+    mapId: 11,
+    dmgShare: Math.round((0.21 + rnd() * 0.14) * 1000) / 1000,
+    kp: Math.round((0.45 + rnd() * 0.3) * 1000) / 1000,
+    damage,
+    dpm: Math.round((damage / mins) * 10) / 10,
+    gold,
+    gpm: Math.round((gold / mins) * 10) / 10,
+    vision: Math.round(mins * 0.9),
+    vpm: 0.9,
+    taken: Math.round(16000 + me.deaths * 2200),
+    gold10: Math.round((rnd() - 0.45) * 900),
+    gold15: Math.round((rnd() - 0.42) * 1700),
+    xp10: Math.round((rnd() - 0.45) * 600),
+    csd10: Math.round((rnd() - 0.4) * 18),
+    csd15: Math.round((rnd() - 0.4) * 26),
+    deaths: Array.from({ length: me.deaths }, () => spot(true)).sort((a, b) => a.t - b.t),
+    kills: Array.from({ length: me.kills }, () => spot(false)).sort((a, b) => a.t - b.t),
+  };
+}
+
+/** A whole record of one game, built from its scoreboard. */
+function postgameFor(m: MatchSummary, i: number): PostGame {
+  const rnd = seeded(i + 101);
+  const rows = m.game.players ?? [];
+  const length = m.game.length ?? m.duration;
+  const mins = Math.max(1, length / 60);
+  const myTeamWon = m.game.result === "Win";
+  const players: PgPlayer[] = rows.map((p, j) => {
+    const sup = p.position === "UTILITY";
+    const damage = Math.round((sup ? 7000 : 13000) + p.kills * 1800 + rnd() * 7000);
+    const magic = Math.round(damage * (p.champion === "Ahri" || p.champion === "Nautilus" ? 0.8 : 0.25));
+    const trueDmg = Math.round(damage * 0.06);
+    return {
+      id: j + 1, puuid: `mock-${j}`, name: p.name, tag: "EUW", teamId: p.team === "ORDER" ? 100 : 200, team: p.team === "ORDER" ? "ORDER" : "CHAOS",
+      championId: 0, champion: p.champion, championKey: p.championKey, position: p.position ?? "", win: (p.team === "ORDER") === myTeamWon, isMe: p.isMe,
+      level: 13 + (j % 5), kills: p.kills, deaths: p.deaths, assists: p.assists, cs: p.cs,
+      gold: Math.round(7000 + p.cs * 22 + p.kills * 300 + p.assists * 120), goldSpent: Math.round(6800 + p.cs * 21),
+      damage, physical: damage - magic - trueDmg, magic, true: trueDmg,
+      taken: Math.round(14000 + p.deaths * 2400 + (p.position === "TOP" || p.position === "JUNGLE" ? 9000 : 0) + rnd() * 5000),
+      mitigated: Math.round(9000 + rnd() * 12000), heal: Math.round(2000 + rnd() * 5000), allyHeal: sup ? Math.round(3000 + rnd() * 4000) : Math.round(rnd() * 600),
+      shield: sup ? Math.round(2000 + rnd() * 5000) : 0, objectives: Math.round(4000 + rnd() * 14000), buildings: Math.round(1000 + rnd() * 6000),
+      vision: Math.round(mins * (sup ? 2.2 : 0.8)), wardsPlaced: Math.round(mins * (sup ? 1.1 : 0.35)), wardsKilled: Math.round(mins * 0.15), controlWards: sup ? 6 : 2,
+      cc: Math.round(10 + rnd() * 40), deadSecs: p.deaths * 28, largestMulti: p.kills > 6 ? 2 : 1, firstBlood: false,
+      items: (p.items ?? []).map((it) => it.id), spells: [4, 14],
+      runes: { primary: 8100, secondary: 8300, keystone: 8112, perks: [8112, 8139, 8138, 8135, 8345, 8347], shards: [5008, 5008, 5001] },
+      kp: null, dmgShare: null, skills: p.isMe ? "QWEQQRQEQERWEEWRWW" : "", extra: null,
+    };
+  });
+  for (const p of players) {
+    const mates = players.filter((x) => x.teamId === p.teamId);
+    const kills = mates.reduce((s, x) => s + x.kills, 0);
+    const dmg = mates.reduce((s, x) => s + x.damage, 0);
+    p.kp = kills ? Math.round(((p.kills + p.assists) / kills) * 1000) / 1000 : null;
+    p.dmgShare = dmg ? Math.round((p.damage / dmg) * 1000) / 1000 : null;
+  }
+  const me = players.find((p) => p.isMe)!;
+  me.extra = { soloKills: 2, plates: 3, skillshotsHit: 41, skillshotsDodged: 17, csAt10: 74, controlWardsPlaced: 3, abilityUses: 612, immobilizations: 14, saves: 1, maxCsLead: 18, maxLevelLead: 2, pings: 23 };
+
+  // Every kill: each player's kills, against someone on the other team.
+  const kills: PgKill[] = [];
+  for (const k of players) {
+    const foes = players.filter((x) => x.teamId !== k.teamId);
+    for (let n = 0; n < k.kills; n++) {
+      const t = Math.round((120 + rnd() * (length - 160)) * 10) / 10;
+      const [x, y] = spotNear(rnd);
+      const mates = players.filter((x2) => x2.teamId === k.teamId && x2.id !== k.id);
+      const victim = k.id === me.id || rnd() > 0.2 ? foes[Math.floor(rnd() * foes.length)] : foes[0];
+      kills.push({ t, x, y, killer: k.id, victim: victim.id, assists: mates.filter(() => rnd() < 0.35).map((a) => a.id), bounty: 300, shutdown: rnd() < 0.15 ? 150 : 0, recap: null, dealt: null });
+    }
+  }
+  // My deaths exactly as many as the scoreboard says, with what hit me.
+  const others = kills.filter((k) => k.victim !== me.id);
+  const mine = kills.filter((k) => k.victim === me.id);
+  while (mine.length > me.deaths) others.push({ ...mine.pop()!, victim: players.find((p) => p.teamId === me.teamId && !p.isMe)!.id });
+  const enemies = players.filter((p) => p.teamId !== me.teamId);
+  while (mine.length < me.deaths) {
+    const [x, y] = spotNear(rnd);
+    const killer = enemies[Math.floor(rnd() * enemies.length)];
+    mine.push({ t: Math.round((150 + rnd() * (length - 200)) * 10) / 10, x, y, killer: rnd() < 0.08 ? 0 : killer.id, victim: me.id, assists: rnd() < 0.5 ? [enemies[(enemies.indexOf(killer) + 1) % enemies.length].id] : [], bounty: 300, shutdown: 0, recap: null, dealt: null });
+  }
+  for (const d of mine) {
+    const killer = players.find((p) => p.id === d.killer);
+    const helper = players.find((p) => p.id === d.assists[0]);
+    d.recap = [
+      killer
+        ? { id: killer.id, name: killer.championKey, type: "OTHER", physical: Math.round(400 + rnd() * 900), magic: killer.magic > killer.physical ? Math.round(600 + rnd() * 700) : 0, true: Math.round(rnd() * 200), total: 0, hits: ["Q", "R", "Auto"] }
+        : { id: 0, name: "Turret", type: "TOWER", physical: 1200, magic: 0, true: 0, total: 0, hits: ["Auto"] },
+      ...(helper ? [{ id: helper.id, name: helper.championKey, type: "OTHER", physical: Math.round(rnd() * 400), magic: Math.round(200 + rnd() * 500), true: 0, total: 0, hits: ["E", "Auto"] }] : []),
+    ].map((h) => ({ ...h, total: h.physical + h.magic + h.true }));
+    d.dealt = Math.round(300 + rnd() * 1200);
+  }
+  const all = [...others, ...mine].sort((a, b) => a.t - b.t);
+
+  // Minute by minute.
+  const t = Array.from({ length: Math.floor(length / 60) + 1 }, (_, n) => n * 60);
+  const lanePos: Record<string, [number, number]> = { TOP: [2200, 12600], JUNGLE: [4200, 7800], MIDDLE: [7400, 7300], BOTTOM: [12600, 2300], UTILITY: [12000, 2600] };
+  const frames = {
+    t,
+    players: players.map((p) => {
+      const [lx, ly] = lanePos[p.position] ?? [7400, 7300];
+      const flip = p.teamId === 200;
+      const pos = t.map((_, n) => (n === 0 ? (flip ? [14300, 14400] : [400, 400]) : [lx + (rnd() * 2 - 1) * 1800 + (flip ? 600 : -600), ly + (rnd() * 2 - 1) * 1800 + (flip ? 600 : -600)]));
+      return {
+        id: p.id,
+        gold: t.map((_, n) => Math.round(500 + (p.gold - 500) * (n / (t.length - 1)) ** 1.1)),
+        xp: t.map((_, n) => Math.round(18000 * (n / (t.length - 1)))),
+        cs: t.map((_, n) => Math.round(p.cs * (n / (t.length - 1)))),
+        level: t.map((_, n) => Math.min(18, 1 + Math.floor(n / 2))),
+        x: pos.map((q) => Math.round(Math.min(14500, Math.max(300, q[0])))),
+        y: pos.map((q) => Math.round(Math.min(14500, Math.max(300, q[1])))),
+        damage: null,
+      };
+    }),
+  };
+  const opp = players.find((p) => p.teamId !== me.teamId && p.position === me.position) ?? enemies[0];
+  let g = 0;
+  let tg = 0;
+  const laneGold = t.map((_, n) => (n === 0 ? 0 : (g += Math.round((rnd() - 0.47) * 260))));
+  const teamGold = t.map((_, n) => (n === 0 ? 0 : (tg += Math.round((rnd() - (myTeamWon ? 0.4 : 0.6)) * 900))));
+  const teams = [100, 200].map((id) => ({
+    teamId: id, team: (id === 100 ? "ORDER" : "CHAOS") as "ORDER" | "CHAOS", win: (id === 100) === myTeamWon, bans: [],
+    kills: players.filter((p) => p.teamId === id).reduce((s, p) => s + p.kills, 0),
+    towers: (id === 100) === myTeamWon ? 8 : 3, inhibitors: (id === 100) === myTeamWon ? 1 : 0, dragons: (id === 100) === myTeamWon ? 3 : 1, barons: (id === 100) === myTeamWon ? 1 : 0, heralds: 1, grubs: 3, atakhan: 0,
+  }));
+  return {
+    version: 1, source: "riot", matchId: `EUW1_70${String(1234567 + i)}`, gameId: 701234567 + i, platform: "EUW1", queueId: m.game.queueId ?? 420, mapId: 11, mode: "CLASSIC",
+    patch: "25.22", duration: length, startMs: m.startedEpochMs, me: me.id, teams, players, frames, kills: all,
+    objectives: [{ t: 380, kind: "dragon", sub: "FIRE_DRAGON", lane: "", by: 100, killer: 2, x: 9866, y: 4414 }],
+    lane: { opponent: opp.id, gold: laneGold, xp: laneGold.map((v) => Math.round(v * 0.6)), cs: laneGold.map((v) => Math.round(v / 40)) },
+    teamGold,
+  };
+}
+
 /** Causes for the deaths in a game, as the hints would give them. */
 const causesOf = (i: number, deaths: number) => Array.from({ length: Math.min(deaths, 3) }, (_, j) => ROTATE[(i * 2 + j) % ROTATE.length]);
 function insightsFor(id: string): Insights | null {
@@ -245,7 +463,7 @@ let settings: Settings = {
   micDevice: "", mouseTracking: true, keyTracking: true, keyMap: [], useClientApi: true,
   queues: { rankedSolo: true, rankedFlex: true, normal: true, aram: false, custom: true, other: true },
   quotaGb: 300, bookmarkHotkey: "F8", ffmpegPath: "", leagueDir: "", autoBackupLeague: true,
-  shareWithFriends: true, shareName: "Rin", keepTeammateViews: true, reviewCopies: true, shareNotes: true, notify: true, autoUpdate: true, autoHighlights: true, highlightsOnly: false, aiReview: true, geminiKey: "sample",
+  shareWithFriends: true, shareName: "Rin", keepTeammateViews: true, reviewCopies: true, shareNotes: true, notify: true, autoUpdate: true, autoHighlights: true, highlightsOnly: false, aiReview: true, geminiKey: "sample", riotApiKey: "",
   friends: [
     { name: "Kaja", code: "3f9a1c0b7d2e4a6f8b1c3d5e7f9a0b2c4d6e8f0a1b3c5d7e9f1a2b4c6d8e0f13" },
     { name: "Tor", code: "a81d4e6f0b2c3d5e7f9a1b3c5d7e9f0a2b4c6d8e0f1a3b5c7d9e1f2a4b6c8d0e" },
@@ -276,7 +494,13 @@ export async function mock<T>(cmd: string, args?: Record<string, unknown>): Prom
         const m = matches.find((x) => x.id === args!.id) ?? matches[0];
         const game = m.mode !== "manual";
         const review = reviews[m.id] ?? { keep: m.keep, notes: [], drawings: [], tags: m.tags ?? [] };
-        const full: MatchFull = { ...m, events: game ? events : [], clock: game ? [[0, 600]] : [], review, stats: game ? stats : null, voice: game ? voice : null, titles: game ? builtInTitles : [], highlights: game ? highlights : [], team: [] };
+        const gi = matches.filter((x) => x.mode === "game").indexOf(m);
+        const waiting = gi === 1 && !fetched.has(m.id);
+        const full: MatchFull = {
+          ...m, events: game ? events : [], clock: game ? [[0, 600]] : [], review, stats: game ? stats : null, voice: game ? voice : null, titles: game ? builtInTitles : [], highlights: game ? highlights : [], team: [],
+          postgame: game && !waiting ? postgameFor(m, gi) : null,
+          postgameNote: waiting ? "Riot has not published this game yet." : null,
+        };
         return full;
       }
       case "save_review": {
@@ -326,9 +550,22 @@ export async function mock<T>(cmd: string, args?: Record<string, unknown>): Prom
             focus: r?.focusCheck ?? null,
             deathCauses: causes,
             avgAvoidable: causes.length ? 0.45 + wob * 0.4 : null,
+            rank: m.rank ?? null,
+            pg: idx === 1 && !fetched.has(m.id) ? null : trendPgFor(idx, me, len),
           };
         });
         return list;
+      }
+      case "postgame_fetch": {
+        const m = matches.find((x) => x.id === args!.id) ?? matches[0];
+        fetched.add(m.id);
+        return postgameFor(m, matches.filter((x) => x.mode === "game").indexOf(m));
+      }
+      case "riot_check": {
+        const key = String(args?.key ?? "");
+        return key.startsWith("RGAPI-")
+          ? { ok: true, message: "Riot accepted the key." }
+          : { ok: false, message: "Riot refused this key. A development key stops working 24 hours after it was made; make a new one at developer.riotgames.com." };
       }
       case "list_league_backups": return backups;
       case "create_league_backup": {

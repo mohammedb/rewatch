@@ -4,6 +4,7 @@ import { absoluteFileUrl, api, fileUrl, pickFolder } from "./api";
 import { ItemIcon, Portrait } from "./ChampIcon";
 import { ago, bytes, clock, dayLabel, timeOfDay, toReview } from "./format";
 import { Logo } from "./icons";
+import { LpDelta, queueLabel, standing } from "./Rank";
 import type { Environment, MatchSummary, NextFocus, Review, Settings } from "./types";
 import { humanError, ownsKeys, Popover, Select, Skeleton, useToast } from "./ui";
 
@@ -328,6 +329,7 @@ function Recap({ m, focus, onOpen }: { m: MatchSummary; focus: NextFocus | null;
           <Portrait championKey={me.championKey} name={me.champion} size={36} />
           <h2>{me.champion}</h2>
           {res && <span className={`res ${res}`}>{res === "win" ? "Victory" : "Defeat"}</span>}
+          <LpDelta rank={m.rank} />
         </div>
         <dl className="rh-stats">
           <div>
@@ -344,6 +346,12 @@ function Recap({ m, focus, onOpen }: { m: MatchSummary; focus: NextFocus | null;
             <dt>Game</dt>
             <dd className="num">{clock(m.game?.length ?? m.duration)}</dd>
           </div>
+          {m.rank?.tier && (
+            <div>
+              <dt>{queueLabel(m.rank.queue)}</dt>
+              <dd className="num">{standing(m.rank)}</dd>
+            </div>
+          )}
         </dl>
         {focus && (
           <p className="rh-focus">
@@ -696,6 +704,8 @@ export function Games({ matches, settings, busy, onOpen, onRecord, onSaveSetting
                               </span>
                               <span className="meta">
                                 {res && <b className={res === "win" ? "ally" : "enemy"}>{res === "win" ? "Victory" : "Defeat"}</b>}
+                                {m.rank?.delta != null && " "}
+                                <LpDelta rank={m.rank} />
                                 {res && " · "}
                                 {queueName(m)} · {timeOfDay(m.startedEpochMs)}
                               </span>
@@ -745,7 +755,11 @@ export function Games({ matches, settings, busy, onOpen, onRecord, onSaveSetting
                                 {champName(m)}
                                 {pending.has(m.id) && <i className="todo" title="Not reviewed yet" />}
                               </b>
-                              <small>{queueName(m)}</small>
+                              <small>
+                                {queueName(m)}
+                                {m.rank?.delta != null && " · "}
+                                <LpDelta rank={m.rank} />
+                              </small>
                             </span>
                             <span className={`lres ${res}`}>{res === "win" ? "Victory" : res === "lose" ? "Defeat" : ""}</span>
                             <span className="kda num">{me ? `${me.kills} / ${me.deaths} / ${me.assists}` : ""}</span>

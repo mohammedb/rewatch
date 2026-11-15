@@ -14,6 +14,7 @@ mod settings;
 mod team;
 mod titles;
 mod pov;
+mod riot;
 mod update;
 mod video;
 mod voice;
@@ -250,9 +251,11 @@ fn start_session(app: &AppHandle, game_pid: Option<u32>, client: liveclient::Cli
     emit_status(app);
     let settings = st.settings.lock().unwrap().clone();
     let result = Session::start(&settings, game_pid, client);
+    let mut started: Option<(std::path::PathBuf, Option<i64>)> = None;
     let mut status = st.status.lock().unwrap();
     let out = match result {
         Ok(session) => {
+            started = Some((session.dir.clone(), session.meta.game_id));
             status.state = "recording".into();
             status.mode = Some(session.meta.mode.clone());
             status.started_epoch_ms = Some(session.meta.started_epoch_ms);
@@ -275,6 +278,11 @@ fn start_session(app: &AppHandle, game_pid: Option<u32>, client: liveclient::Cli
     };
     drop(status);
     emit_status(app);
+    if let (Some((dir, game_id)), Some(_)) = (started, game_pid) {
+        // Who is playing and their rank, read once while the game loads.
+        let settings = settings.clone();
+        std::thread::spawn(move || riot::at_game_start(&settings, &dir, game_id));
+    }
     match &out {
         Ok(what) => {
             set_tray_tip(app, &format!("Rewatch: recording {what}"));
@@ -616,6 +624,25 @@ fn build_highlight_reel(app: AppHandle, state: State<AppState>, id: String) -> C
     let path = library::build_highlight_reel(&s, &id, &move || !quiet(&handle)).map_err(err)?;
     let _ = app.emit("library-changed", ());
     Ok(path)
+}
+
+/// Fetch a game's post-game data (match details, timeline) now, instead of waiting
+/// for the background job.
+#[tauri::command(async)]
+fn postgame_fetch(app: AppHandle, state: State<AppState>, id: String) -> CmdResult<Value> {
+    let s = state.settings.lock().unwrap().clone();
+    if !quiet(&app) {
+        return Err("Not while a game is running. Try again afterwards.".into());
+    }
+    let pg = library::postgame_fetch(&s, &id).map_err(err)?;
+    let _ = app.emit("library-changed", ());
+    Ok(pg)
+}
+
+/// Whether Riot accepts an API key.
+#[tauri::command(async)]
+fn riot_check(key: String) -> Value {
+    riot::check_key(&key)
 }
 
 #[tauri::command(async)]
@@ -974,6 +1001,28 @@ pub fn run() {
                 });
             }
             {
+                // Post-game data from Riot (match details, timeline, LP) for new games,
+                // and older ones that do not have it yet. Only while nothing is played.
+                let handle = handle.clone();
+                std::thread::spawn(move || {
+                    std::thread::sleep(Duration::from_secs(15));
+                    loop {
+                        let s = handle.state::<AppState>().settings.lock().unwrap().clone();
+                        if quiet(&handle) && (s.use_client_api || !s.riot_api_key.trim().is_empty()) {
+                            let h = handle.clone();
+                            let changed = riot::work(&s, &move || !quiet(&h));
+                            for id in &changed {
+                                let _ = handle.emit("postgame", id);
+                            }
+                            if !changed.is_empty() {
+                                let _ = handle.emit("library-changed", ());
+                            }
+                        }
+                        std::thread::sleep(Duration::from_secs(30));
+                    }
+                });
+            }
+            {
                 // Look for a newer version shortly after start and every six hours. It
                 // installs by itself only while the window is closed and no game is on;
                 // otherwise the window offers it.
@@ -1035,6 +1084,8 @@ pub fn run() {
             highlights,
             build_highlight_reel,
             library_trends,
+            postgame_fetch,
+            riot_check,
             list_league_backups,
             create_league_backup,
             restore_league_backup,
@@ -1401,6 +1452,40 @@ pub fn cli_coach(dir: String, key_file: String) -> i32 {
             1
         }
     }
+}
+
+/// `rewatch --postgame <recording folder> [--key-file <file>]`: fetch that game's
+/// post-game data now, as the app would, and print a summary. For testing.
+pub fn cli_postgame(dir: String, key_file: Option<String>) -> i32 {
+    let mut s = Settings::load();
+    if let Some(file) = key_file {
+        s.riot_api_key = std::fs::read_to_string(&file).unwrap_or_default().trim().to_string();
+    }
+    match riot::fetch_now(&s, std::path::Path::new(&dir)) {
+        Ok(pg) => {
+            println!("source {}  match {}  map {}  {} s", pg["source"], pg["matchId"], pg["mapId"], pg["duration"]);
+            for p in pg["players"].as_array().cloned().unwrap_or_default() {
+                println!(
+                    "{:>2} {:<16} {:<12} {:<8} {}/{}/{}  dmg {:>6} ({})  gold {:>6}  vision {:>3}{}",
+                    p["id"], p["name"].as_str().unwrap_or(""), p["champion"].as_str().unwrap_or(""), p["position"].as_str().unwrap_or(""),
+                    p["kills"], p["deaths"], p["assists"], p["damage"], p["dmgShare"], p["gold"], p["vision"],
+                    if p["isMe"] == json!(true) { "  <- me" } else { "" }
+                );
+            }
+            println!("kills {}  objectives {}  lane {}", pg["kills"].as_array().map(|a| a.len()).unwrap_or(0), pg["objectives"].as_array().map(|a| a.len()).unwrap_or(0), pg["lane"]["opponent"]);
+            0
+        }
+        Err(e) => {
+            println!("RESULT failed: {e}");
+            1
+        }
+    }
+}
+
+/// `rewatch --riot-probe`: what the League client says about the logged-in account.
+pub fn cli_riot_probe() -> i32 {
+    println!("{}", serde_json::to_string_pretty(&riot::probe(&Settings::load())).unwrap_or_default());
+    0
 }
 
 /// `rewatch --titles <recording folder>`: print the built-in title of every player.

@@ -11,7 +11,8 @@ function dataDragonVersion(): Promise<string | null> {
   return versionPromise;
 }
 
-function useVersion(): string | null {
+/** The newest Data Dragon version, once known; null while loading or offline. */
+export function useVersion(): string | null {
   const [v, setV] = useState<string | null>(null);
   useEffect(() => {
     let live = true;

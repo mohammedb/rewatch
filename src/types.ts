@@ -55,6 +55,8 @@ export interface Settings {
   highlightsOnly: boolean;
   aiReview: boolean;
   geminiKey: string;
+  /** The user's own Riot API key: post-game data from Riot's web API instead of the League client. */
+  riotApiKey: string;
   friends: Friend[];
 }
 
@@ -234,6 +236,204 @@ export interface MatchSummary {
   trimmedToHighlights?: boolean;
   reelDuration?: number;
   summary: { deaths: number; bookmarks: number };
+  /** The rank after this game and the LP it won or lost, once Riot has it. */
+  rank?: RankChange | null;
+}
+
+/** One ranked queue's standing after a game, and the LP the game won or lost. */
+export interface RankChange {
+  /** Riot's name for the queue: "RANKED_SOLO_5x5", "RANKED_FLEX_SR"... */
+  queue: string;
+  /** IRON to CHALLENGER; empty while unranked. */
+  tier: string;
+  /** I to IV; empty from Master up. */
+  division: string;
+  lp: number;
+  wins: number;
+  losses: number;
+  provisional?: boolean;
+  /** The standing as one number: 400 a tier, 100 a division, plus LP. */
+  ladder: number | null;
+  /** LP won or lost; null when it could not be told. */
+  delta: number | null;
+  won: boolean | null;
+  before: { tier: string; division: string; lp: number } | null;
+}
+
+/** One player in Riot's record of a game. */
+export interface PgPlayer {
+  /** 1 to 10, Riot's participant id. */
+  id: number;
+  puuid: string;
+  name: string;
+  tag: string;
+  teamId: number;
+  team: "ORDER" | "CHAOS";
+  championId: number;
+  champion: string;
+  championKey: string;
+  position: string;
+  win: boolean;
+  isMe: boolean;
+  level: number;
+  kills: number;
+  deaths: number;
+  assists: number;
+  cs: number;
+  gold: number;
+  goldSpent: number;
+  /** Damage to champions, and its kinds. */
+  damage: number;
+  physical: number;
+  magic: number;
+  true: number;
+  taken: number;
+  mitigated: number;
+  heal: number;
+  allyHeal: number;
+  shield: number;
+  objectives: number;
+  buildings: number;
+  vision: number;
+  wardsPlaced: number;
+  wardsKilled: number;
+  controlWards: number;
+  /** Seconds of crowd control on enemies. */
+  cc: number;
+  deadSecs: number | null;
+  largestMulti: number;
+  firstBlood: boolean;
+  items: number[];
+  spells: number[];
+  runes: { primary: number; secondary: number; keystone: number; perks: number[]; shards: number[] };
+  /** Share of the team's kills taken part in, 0 to 1. */
+  kp: number | null;
+  /** Share of the team's damage to champions, 0 to 1. */
+  dmgShare: number | null;
+  /** Skill order, one letter a level: "QEWQQRQ...". */
+  skills: string;
+  /** Extra numbers only Riot's web API has. */
+  extra: Record<string, number> | null;
+}
+
+/** What one source did to a player in their last seconds. */
+export interface PgRecapHit {
+  id: number;
+  name: string;
+  type: string;
+  physical: number;
+  magic: number;
+  true: number;
+  total: number;
+  /** "Q", "R", "Auto"... biggest first. */
+  hits: string[];
+}
+
+export interface PgKill {
+  /** Game time, seconds. */
+  t: number;
+  x: number;
+  y: number;
+  /** Participant ids; 0 is a turret, minion or monster. */
+  killer: number;
+  victim: number;
+  assists: number[];
+  bounty: number;
+  shutdown: number;
+  /** What killed the victim; only from Riot's web API. */
+  recap: PgRecapHit[] | null;
+  /** Damage the victim dealt in their last seconds. */
+  dealt: number | null;
+}
+
+export interface PgObjective {
+  t: number;
+  kind: string;
+  sub: string;
+  lane: string;
+  /** The team that took it. */
+  by: number;
+  killer: number;
+  x: number;
+  y: number;
+}
+
+export interface PgTeam {
+  teamId: number;
+  team: "ORDER" | "CHAOS";
+  win: boolean;
+  bans: number[];
+  kills: number;
+  towers: number;
+  inhibitors: number;
+  dragons: number;
+  barons: number;
+  heralds: number;
+  grubs: number;
+  atakhan: number;
+}
+
+/** Riot's record of a game, fetched after it: see riot.rs. */
+export interface PostGame {
+  version: number;
+  /** "client": read from the League client; "riot": from Riot's web API. */
+  source: "client" | "riot";
+  matchId: string;
+  gameId: number;
+  platform: string;
+  queueId: number;
+  mapId: number;
+  mode: string;
+  patch: string;
+  /** Seconds. */
+  duration: number;
+  startMs: number;
+  /** My participant id. */
+  me: number | null;
+  teams: PgTeam[];
+  players: PgPlayer[];
+  /** Per minute: t in seconds, one row of numbers per player. */
+  frames: { t: number[]; players: { id: number; gold: number[]; xp: number[]; cs: number[]; level: number[]; x: number[]; y: number[]; damage: number[] | null }[] } | null;
+  kills: PgKill[];
+  objectives: PgObjective[];
+  /** Me minus my lane opponent, per minute. */
+  lane: { opponent: number; gold: number[]; xp: number[]; cs: number[] } | null;
+  /** My team's gold minus the enemy team's, per minute. */
+  teamGold: number[] | null;
+}
+
+/** A kill or death of mine on the map, for Trends. */
+export interface TrendSpot {
+  x: number;
+  y: number;
+  /** Game time and video time, seconds. */
+  t: number;
+  v: number | null;
+  /** The other champion: who killed me, or whom I killed. Null for a turret, minions or a monster. */
+  other: string | null;
+  otherKey: string | null;
+}
+
+/** The numbers Trends takes from Riot's record of a game. */
+export interface TrendPg {
+  mapId: number;
+  dmgShare: number | null;
+  kp: number | null;
+  damage: number;
+  dpm: number;
+  gold: number;
+  gpm: number;
+  vision: number;
+  vpm: number;
+  taken: number;
+  /** Gold, XP and CS against the lane opponent at 10 and 15 minutes. */
+  gold10: number | null;
+  gold15: number | null;
+  xp10: number | null;
+  csd10: number | null;
+  csd15: number | null;
+  deaths: TrendSpot[];
+  kills: TrendSpot[];
 }
 
 export interface Note {
@@ -456,6 +656,9 @@ export interface TrendMatch {
   focus?: FocusCheck | null;
   deathCauses: string[];
   avgAvoidable?: number | null;
+  rank?: RankChange | null;
+  /** From Riot's record of the game, once fetched. */
+  pg?: TrendPg | null;
 }
 
 export interface MatchFull extends Omit<MatchSummary, "keep" | "noteCount" | "thumb" | "summary" | "reviewed" | "nextFocus" | "focusCheck"> {
@@ -470,4 +673,8 @@ export interface MatchFull extends Omit<MatchSummary, "keep" | "noteCount" | "th
   team?: TeamReview[];
   /** Titles worked out from the game's own numbers. */
   titles?: PlayerTitle[];
+  /** Riot's record of the game, once fetched. */
+  postgame?: PostGame | null;
+  /** Why Riot's record is not here yet. */
+  postgameNote?: string | null;
 }

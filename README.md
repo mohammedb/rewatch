@@ -141,6 +141,9 @@ could be asked, so two players' recordings of the same game can be lined up exac
   closes it). Manual recordings have no key log.
 - **Events**: `https://127.0.0.1:2999/liveclientdata/allgamedata` is read once a second.
   Purchases are detected from changes in each player's item list.
+- **After the game** (`riot.rs`): while no game is on, Riot's record of each game is read
+  from the League client (or Riot's web API with a key in Settings) and saved next to
+  the recording; see Version 0.5.0 below.
 - When the game exits, the pieces are joined (video is copied, not re-encoded) into one
   folder per game: `game.mp4` (video + game sound), `discord.m4a`, `mic.m4a`,
   `mouse.csv`, `match.json`, `thumb.jpg`, and `review.json` for notes and drawings.
@@ -157,7 +160,9 @@ could be asked, so two players' recordings of the same game can be lined up exac
 
 ```
 cd src-tauri
-cargo test --lib                      # event and purchase detection
+cargo test --lib                      # event and purchase detection, post-game data
+target\debug\rewatch.exe --riot-probe   # what the League client and the key can see now
+target\debug\rewatch.exe --postgame C:\recording\folder [--key-file key.txt]   # fetch one game's record
 target\debug\rewatch.exe --test-record 10 --out C:\some\folder   # headless capture test
 target\debug\rewatch.exe --list-mics
 ```
@@ -172,11 +177,13 @@ Two environment variables exist only for testing the automatic flow without Leag
   `liveclient.rs` (game feed and the numbers for the graph), `library.rs` (folders,
   clips, size limit), `pov.rs` (everything between teammates: views, notes, speech
   times, watching together), `copies.rs` (smaller copies for teammates), `voice.rs`
-  (when someone was talking), `update.rs`, `insight.rs` (hints about deaths), `coach.rs` (written review), `team.rs` (team review of a fight), `titles.rs`, `highlights.rs`, `winutil.rs`, `settings.rs`, `lib.rs` (app
+  (when someone was talking), `update.rs`, `insight.rs` (hints about deaths), `coach.rs` (written review), `team.rs` (team review of a fight), `titles.rs`, `highlights.rs`, `riot.rs`
+  (post-game data and ranks, from the League client or Riot's web API), `winutil.rs`, `settings.rs`, `lib.rs` (app
   wiring, watcher, commands).
 - `src/` interface (React + TypeScript): `Games.tsx`, `Player.tsx`, `Views.tsx` (split
   view, zoom, cursor), `Timeline.tsx`, `Insights.tsx` (review tab, comms rows, graph),
-  `SettingsPage.tsx`, `api.ts`.
+  `PostGame.tsx` (the Players tab's post-game panel), `MapView.tsx` (minimap), `Rank.tsx`
+  (LP and the rank chart), `SettingsPage.tsx`, `api.ts`.
 - `updates-site/` the update address; `scripts/release.mjs` publishes a version. `mock.ts` and `public/mock/` are sample data for
   working on the interface in a plain browser; they are not part of release builds.
 
@@ -515,6 +522,47 @@ it they are in the graph's header with their labels), the lines that follow the 
 the graph and the timeline (unchanged), the type check, a full build, and the published
 installer downloaded by 0.4.1's own updater with its signature checked. Not checked: the
 installed 0.4.2 with a real game's graph.
+
+## Version 0.5.0 (2026-11-15)
+
+**Post-game data.** After each game Rewatch reads Riot's record of it: from the League
+client by default, or from Riot's official web API (match-v5 and league-v4) with your
+own key in Settings, Match data. It is read only while no game is on, and only read.
+
+- **LP** won or lost on game cards, list rows and the last-game recap, and the rank in
+  the recap. The rank is read as a game loads and again after it; the LP shows only
+  when exactly one game was played between the two reads.
+- **Players tab**: kill participation, damage share, damage and gold a minute; who did
+  what (damage dealt and taken, gold, CS, vision, crowd control, healing and shields,
+  objectives) with each player's share of their team; a map of your kills, deaths and
+  assists, or every kill, or where everyone was at a chosen minute, where picking a kill
+  plays it; the gold lead against your lane opponent and between the teams, minute by
+  minute, with the leads at 10 and 15 minutes; your deaths, each playing its run-up.
+  With a key, also what hit you (physical, magic, true; which abilities), what you
+  dealt back, and your skill order, none of which the League client keeps. When the
+  record is not in yet, the tab says why and "Get them now" asks straight away.
+- **Trends**: a rank chart per ranked queue; "Where you die", every death (or kill) of
+  the games shown on the map, filtered by the page's champion and role filters and by
+  the time in the game, where each dot plays that death and "Watch all" plays them one
+  after another, with who kills you most; charts for the gold lead at 15 minutes and
+  the share of your team's damage; LP and damage share columns.
+- Each game folder gets `riot_match.json` and `riot_timeline.json` (raw), `postgame.json`
+  (what the app shows) and `riot.json` (the account, ranks before and after, and how
+  the fetching went). Games recorded before this version are filled in by the same
+  background job, newest first, a few at a time. A game the League client cannot find
+  is tried again later, and given up after three days unless there is a key.
+- A development key from developer.riotgames.com stops working after 24 hours. A
+  refused key is not used again until it changes, and the League client carries on.
+- The setting that used to say "Ask League which queue it is" is now "Ask the League
+  client", since it also covers the post-game reads.
+
+Checked: the unit tests (66, 13 of them new for match records in both formats, rank
+changes across promotions and gaps, unknown ranked queues, retries, and game time to
+video time), the type check, a full build, the new code reading 15 real games from the
+League client (all saved, with every kill's place on the map and the minute-by-minute
+numbers, and five Practice Tool games marked as having no record), and the published
+installer downloaded by 0.4.2's own updater with its signature checked. Not checked: a
+real Riot key, the LP after a ranked game, and the new screens with real games.
 
 ## Not built yet
 

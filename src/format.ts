@@ -121,6 +121,17 @@ export function gameClockAt(samples: [number, number][], t: number): number | nu
   return g < 0 ? null : g;
 }
 
+/** Where in the video a moment of game time is: the inverse of gameClockAt. */
+export function videoTimeAt(samples: [number, number][], g: number): number | null {
+  if (!samples.length) return null;
+  let best = samples[0];
+  for (const s of samples) {
+    if (s[1] <= g) best = s;
+    else break;
+  }
+  return Math.max(0, best[0] + (g - best[1]));
+}
+
 export function uid(): string {
   return Math.random().toString(36).slice(2, 10);
 }

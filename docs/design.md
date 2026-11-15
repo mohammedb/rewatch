@@ -86,12 +86,23 @@ service; Discord screen share was chosen instead.
   feed). No input hook is installed, so nothing sits in the path between the
   mouse and the game, and nothing can add input delay.
 - Game data: Riot's Live Client Data API, which Riot documents for
-  third-party tools. It is the only source for events, items, win/loss, KDA
-  and CS. The League client's local API is used read-only and for one thing
-  only: the queue name (ranked solo, flex, normal...), which the live feed
-  does not give. That part is a setting. With it off, every game is recorded,
-  the per-queue switches are disabled, and the library shows the game mode
-  from the live feed instead of the queue name (my call).
+  third-party tools. It is the only source for what happens during a game:
+  events, items, win/loss, KDA and CS.
+- The League client's local API is used read-only, behind one setting, and
+  never while a game is being played beyond a few reads as it loads: the
+  queue name (ranked solo, flex, normal...), which the live feed does not
+  give, and who is playing with their rank. After the game, while no game is
+  on, it gives Riot's record of the game (damage, gold, vision, every kill's
+  place on the map, everyone's position once a minute) and the rank again,
+  for the LP won or lost. With the setting off, every game is recorded, the
+  per-queue switches are disabled, the library shows the game mode from the
+  live feed instead of the queue name, and there is no post-game data unless
+  an API key is set (my call). Its endpoints are unofficial and can change;
+  when one does, that data is missing and nothing else breaks.
+- Riot's official web API (match-v5, league-v4) is used only with the user's
+  own key, pasted into Settings and sent only to Riot, after a game, never
+  during one. The app ships no key. A development key expires after 24 hours;
+  the League client covers the days without one.
 - No administrator rights unless the capture test shows clicks cannot be
   read without them, in which case it becomes an opt-in setting.
 - Honest limit: nobody outside Riot can promise what their anti-cheat will
@@ -154,8 +165,17 @@ capture is harder to do there); reusing RiftRec's binaries (not ours to use).
   live-game data feed (the Live Client Data API on `127.0.0.1:2999`). Start
   recording as soon as the game process appears so nothing is missed; stop
   when it exits. The League client's local API (found through its lockfile)
-  gives the queue name before the game, nothing else. Win/loss, KDA and CS
-  are taken from the live feed's last reads and its game-end event.
+  gives the queue name before the game, and who is playing with their rank.
+  Win/loss, KDA and CS are taken from the live feed's last reads and its
+  game-end event.
+- **After the game.** A background job, run only while no game is on, asks
+  for each new game's match record and timeline (League client, or Riot's web
+  API with a key), then the rank, and saves them raw next to the recording
+  with a summary the app reads (`postgame.json`, `riot.json`). The LP change
+  is the rank after the game minus the rank before it, and only when exactly
+  one game was played in between; otherwise the game shows no LP. Positions
+  are only recorded once a minute, so the map of kills is exact but the map
+  of where everyone was is a snapshot.
 - **Events.** Poll the live-game feed during the match and store each event
   with its game-clock time. Store the offset between game clock and recording
   clock so every event maps to a position in the video. The feed reports

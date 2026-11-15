@@ -15,6 +15,7 @@ import {
   Plus,
   RotateCcw,
   Sparkles,
+  Trophy,
   Users,
   Video,
   Wrench,
@@ -63,6 +64,7 @@ const SECTIONS: { id: string; title: string; icon: LucideIcon }[] = [
   { id: "set-status", title: "Status", icon: HeartPulse },
   { id: "set-recording", title: "Recording", icon: CircleDot },
   { id: "set-games", title: "Which games", icon: ListVideo },
+  { id: "set-riot", title: "Match data", icon: Trophy },
   { id: "set-video", title: "Video", icon: Video },
   { id: "set-sound", title: "Sound and input", icon: AudioLines },
   { id: "set-team", title: "Teammates", icon: Users },
@@ -328,6 +330,8 @@ export function SettingsPage({ settings, onSave, matches }: { settings: Settings
   const [update, setUpdate] = useState<UpdateInfo | null>(null);
   const [checking, setChecking] = useState(false);
   const [backups, setBackups] = useState<LeagueBackup[] | null>(null);
+  /** What Riot said about the API key: null until checked. */
+  const [keyCheck, setKeyCheck] = useState<{ ok: boolean; message: string } | "busy" | null>(null);
   const [backupLabel, setBackupLabel] = useState("");
   const [backupBusy, setBackupBusy] = useState(false);
   const [quotaKey, setQuotaKey] = useState(0);
@@ -396,6 +400,15 @@ export function SettingsPage({ settings, onSave, matches }: { settings: Settings
     [flush],
   );
   const set = <K extends keyof Settings>(key: K, value: Settings[K], delay?: number) => change({ ...latest.current, [key]: value }, delay);
+  const checkKey = () => {
+    const key = latest.current.riotApiKey.trim();
+    if (!key) return;
+    setKeyCheck("busy");
+    api
+      .riotCheck(key)
+      .then(setKeyCheck)
+      .catch((e) => setKeyCheck({ ok: false, message: humanError(e) }));
+  };
 
   // Leaving the page with a change still waiting saves it straight away.
   useEffect(
@@ -826,10 +839,13 @@ export function SettingsPage({ settings, onSave, matches }: { settings: Settings
           </Section>
 
           <Section id="set-games" icon={ListVideo} title="Which games">
-            <Opt title="Ask League which queue it is" hint="One read-only question to the League client as a game starts. Without it, every game is recorded.">
-              <Switch label="Ask League which queue it is" checked={s.useClientApi} onChange={(v) => set("useClientApi", v)} />
+            <Opt
+              title="Ask the League client"
+              hint="Read-only questions to the League client: which queue it is as a game starts, and after the game its match data and your rank. Without it, every game is recorded."
+            >
+              <Switch label="Ask the League client" checked={s.useClientApi} onChange={(v) => set("useClientApi", v)} />
             </Opt>
-            <Opt title="Queues to record" hint={s.useClientApi ? undefined : "Every queue is recorded while the question above is off."} wide>
+            <Opt title="Queues to record" hint={s.useClientApi ? undefined : "Every queue is recorded while the switch above is off."} wide>
               <div className="qchips" role="group" aria-label="Queues to record">
                 {QUEUES.map(([key, label]) => {
                   const on = s.useClientApi ? s.queues[key] : true;
@@ -841,6 +857,53 @@ export function SettingsPage({ settings, onSave, matches }: { settings: Settings
                   );
                 })}
               </div>
+            </Opt>
+          </Section>
+
+          <Section
+            id="set-riot"
+            icon={Trophy}
+            title="Match data"
+            intro={
+              <div className="promise">
+                <p>
+                  <b>LP, damage, gold and where every kill happened.</b> A minute or two after each game, Rewatch reads Riot's record of it: from the League client while{" "}
+                  <i>Ask the League client</i> is on, or from Riot with your own API key. Never while you play, and it only reads.
+                </p>
+              </div>
+            }
+          >
+            <Opt
+              title="Riot API key"
+              hint={
+                <>
+                  Optional. Get one at developer.riotgames.com. With it, each death also shows what hit you, and games the League client no longer lists can still be read. A
+                  development key stops working after 24 hours. Kept on this PC and sent only to Riot.
+                  {keyCheck && keyCheck !== "busy" && (
+                    <span className={`keycheck ${keyCheck.ok ? "ok" : "bad"}`} role="status">
+                      {keyCheck.ok ? <CircleCheck size={14} aria-hidden /> : <CircleX size={14} aria-hidden />}
+                      {keyCheck.message}
+                    </span>
+                  )}
+                </>
+              }
+              wide
+            >
+              <Field
+                type="password"
+                autoComplete="off"
+                value={s.riotApiKey}
+                placeholder="RGAPI-..."
+                aria-label="Riot API key"
+                onCommit={(v) => {
+                  set("riotApiKey", v.trim(), 0);
+                  setKeyCheck(null);
+                }}
+              />
+              <button className="btn sm" onClick={checkKey} disabled={!s.riotApiKey.trim() || keyCheck === "busy"} aria-busy={keyCheck === "busy"}>
+                {keyCheck === "busy" && <Loader2 size={14} className="spin" aria-hidden />}
+                Check key
+              </button>
             </Opt>
           </Section>
 
