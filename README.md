@@ -66,15 +66,41 @@ node scripts/release.mjs --version 0.2.1 "What is new, in a sentence"
 
 sets the version number, builds the installer, signs it, uploads it and announces it.
 Installed apps look at `https://rewatch.ggwp.no/latest.json` shortly after start and
-every six hours (or on Settings, Updates, Check now), download the installer, check
-its signature and run it. It installs by itself only while the window is closed and
-no game is running or being recorded; with the window open it shows a bar with
-"Update now" instead.
+every six hours (or on Settings, Updates, Check now). With "Update by itself" on (the
+default) they download a newer version straight away, while no game is running or
+being recorded, and check its signature. What happens then depends on what changed:
 
+- **Only the interface** (nothing in `src-tauri/` changed since the version the app
+  has): the app takes the new interface on its own, about 1 MB, and keeps running.
+  `ui.rs` serves it in place of the built-in one and keeps it in
+  `%APPDATA%\Rewatch\interface\` for the next start. The window reloads to show it: at
+  once if it is closed, otherwise a few seconds after it is next closed, or on
+  "Reload" in the top bar. The screen that was open comes back, and the reload waits
+  while a clip is being cut or an Undo is on offer. Recording, the tray and
+  everything else carry on.
+- **Anything in `src-tauri/`**: the installer, which has to replace the program and
+  so restarts it. It is downloaded ahead and runs silently once the window is closed
+  and no game is on, and the app comes back hidden in the tray seconds later. With
+  the window open, "Update now" in the top bar runs it at once.
+
+With the setting off nothing is downloaded until "Update now" is pressed.
+
+- What counts as "only the interface" is decided by a fingerprint of everything in
+  `src-tauri/` (minus the version number) and the `@tauri-apps` packages, worked out
+  by `release.mjs` and built into the program (`node scripts/release.mjs --native-id`
+  prints it). Each release also publishes `Rewatch_<version>_ui.json`, every file of
+  the interface in one file, written by the program just built
+  (`rewatch.exe --ui-bundle <file>`) and signed like the installer; `latest.json`
+  names it under `ui` with the fingerprint. Apps with the same fingerprint take it.
+  Any other app, a build made by hand (it has no fingerprint), and every version
+  before this feature take the installer, as does an app that can't use the
+  interface file for some reason.
 - The site is a small Cloudflare Worker (`updates-site/`, deployed as
   `rewatch-updates`) in front of the R2 bucket `rewatch-releases`, in the same
   Cloudflare account as the rest of ggwp.no. It serves `/` (landing page, not indexed), `/latest.json`,
-  `/download/latest`, `/download/<installer>`, `/fonts/*` and `/media/*`.
+  `/download/latest`, `/download/<installer>`, `/download/<interface>`, `/fonts/*` and
+  `/media/*`. `release.mjs` stops before announcing a version whose interface file the
+  site doesn't serve, so deploy the Worker after changing it.
 - The landing page is `updates-site/page.html`, bundled into the Worker as text. It is
   built from one real recorded game (Ranked Flex, 2026-11-13_00-42-08): `demo.json`
   holds that game's timeline, cursor, review drawings, who-talked-when and AI review,
@@ -100,9 +126,12 @@ no game is running or being recorded; with the window open it shows a bar with
   copy somewhere safe). Its public half is `src-tauri/updater.pub`, built into the
   app. Lose the key and installed apps can no longer be updated: everyone would have
   to install by hand once more.
-- The updater is the app's own (`update.rs`), not Tauri's plugin, so it can be tried
-  from the command line: `rewatch.exe --update-check --download` fetches the newest
-  installer and checks its signature without running it.
+- The updater is the app's own (`update.rs`, `ui.rs`), not Tauri's plugin, so it can
+  be tried from the command line: `rewatch.exe --update-check --download` says how the
+  newest version would be taken, fetches what the app would (the interface file and
+  the installer) and checks their signatures, without putting anything in place.
+  `REWATCH_UPDATE_URL` points it at another announcement, such as a local
+  `wrangler dev`; files are then also taken from there over plain http.
 - Version 0.1.0 has no updater. Everyone installs 0.2.0 by hand once.
 
 The installer needs `src-tauri\bin\ffmpeg.exe` (not kept in git). Copy in the
@@ -711,6 +740,45 @@ debug copy of the app on this PC with its own app id and data folder: the guide 
 the first start, found FFmpeg and League, read the player's name from the League client
 and the free space on C:. Not checked: the microphone level and connecting to a real
 teammate in the app itself.
+
+## Not released yet
+
+**Updates without a restart.** With "Update by itself" on, a new version is downloaded in
+the background while no game is running. A version that only changes the interface goes
+in while the app runs: the window reloads to show it, on the screen it was on. If the
+window is closed it reloads by itself a few seconds after closing, so the last edits are
+saved first. If it's open, "Reload" in the bar does it. Recording and everything else carry
+on. A version that changes the program itself still comes as an installer: it's downloaded
+and checked beforehand, and installs without a window while the app sits in the tray,
+then starts again hidden. With "Update by itself" off, nothing is downloaded until "Update
+now" is pressed. Each release now also publishes its interface as one signed file
+(`Rewatch_<version>_ui.json`) made for one exact build of the program. An installed copy
+takes it only if its own program is that build, and only once the signature checks out.
+It's kept in `%APPDATA%\Rewatch\interface\` for the next start and dropped once an
+installer has replaced the program. Before the next release, the update site needs
+deploying (`npx wrangler deploy` in `updates-site/`). The release stops if the site doesn't
+serve the interface file. The first version with this still arrives by installer for
+everyone. Later ones that only change the interface don't need a restart.
+
+Checked: the Rust tests (five new ones: the interface alone only for the same build of the
+program, files only over https or from the update site itself, an interface surviving the
+trip, one that doesn't fit refused, and a page keeping its own files while newer
+interfaces come), the type check and a full build. A debug copy of the app was also tested:
+its own app id and data folder, nothing recorded, against a stand-in for the update site on
+this PC, with interface files signed with the release key. The packed interface held all 18
+files of the build, byte for byte. Started hidden, as at Windows start-up, the check took
+only the interface file (the installer was never asked for) and the window reloaded into it
+in under half a second. After a restart it showed straight away and the check said it was
+up to date. With the window open, the next version went in without a reload and "Reload"
+showed in the bar. Once the window was closed, the page reloaded by itself 6 seconds later,
+on the same Settings screen. "Reload now" reloads to the same screen and says "Updated to
+version …". A page that said "not now" to reloading, as it does while an Undo runs, kept
+getting its own files while two newer versions came in. The one in between was let go, and
+a reload showed the newest. A kept interface changed on disk was refused at the next start
+and removed, and the built-in one showed. The page logged no errors and no file failed to
+load. Not checked: an installer update installing by itself (on this PC it would have
+replaced the installed app), the six-hourly check on its own (the tests asked for it), the
+page saying "not now" because of a real Undo or job (it was made to), and a real release.
 
 ## Not built yet
 

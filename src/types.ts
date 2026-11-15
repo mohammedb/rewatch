@@ -652,11 +652,28 @@ export interface WatchEvent {
   t?: number;
 }
 
+export interface Release {
+  version: string;
+  notes: string;
+  url: string;
+  /** It takes the installer, which closes and restarts the app. Otherwise only the interface changes, without a restart. */
+  restart: boolean;
+}
+
 export interface UpdateInfo {
   current: string;
-  available: { version: string; notes: string; url: string } | null;
+  /** A newer version, not in place yet. */
+  available: Release | null;
   checked: boolean;
+  /** It is being downloaded. */
+  downloading: boolean;
+  /** Its installer is downloaded and checked, so updating takes seconds. */
+  ready: boolean;
   installing: boolean;
+  /** The version whose interface was put in place while the app ran. */
+  applied: Release | null;
+  /** That interface is in place, but the window still shows the one before until it reloads. */
+  reload: boolean;
   error: string | null;
 }
 

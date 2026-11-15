@@ -1,8 +1,10 @@
 // rewatch.ggwp.no: where the app looks for new versions, where the installer is
 // downloaded from, and the landing page. Files come from one storage bucket:
 //
-//   latest.json                      which version is newest, and its signature
+//   latest.json                      which version is newest, and its signatures
 //   Rewatch_<version>_x64-setup.exe  the installers
+//   Rewatch_<version>_ui.json        each version's interface on its own, which apps
+//                                    with the same native part take without a restart
 //   media/<name>                     the landing page's footage and pictures
 //
 // Nothing here is secret: the app only runs an installer whose signature matches the
@@ -14,6 +16,7 @@ import ARCHIVO from "./fonts/archivo.woff2";
 import GEIST from "./fonts/geist.woff2";
 
 const INSTALLER = /^Rewatch_[0-9A-Za-z.]+_x64-setup\.exe$/;
+const INTERFACE = /^Rewatch_[0-9A-Za-z.]+_ui\.json$/;
 const MEDIA = /^[a-z0-9][a-z0-9._-]*\.(mp4|webp|jpg)$/;
 const MEDIA_TYPES = { mp4: "video/mp4", webp: "image/webp", jpg: "image/jpeg" };
 const FONTS = { "/fonts/archivo.woff2": ARCHIVO, "/fonts/geist.woff2": GEIST };
@@ -104,15 +107,16 @@ export default {
 
     if (path.startsWith("/download/")) {
       const name = path.slice("/download/".length);
-      if (!INSTALLER.test(name)) return new Response("Not found", { status: 404 });
+      const ui = INTERFACE.test(name);
+      if (!INSTALLER.test(name) && !ui) return new Response("Not found", { status: 404 });
       const obj = await env.RELEASES.get(name);
       if (!obj) return new Response("Not found", { status: 404 });
       return new Response(request.method === "HEAD" ? null : obj.body, {
         headers: {
-          "Content-Type": "application/octet-stream",
+          "Content-Type": ui ? "application/json" : "application/octet-stream",
           "Content-Length": String(obj.size),
           "Content-Disposition": `attachment; filename="${name}"`,
-          // A version's installer never changes once published.
+          // A version's files never change once published.
           "Cache-Control": "public, max-age=86400, immutable",
           ETag: obj.httpEtag,
         },

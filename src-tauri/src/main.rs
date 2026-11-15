@@ -26,6 +26,9 @@ fn main() {
     if args.iter().any(|a| a == "--update-check") {
         std::process::exit(rewatch_lib::cli_update_check(args.iter().any(|a| a == "--download")));
     }
+    if let Some(out) = value_of("--ui-bundle") {
+        std::process::exit(rewatch_lib::cli_ui_bundle(out));
+    }
     if let Some(dir) = value_of("--make-copy") {
         std::process::exit(rewatch_lib::cli_make_copy(dir));
     }

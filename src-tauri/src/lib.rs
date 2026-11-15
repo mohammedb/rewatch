@@ -15,6 +15,7 @@ mod team;
 mod titles;
 mod pov;
 mod riot;
+mod ui;
 mod update;
 mod video;
 mod voice;
@@ -57,18 +58,40 @@ pub struct AppState {
     pov: Mutex<Option<std::sync::Arc<pov::Engine>>>,
     share_error: Mutex<Option<String>>,
     update: Mutex<UpdateState>,
+    /// Held while a newer version is being fetched, so it is fetched once.
+    fetching: Mutex<()>,
+    /// When the window was last closed (to the tray).
+    closed_at: Mutex<Option<std::time::Instant>>,
 }
 
-/// What is known about a newer version of the app.
+/// What is known about a newer version of the app. `current`, `ready` and `reload` are
+/// filled in by `update_snapshot`.
 #[derive(Clone, Serialize, Default)]
 #[serde(rename_all = "camelCase")]
 struct UpdateState {
     current: String,
+    /// A newer version, not in place yet.
     available: Option<update::Release>,
     checked: bool,
+    /// It is being fetched.
+    downloading: bool,
+    /// Its installer is here and checked, waiting for a quiet moment or a click.
+    ready: bool,
     installing: bool,
+    /// The version whose interface was put in place while the app ran.
+    applied: Option<update::Release>,
+    /// That interface is in place, but the window still shows the one before.
+    reload: bool,
     error: Option<String>,
+    /// The installer behind `ready`.
+    #[serde(skip)]
+    installer: Option<std::path::PathBuf>,
+    /// Fetching or installing failed: not tried by itself again until the next check.
+    #[serde(skip)]
+    retry_later: bool,
 }
+
+const NOT_NOW: &str = "Not while a game is running or being recorded. It will update afterwards.";
 
 /// A Windows notification, if the setting allows. Never shown by this app's own
 /// window, so nothing of ours is drawn over the game.
@@ -106,6 +129,15 @@ fn quiet(app: &AppHandle) -> bool {
     idle && winutil::find_pid_by_name(&winutil::game_exe()).is_none()
 }
 
+/// The update state as the window sees it.
+fn update_snapshot(app: &AppHandle) -> UpdateState {
+    let mut u = app.state::<AppState>().update.lock().unwrap().clone();
+    u.current = update::current();
+    u.ready = u.installer.is_some();
+    u.reload = ui::needs_reload();
+    u
+}
+
 fn check_for_update(app: &AppHandle) {
     let found = update::check();
     let st = app.state::<AppState>();
@@ -113,13 +145,17 @@ fn check_for_update(app: &AppHandle) {
     u.checked = true;
     match found {
         Ok(release) => {
-            if let Some(r) = &release {
-                if u.available.as_ref().map(|a| a.version != r.version).unwrap_or(true) {
+            // The same version as before keeps what is known about it (its installer,
+            // say); another one starts afresh.
+            if u.available.as_ref().map(|a| &a.version) != release.as_ref().map(|r| &r.version) {
+                if let Some(r) = &release {
                     log(format!("[update] version {} is available (this is {})", r.version, update::current()));
                 }
+                u.available = release;
+                u.installer = None;
             }
-            u.available = release;
             u.error = None;
+            u.retry_later = false;
         }
         Err(e) => u.error = Some(e.to_string()),
     }
@@ -127,40 +163,156 @@ fn check_for_update(app: &AppHandle) {
     let _ = app.emit("update", ());
 }
 
-/// Download the newer version, check its signature and start its installer, which
-/// closes this app, replaces it and starts it again.
-fn install_update(app: &AppHandle, minimized: bool) -> Result<(), String> {
+enum Fetched {
+    /// The new interface is in place.
+    Interface,
+    /// The installer, and whether that is because the interface could not be used.
+    Installer(std::path::PathBuf, bool),
+}
+
+fn fetch_release(release: &update::Release, stop: &dyn Fn() -> bool) -> anyhow::Result<Fetched> {
+    let mut fell_back = false;
+    if let Some(file) = &release.ui {
+        match update::download_ui(release, stop).and_then(|data| ui::install(&data, &file.signature, &release.version)) {
+            Ok(()) => return Ok(Fetched::Interface),
+            Err(e) if e.is::<update::Stopped>() => return Err(e),
+            Err(e) => {
+                log(format!("[update] the new interface could not be used, so the installer is fetched instead: {e}"));
+                fell_back = true;
+            }
+        }
+    }
+    Ok(Fetched::Installer(update::download(release, stop)?, fell_back))
+}
+
+/// Fetch the newer version the last check found, while nothing is being played or
+/// recorded. When it differs from this app only in its interface, that is put in place
+/// at once and shows when the window reloads. Otherwise its installer is kept for a
+/// quiet moment.
+fn fetch_update(app: &AppHandle) -> Result<(), String> {
     let st = app.state::<AppState>();
+    // One at a time: a second caller waits for the first, then finds the work done.
+    let _one = st.fetching.lock().unwrap();
     if !quiet(app) {
-        return Err("Not while a game is running or being recorded. It will update afterwards.".into());
+        return Err(update::Stopped.to_string());
     }
     let release = {
+        let mut u = st.update.lock().unwrap();
+        match u.available.clone() {
+            Some(r) if u.installer.is_none() && !u.installing => {
+                u.downloading = true;
+                r
+            }
+            _ => return Ok(()),
+        }
+    };
+    let _ = app.emit("update", ());
+    let result = fetch_release(&release, &|| !quiet(app));
+    let mut u = st.update.lock().unwrap();
+    u.downloading = false;
+    // A check may have found a later version in the meantime.
+    let still = u.available.as_ref().is_some_and(|a| a.version == release.version);
+    let out = match result {
+        Ok(Fetched::Interface) => {
+            if still {
+                u.available = None;
+            }
+            u.applied = Some(release);
+            u.error = None;
+            u.retry_later = false;
+            Ok(())
+        }
+        Ok(Fetched::Installer(file, fell_back)) => {
+            if let (true, Some(a)) = (still, u.available.as_mut()) {
+                if fell_back {
+                    a.restart = true;
+                    a.ui = None;
+                }
+                u.installer = Some(file);
+            }
+            u.error = None;
+            u.retry_later = false;
+            Ok(())
+        }
+        Err(e) if e.is::<update::Stopped>() => Err(e.to_string()),
+        Err(e) => {
+            log(format!("[update] {e}"));
+            u.error = Some(e.to_string());
+            u.retry_later = true;
+            Err(e.to_string())
+        }
+    };
+    drop(u);
+    let _ = app.emit("update", ());
+    reload_if_hidden(app);
+    out
+}
+
+/// Run the installer fetched for the newer version. It closes this app, replaces it and
+/// starts it again: hidden in the tray when `quietly`, otherwise with its window.
+fn run_installer(app: &AppHandle, quietly: bool) -> Result<(), String> {
+    if !quiet(app) {
+        return Err(NOT_NOW.into());
+    }
+    let st = app.state::<AppState>();
+    let (file, signature) = {
         let mut u = st.update.lock().unwrap();
         if u.installing {
             return Ok(());
         }
-        let Some(r) = u.available.clone() else { return Err("There is no newer version.".into()) };
+        let (Some(file), Some(release)) = (u.installer.clone(), u.available.as_ref()) else {
+            return Err("The new version has not been downloaded yet.".into());
+        };
+        let signature = release.signature.clone();
         u.installing = true;
         u.error = None;
-        r
+        (file, signature)
     };
     let _ = app.emit("update", ());
-    let result = update::download(&release).and_then(|file| {
-        // A game may have started during the download.
-        if !quiet(app) {
-            return Err(anyhow::anyhow!("A game started; the update waits until it is over."));
-        }
-        update::install(&file, minimized)
-    });
+    let result = update::install(&file, &signature, quietly);
     if let Err(e) = &result {
         log(format!("[update] {e}"));
         let mut u = st.update.lock().unwrap();
         u.installing = false;
+        // Fetched afresh next time: the file may have been cleaned away.
+        u.installer = None;
         u.error = Some(e.to_string());
+        u.retry_later = true;
         drop(u);
         let _ = app.emit("update", ());
     }
     result.map_err(|e| e.to_string())
+}
+
+/// "Update now": fetch the newer version if that has not happened yet, then put it in
+/// place. A new interface shows once the window's page reloads, which the page does
+/// itself; anything else goes through the installer.
+fn update_now(app: &AppHandle) -> Result<(), String> {
+    if !quiet(app) {
+        return Err(NOT_NOW.into());
+    }
+    fetch_update(app)?;
+    let ready = app.state::<AppState>().update.lock().unwrap().installer.is_some();
+    if ready { run_installer(app, false) } else { Ok(()) }
+}
+
+/// How long the window stays closed before its page may reload by itself: edits are
+/// saved a moment after the last change (half a second at most), and they get to finish.
+const SETTLE: Duration = Duration::from_secs(5);
+
+/// A newer interface is in place: if the window is closed and no game is on, have its
+/// page reload to show it. The page may hold off while something of its own is still
+/// going on (see App.tsx); it is asked again a minute later.
+fn reload_if_hidden(app: &AppHandle) {
+    if !ui::needs_reload() || window_visible(app) {
+        return;
+    }
+    let settled = app.state::<AppState>().closed_at.lock().unwrap().is_none_or(|t| t.elapsed() >= SETTLE);
+    if settled && quiet(app) {
+        if let Some(w) = app.get_webview_window("main") {
+            let _ = w.eval("window.__rewatchReload ? window.__rewatchReload(false) : location.reload()");
+        }
+    }
 }
 
 fn emit_status(app: &AppHandle) {
@@ -786,19 +938,27 @@ fn watch_peers(state: State<AppState>) -> Vec<Value> {
 }
 
 #[tauri::command]
-fn update_info(state: State<AppState>) -> UpdateState {
-    state.update.lock().unwrap().clone()
+fn update_info(app: AppHandle) -> UpdateState {
+    update_snapshot(&app)
 }
 
 #[tauri::command(async)]
-fn update_check(app: AppHandle, state: State<AppState>) -> UpdateState {
+fn update_check(app: AppHandle) -> UpdateState {
     check_for_update(&app);
-    state.update.lock().unwrap().clone()
+    // With "Update by itself" on, fetch it now rather than within the minute.
+    if app.state::<AppState>().settings.lock().unwrap().auto_update {
+        let handle = app.clone();
+        std::thread::spawn(move || {
+            let _ = fetch_update(&handle);
+        });
+    }
+    update_snapshot(&app)
 }
 
 #[tauri::command(async)]
-fn update_install(app: AppHandle) -> CmdResult<()> {
-    install_update(&app, false)
+fn update_install(app: AppHandle) -> CmdResult<UpdateState> {
+    update_now(&app)?;
+    Ok(update_snapshot(&app))
 }
 
 #[tauri::command(async)]
@@ -897,10 +1057,19 @@ fn show_main(app: &AppHandle) {
 }
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
+/// The app's configuration and its built-in interface.
+fn context() -> tauri::Context {
+    tauri::generate_context!()
+}
+
 pub fn run() {
     log_panics();
     winutil::set_dpi_aware();
     winutil::end_helpers_with_app();
+    // A newer interface fetched before, if it still fits this program.
+    ui::load_saved();
+    let mut context = context();
+    ui::serve(&mut context);
     tauri::Builder::default()
         .plugin(tauri_plugin_single_instance::init(|app, _args, _cwd| show_main(app)))
         .plugin(tauri_plugin_opener::init())
@@ -921,7 +1090,9 @@ pub fn run() {
             skip_pid: Mutex::new(None),
             pov: Mutex::new(None),
             share_error: Mutex::new(None),
-            update: Mutex::new(UpdateState { current: update::current().into(), ..Default::default() }),
+            update: Mutex::new(UpdateState { current: update::current(), ..Default::default() }),
+            fetching: Mutex::new(()),
+            closed_at: Mutex::new(None),
         })
         .setup(|app| {
             let handle = app.handle().clone();
@@ -1093,12 +1264,16 @@ pub fn run() {
                 });
             }
             {
-                // Look for a newer version shortly after start and every six hours. It
-                // installs by itself only while the window is closed and no game is on;
-                // otherwise the window offers it.
+                // Look for a newer version shortly after start and every six hours. With
+                // "Update by itself" on it is fetched straight away, while no game is on.
+                // A new interface is put in place there and then, and the window shows
+                // it after a reload (at once if the window is closed). An installer runs
+                // quietly once the window is closed.
                 let handle = handle.clone();
                 std::thread::spawn(move || {
                     std::thread::sleep(Duration::from_secs(if cfg!(debug_assertions) { 3600 } else { 20 }));
+                    // The installer that brought this version has finished by now.
+                    update::clear_installers();
                     let mut last_check: Option<std::time::Instant> = None;
                     loop {
                         if last_check.map(|t| t.elapsed() > Duration::from_secs(6 * 3600)).unwrap_or(true) {
@@ -1107,13 +1282,11 @@ pub fn run() {
                         }
                         let st = handle.state::<AppState>();
                         let auto = st.settings.lock().unwrap().auto_update;
-                        let (waiting, since) = {
+                        let (installing, retry_later) = {
                             let u = st.update.lock().unwrap();
-                            (u.available.is_some() && !u.installing, u.installing)
+                            (u.installing, u.retry_later)
                         };
-                        if auto && waiting && quiet(&handle) && !window_visible(&handle) {
-                            let _ = install_update(&handle, true);
-                        } else if since {
+                        if installing {
                             // The installer closes this app within a minute. Still here
                             // after several: it did not go through.
                             std::thread::sleep(Duration::from_secs(240));
@@ -1124,7 +1297,14 @@ pub fn run() {
                             drop(u);
                             let _ = handle.emit("update", ());
                             std::thread::sleep(Duration::from_secs(3600));
+                        } else if auto && !retry_later && quiet(&handle) {
+                            let _ = fetch_update(&handle);
+                            let ready = st.update.lock().unwrap().installer.is_some();
+                            if ready && !window_visible(&handle) {
+                                let _ = run_installer(&handle, true);
+                            }
                         }
+                        reload_if_hidden(&handle);
                         std::thread::sleep(Duration::from_secs(60));
                     }
                 });
@@ -1136,6 +1316,21 @@ pub fn run() {
             if let WindowEvent::CloseRequested { api, .. } = event {
                 let _ = window.hide();
                 api.prevent_close();
+                // A newer interface waiting for the window to go comes in once the
+                // page's last edits are saved.
+                let app = window.app_handle().clone();
+                *app.state::<AppState>().closed_at.lock().unwrap() = Some(std::time::Instant::now());
+                if ui::needs_reload() {
+                    std::thread::spawn(move || {
+                        std::thread::sleep(SETTLE + Duration::from_millis(500));
+                        reload_if_hidden(&app);
+                    });
+                }
+            }
+        })
+        .on_page_load(|_, payload| {
+            if payload.event() == tauri::webview::PageLoadEvent::Started {
+                ui::page_loading();
             }
         })
         .invoke_handler(tauri::generate_handler![
@@ -1187,7 +1382,7 @@ pub fn run() {
             export_clip,
             export_full
         ])
-        .run(tauri::generate_context!())
+        .run(context)
         .expect("error while running Rewatch");
 }
 
@@ -1411,19 +1606,53 @@ pub fn cli_pov_extras(code: String, identity: String, dir: String) -> i32 {
     0
 }
 
+/// `rewatch --ui-bundle <file>`: write this program's built-in interface as one file,
+/// for installed apps with the same native part to take without a restart. Used by
+/// scripts/release.mjs, which signs and publishes it.
+pub fn cli_ui_bundle(out: String) -> i32 {
+    let Some(native) = update::native_id() else {
+        println!("REFUSED this build has no native fingerprint (only builds made by scripts/release.mjs have one)");
+        return 1;
+    };
+    let context = context();
+    match ui::pack(context.assets(), update::built(), native).and_then(|data| Ok(std::fs::write(&out, &data).map(|()| data.len())?)) {
+        Ok(size) => {
+            println!("WROTE {out}: version {}, native part {native}, {size} bytes", update::built());
+            0
+        }
+        Err(e) => {
+            println!("FAILED {e}");
+            1
+        }
+    }
+}
+
 /// `rewatch --update-check [--download]`: say what the updater sees, and with
-/// `--download` fetch the installer and check its signature (it is not run).
+/// `--download` fetch what the app would and check its signature (nothing is put in
+/// place or run).
 pub fn cli_update_check(download: bool) -> i32 {
-    println!("this version: {}", update::current());
+    // Counts a newer interface fetched before, as the app would.
+    ui::load_saved();
+    println!("this version: {} (built: {}, native part: {})", update::current(), update::built(), update::native_id().unwrap_or("none"));
     match update::check() {
         Ok(None) => {
             println!("RESULT up to date");
             0
         }
         Ok(Some(r)) => {
-            println!("RESULT newer version {} at {}", r.version, r.url);
+            let how = if r.restart { "the installer, with a restart" } else { "the interface alone, without a restart" };
+            println!("RESULT newer version {} at {} (taken as {how})", r.version, r.url);
             if download {
-                match update::download(&r) {
+                if r.ui.is_some() {
+                    match update::download_ui(&r, &|| false).and_then(|data| ui::inspect(&data, &r.version)) {
+                        Ok(what) => println!("VERIFIED interface: {what}"),
+                        Err(e) => {
+                            println!("REFUSED interface: {e}");
+                            return 1;
+                        }
+                    }
+                }
+                match update::download(&r, &|| false) {
                     Ok(file) => println!("VERIFIED {} ({} bytes)", file.display(), std::fs::metadata(&file).map(|m| m.len()).unwrap_or(0)),
                     Err(e) => {
                         println!("REFUSED {e}");

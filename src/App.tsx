@@ -1,4 +1,4 @@
-import { BarChart3, Clapperboard, Download, LoaderCircle, SlidersHorizontal, Square, TriangleAlert, Users } from "lucide-react";
+import { BarChart3, Clapperboard, Download, LoaderCircle, RefreshCw, SlidersHorizontal, Square, TriangleAlert, Users } from "lucide-react";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { api, onEvent } from "./api";
 import { clock, toReview } from "./format";
@@ -36,6 +36,27 @@ type View =
   | { name: "player"; id: string; together?: boolean; playlist?: Playlist | null; start?: "deaths" }
   | { name: "settings" };
 
+// A version that only changes the interface is put in place while the app runs (src-tauri/src/ui.rs), and the
+// page reloads to show it. The screen that was open comes back afterwards.
+const RELOAD_KEY = "rewatch.reload";
+
+interface Resume {
+  view?: View;
+  /** The player asked for the update, so it's announced once it shows. */
+  updated?: { version: string; notes: string };
+}
+
+// Read once per page load.
+const resume: Resume = (() => {
+  try {
+    const saved = sessionStorage.getItem(RELOAD_KEY);
+    sessionStorage.removeItem(RELOAD_KEY);
+    return saved ? (JSON.parse(saved) as Resume) : {};
+  } catch {
+    return {};
+  }
+})();
+
 function Elapsed({ since }: { since: number }) {
   const [, tick] = useState(0);
   useEffect(() => {
@@ -47,12 +68,14 @@ function Elapsed({ since }: { since: number }) {
 
 export default function App() {
   const toast = useToast();
-  const [view, setView] = useState<View>({ name: "library" });
+  const [view, setView] = useState<View>(() => resume.view ?? { name: "library" });
   const [status, setStatus] = useState<Status | null>(null);
   const [settings, setSettings] = useState<Settings | null>(null);
   const [allMatches, setMatches] = useState<MatchSummary[] | null>(null);
   const [update, setUpdate] = useState<UpdateInfo | null>(null);
   const [updateLater, setUpdateLater] = useState<string | null>(null);
+  /** "Update now" or "Reload now" was pressed and is under way. */
+  const [updating, setUpdating] = useState(false);
   const [peers, setPeers] = useState<WatchPeer[]>([]);
   const [declined, setDeclined] = useState<string[]>([]);
   /** Games deleted a moment ago, hidden while their "Undo" is still offered. */
@@ -268,15 +291,60 @@ export default function App() {
     toast.show({ kind: "info", text: "Discord is not running", detail: "Its track in this recording will be silent. Open Discord and it is picked up from then on." });
   }, [discordSilent, status?.startedEpochMs, toast]);
 
-  // A newer version: a quiet chip in the bar, and one toast the first time.
+  // The page reloads for a newer interface. The app asks while the window is closed, and the page says not yet
+  // while a job or an Undo is still running (it's asked again a minute later). Asked by the player, it goes ahead.
+  const viewNow = useRef(view);
+  viewNow.current = view;
+  const updateNow = useRef(update);
+  updateNow.current = update;
+  useEffect(() => {
+    window.__rewatchReload = (asked) => {
+      if (!asked && toast.pending()) return false;
+      const v = viewNow.current;
+      // Back to the same screen, but watching together isn't rejoined by itself.
+      const keep: View = v.name === "player" ? { name: "player", id: v.id, playlist: v.playlist ?? null } : v;
+      const applied = updateNow.current?.applied;
+      const updated = asked && applied ? { version: applied.version, notes: applied.notes } : undefined;
+      try {
+        sessionStorage.setItem(RELOAD_KEY, JSON.stringify({ view: keep, updated } satisfies Resume));
+      } catch {
+        // Then it opens on the library.
+      }
+      // Edits are saved half a second after the last change; those get to go through. (When the app asks, the
+      // window has been closed for a few seconds already.)
+      window.setTimeout(() => location.reload(), asked ? 800 : 0);
+      return true;
+    };
+    return () => {
+      delete window.__rewatchReload;
+    };
+  }, [toast]);
+  useEffect(() => {
+    if (resume.updated) toast.show({ id: "updated", kind: "success", text: `Updated to version ${resume.updated.version}`, detail: resume.updated.notes || undefined });
+  }, [toast]);
+
+  // A newer version: a quiet chip in the bar. One whose interface is in place already offers a reload instead.
   const newer = update?.available && update.available.version !== updateLater ? update.available : null;
+  const inPlace = update?.reload && update.applied && update.applied.version !== updateLater ? update.applied : null;
   const busyNow = recording || saving || !!status?.gameRunning;
+  const reloadNow = () => {
+    setUpdOpen(false);
+    setUpdating(true);
+    if (!window.__rewatchReload?.(true)) location.reload();
+  };
   const install = () => {
     setUpdOpen(false);
+    setUpdating(true);
     api
       .updateInstall()
-      .then(() => api.updateInfo().then(setUpdate))
+      .then((info) => {
+        setUpdate(info);
+        // Only the interface changed, and it's in place: a reload shows it. Otherwise the installer is running.
+        if (info.reload) reloadNow();
+        else setUpdating(false);
+      })
       .catch((e) => {
+        setUpdating(false);
         toast.show({ kind: "error", text: `The update did not install. ${humanError(e)}` });
         api.updateInfo().then(setUpdate);
       });
@@ -392,11 +460,39 @@ export default function App() {
               </Popover>
             </>
           )}
-          {update?.installing ? (
+          {update?.installing || updating ? (
             <span className="chipbtn" role="status">
               <LoaderCircle size={14} className="spin" aria-hidden />
               Updating
             </span>
+          ) : inPlace ? (
+            <>
+              <button ref={updBtn} className="chipbtn update" aria-expanded={updOpen} aria-label={`Reload to show version ${inPlace.version}`} title={`Version ${inPlace.version} is ready`} onClick={() => setUpdOpen((o) => !o)}>
+                <RefreshCw size={14} aria-hidden />
+                <span>Reload</span>
+              </button>
+              <Popover anchor={updBtn} open={updOpen} onClose={() => setUpdOpen(false)} placement="bottom-end" label="Update">
+                <div className="pop-pad">
+                  <h3>Version {inPlace.version} is ready</h3>
+                  {inPlace.notes && <p>{inPlace.notes}</p>}
+                  <p className="muted">It's in place: reload the window to see it. That takes a moment, and recording carries on. Otherwise it's there the next time you open the window.</p>
+                  <div className="pop-acts">
+                    <button
+                      className="btn quiet"
+                      onClick={() => {
+                        setUpdOpen(false);
+                        setUpdateLater(inPlace.version);
+                      }}
+                    >
+                      Later
+                    </button>
+                    <button className="btn primary" onClick={reloadNow}>
+                      Reload now
+                    </button>
+                  </div>
+                </div>
+              </Popover>
+            </>
           ) : (
             newer && (
               <>
@@ -409,7 +505,15 @@ export default function App() {
                     <h3>Version {newer.version} is ready</h3>
                     {newer.notes && <p>{newer.notes}</p>}
                     {update?.error && <p className="down">{humanError(update.error)}</p>}
-                    <p className="muted">{busyNow ? "It installs once the game and recording are done." : "Takes about half a minute. Rewatch closes and opens again by itself."}</p>
+                    <p className="muted">
+                      {busyNow
+                        ? "It installs once the game and recording are done."
+                        : !newer.restart
+                          ? "Only the interface changes, so it takes a moment and Rewatch keeps running: just the window reloads."
+                          : update?.ready
+                            ? "It's downloaded. Rewatch closes and opens again by itself, in a few seconds."
+                            : "Takes about half a minute. Rewatch closes and opens again by itself."}
+                    </p>
                     <div className="pop-acts">
                       <button
                         className="btn quiet"

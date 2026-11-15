@@ -141,7 +141,17 @@ const teamReview: TeamReview = {
   call: "Wait for Lee, then hook, and everything on Kai'Sa.",
 };
 
-const update: UpdateInfo = { current: "0.2.4", available: { version: "0.2.5", notes: "Highlight reels, trends, and per-match audio.", url: "" }, checked: true, installing: false, error: null };
+const update: UpdateInfo = {
+  current: "0.2.4",
+  available: { version: "0.2.5", notes: "Highlight reels, trends, and per-match audio.", url: "", restart: false },
+  checked: true,
+  downloading: false,
+  ready: false,
+  installing: false,
+  applied: null,
+  reload: false,
+  error: null,
+};
 
 const base = (id: string, ms: number, result: "Win" | "Lose", champ: PlayerRow, tags: string[] = []): MatchSummary => ({
   id, startedAt: new Date(ms).toISOString(), startedEpochMs: ms, mode: "game", duration: 120, width: 1280, height: 720,
@@ -755,7 +765,11 @@ export async function mock<T>(cmd: string, args?: Record<string, unknown>): Prom
       case "watch_set": if (args!.id === null) watchPeers = []; return null;
       case "watch_peers": return watchPeers;
       case "update_info": case "update_check": return update;
-      case "update_install": update.installing = true; return null;
+      case "update_install":
+        // An interface-only version goes in at once and wants a reload; any other runs the installer.
+        if (update.available?.restart) update.installing = true;
+        else Object.assign(update, { current: update.available?.version ?? update.current, applied: update.available, available: null, reload: true });
+        return update;
       case "export_split": return args?.maxMb ? `E:\\Rewatch\\Clips\\split_${args.maxMb}mb.mp4` : "E:\\Rewatch\\Clips\\split.mp4";
       default: return null;
     }

@@ -81,7 +81,8 @@ export const api = {
   watchPeers: () => call<WatchPeer[]>("watch_peers"),
   updateInfo: () => call<UpdateInfo>("update_info"),
   updateCheck: () => call<UpdateInfo>("update_check"),
-  updateInstall: () => call<void>("update_install"),
+  /** Fetch the newer version if need be and put it in place. A new interface needs the window reloaded (`reload` in the answer); anything else restarts the app. */
+  updateInstall: () => call<UpdateInfo>("update_install"),
   exportSplit: (id: string, start: number, end: number, views: { source: string; shift: number; label: string }[], tracks: TrackName[], listen: number | null, label: string, maxMb?: number | null) =>
     call<string>("export_split", { id, start, end, views, tracks, listen, label, maxMb: maxMb ?? null }),
 };

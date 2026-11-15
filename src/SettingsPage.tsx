@@ -23,7 +23,7 @@ import {
   type LucideIcon,
 } from "lucide-react";
 import { useCallback, useEffect, useMemo, useRef, useState, type InputHTMLAttributes, type ReactNode } from "react";
-import { api, pickFolder, showInFolder } from "./api";
+import { api, onEvent, pickFolder, showInFolder } from "./api";
 import { bytes } from "./format";
 import type { SetupStep } from "./Onboarding";
 import type { Environment, Friend, KeySlot, LeagueBackup, MatchSummary, MicInfo, QueueToggles, Settings, ShareInfo, UpdateInfo } from "./types";
@@ -445,13 +445,19 @@ export function SettingsPage({
   const loadBackups = useCallback(() => api.listLeagueBackups().then(setBackups).catch(() => setBackups([])), []);
   useEffect(() => {
     api.listMicrophones().then(setMics).catch(() => setMics([]));
-    api.updateInfo().then(setUpdate).catch(() => {});
+    // Updates are fetched and put in place in the background, so the state can change while the page is open.
+    const loadUpdate = () => api.updateInfo().then(setUpdate).catch(() => {});
+    loadUpdate();
+    const offUpdate = onEvent("update", loadUpdate);
     loadBackups();
     // People asking to connect can turn up at any time while the page is open.
     const loadShare = () => api.shareInfo().then(setShare).catch(() => setShare(null));
     loadShare();
     const iv = window.setInterval(loadShare, 3000);
-    return () => window.clearInterval(iv);
+    return () => {
+      window.clearInterval(iv);
+      offUpdate();
+    };
   }, [loadBackups]);
 
   // What this PC has: again whenever a path it depends on was changed and saved.
@@ -1278,27 +1284,45 @@ export function SettingsPage({
               hint={
                 update?.installing
                   ? "Updating now. The app restarts by itself."
-                  : update?.available
-                    ? `Version ${update.available.version} is ready. ${update.available.notes}`
-                    : update?.error
-                      ? `Couldn't check: ${update.error}`
-                      : update?.checked
-                        ? "This is the newest version."
-                        : "Not checked yet."
+                  : update?.reload && update.applied
+                    ? `Version ${update.applied.version} is in place. Reload the window to see it, or it's there the next time you open the window.`
+                    : update?.available
+                      ? update.downloading
+                        ? `Downloading version ${update.available.version}.`
+                        : `Version ${update.available.version} is ready. ${update.available.notes}`
+                      : update?.error
+                        ? `Couldn't check: ${update.error}`
+                        : update?.checked
+                          ? "This is the newest version."
+                          : "Not checked yet."
               }
             >
-              {update?.available && !update.installing && (
-                <button
-                  className="btn primary"
-                  onClick={() =>
-                    api
-                      .updateInstall()
-                      .catch((e) => toast.show({ kind: "error", text: "The update didn't install", detail: humanError(e) }))
-                      .then(() => api.updateInfo().then(setUpdate))
-                  }
-                >
-                  Update now
+              {update?.reload && !update.installing ? (
+                <button className="btn primary" onClick={() => window.__rewatchReload?.(true) || location.reload()}>
+                  Reload now
                 </button>
+              ) : (
+                update?.available &&
+                !update.installing && (
+                  <button
+                    className="btn primary"
+                    onClick={() =>
+                      api
+                        .updateInstall()
+                        .then((info) => {
+                          setUpdate(info);
+                          // Only the interface changed: it's in place, and a reload shows it.
+                          if (info.reload) window.__rewatchReload?.(true);
+                        })
+                        .catch((e) => {
+                          toast.show({ kind: "error", text: "The update didn't install", detail: humanError(e) });
+                          api.updateInfo().then(setUpdate);
+                        })
+                    }
+                  >
+                    Update now
+                  </button>
+                )
               )}
               <button
                 className="btn"
@@ -1316,7 +1340,10 @@ export function SettingsPage({
                 {checking ? "Checking" : "Check now"}
               </button>
             </Opt>
-            <Opt title="Update by itself" hint="Installs while the window is closed and no game is running. Off: you're only told when one is ready.">
+            <Opt
+              title="Update by itself"
+              hint="Downloads new versions while no game is running. A change to the interface goes in without a restart; anything more installs while the window is closed. Off: you're only told when one is ready."
+            >
               <Switch label="Update by itself" checked={s.autoUpdate} onChange={(v) => set("autoUpdate", v)} />
             </Opt>
           </Section>

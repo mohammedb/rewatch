@@ -455,6 +455,8 @@ interface ToastApi {
   dismiss: (id: string) => void;
   /** Show a job while it runs (with the time it has taken), then what came of it. */
   job: <R>(label: string, work: () => Promise<R>, done?: (result: R) => ToastInput) => Promise<R | undefined>;
+  /** A job is running, or a toast still has something to do when it goes (an Undo on offer, say). */
+  pending: () => boolean;
 }
 
 const ToastContext = createContext<ToastApi | null>(null);
@@ -693,7 +695,8 @@ export function UiProvider({ children }: { children: ReactNode }) {
     },
     [show, update],
   );
-  const toastApi = useMemo(() => ({ show, update, dismiss, job }), [show, update, dismiss, job]);
+  const pending = useCallback(() => list.current.some((t) => t.kind === "busy" || !!t.onClose), []);
+  const toastApi = useMemo(() => ({ show, update, dismiss, job, pending }), [show, update, dismiss, job, pending]);
   const confirm = useCallback((c: ConfirmInput) => new Promise<boolean>((resolve) => setAsk({ c, resolve })), []);
 
   return (
