@@ -890,6 +890,10 @@ settings: `coaches`, `students`; new section in Settings: Coaching.
 
 This version changes the program, so it comes by installer and restarts the app.
 
+Released: the installer and the interface file are on the site, which was left as it was.
+The installed 0.6.3 found 0.7.0, downloaded the installer and accepted its signature, and
+the 0.7.0 build, checked against the same announcement, says it's up to date.
+
 ## Not built yet
 
 Code signing (so Windows stops warning about the installer). A sample game for the
