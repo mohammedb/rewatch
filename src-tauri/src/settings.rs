@@ -139,6 +139,12 @@ pub struct Settings {
     /// to stop for today. 0 turns it off.
     pub break_after_losses: u32,
     pub friends: Vec<Friend>,
+    /// People this player sends games to for review. Each gets only the games sent
+    /// to them, never the rest of the library.
+    pub coaches: Vec<Friend>,
+    /// People whose games this PC accepts for review. What they send is kept under
+    /// `Coaching` in the recordings folder, apart from this player's own games.
+    pub students: Vec<Friend>,
 }
 
 impl Default for Settings {
@@ -179,6 +185,8 @@ impl Default for Settings {
             riot_api_key: String::new(),
             break_after_losses: 0,
             friends: Vec::new(),
+            coaches: Vec::new(),
+            students: Vec::new(),
         }
     }
 }

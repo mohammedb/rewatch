@@ -6,7 +6,7 @@ import { listen } from "@tauri-apps/api/event";
 import { open } from "@tauri-apps/plugin-dialog";
 import { revealItemInDir } from "@tauri-apps/plugin-opener";
 import { mock } from "./mock";
-import type { Coach, Environment, Extras, Highlight, TeamReview, Insights, LeagueBackup, MatchFull, MatchSummary, MatchupNote, MicInfo, PostGame, Pov, Review, Settings, ShareInfo, Status, TrackName, TrendMatch, UpdateInfo, Voice, WatchPeer } from "./types";
+import type { Coach, CoachInbox, Environment, Extras, Highlight, TeamReview, Insights, LeagueBackup, MatchFull, MatchSummary, MatchupNote, MicInfo, PostGame, Pov, Review, Settings, Share, ShareInfo, Status, TrackName, TrendMatch, UpdateInfo, Voice, WatchPeer } from "./types";
 
 export const inApp = "__TAURI_INTERNALS__" in window;
 
@@ -40,6 +40,16 @@ export const api = {
     call<string>("export_clip", { id, start, end, tracks, maxMb: maxMb ?? null }),
   exportFull: (id: string) => call<string>("export_full", { id }),
   shareInfo: () => call<ShareInfo>("share_info"),
+  /** Who a game has been sent to for review, and how each sending is getting on. */
+  coachShares: (id: string) => call<Share[]>("coach_shares", { id }),
+  /** Send a game to someone for review, by their friend code. Returns the game's shares. */
+  coachSend: (id: string, code: string, name: string, comms: boolean, message: string) => call<Share[]>("coach_send", { id, code, name, comms, message }),
+  /** Stop sharing a game with someone. A copy they already fetched stays with them. */
+  coachStop: (id: string, code: string) => call<Share[]>("coach_stop", { id, code }),
+  /** Games arriving from students, and people asking to send one. */
+  coachInbox: () => call<CoachInbox>("coach_inbox"),
+  /** Turn down a game someone asked to send. */
+  coachDecline: (code: string, id: string, at: number) => call<void>("coach_decline", { code, id, at }),
   friendPing: (code: string) => call<string>("friend_ping", { code }),
   /** The player's name in League, to suggest as the name teammates see. */
   leagueName: () => call<string | null>("league_name"),

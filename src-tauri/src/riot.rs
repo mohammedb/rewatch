@@ -1452,6 +1452,21 @@ pub fn load(dir: &Path) -> Option<Value> {
     read_json(&dir.join(FILE)).filter(|v| num(v, "version") == VERSION)
 }
 
+/// Bring a recording's summary up to this version from the raw files beside it. The
+/// background job does this for the player's own games; a game a student sent is
+/// outside its rounds, and may have been summarized by an older app.
+pub fn resummarize(dir: &Path) -> bool {
+    let Some(pg) = read_json(&dir.join(FILE)) else { return false };
+    if num(&pg, "version") >= VERSION {
+        return false;
+    }
+    let (Some(game), Some(raw)) = (game_ref(dir), read_json(&dir.join(RAW_MATCH))) else { return false };
+    let riot = read_json(&dir.join(RIOT_FILE)).unwrap_or(Value::Null);
+    let timeline = read_json(&dir.join(RAW_TIMELINE));
+    let source = if text(&pg, "source") == "riot" { "riot" } else { "client" };
+    normalize(&raw, timeline.as_ref(), &game, text(&riot, "puuid"), source).is_some_and(|new| write_json(&dir.join(FILE), &new).is_ok())
+}
+
 /// The LP won or lost in a game and the standing after it, plus why its match data
 /// is missing if it is.
 pub fn status(dir: &Path) -> (Value, Value) {

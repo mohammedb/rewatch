@@ -11,6 +11,7 @@ mod library;
 mod liveclient;
 mod session;
 mod settings;
+mod sharing;
 mod team;
 mod titles;
 mod pov;
@@ -62,6 +63,8 @@ pub struct AppState {
     fetching: Mutex<()>,
     /// When the window was last closed (to the tray).
     closed_at: Mutex<Option<std::time::Instant>>,
+    /// A game was just sent to a coach: tell their app now rather than within the minute.
+    share_wake: std::sync::atomic::AtomicBool,
 }
 
 /// What is known about a newer version of the app. `current`, `ready` and `reload` are
@@ -364,6 +367,21 @@ fn pov_engine(app: &AppHandle) -> Result<std::sync::Arc<pov::Engine>, String> {
             engine.set_notifier(std::sync::Arc::new(move |event| {
                 let _ = handle.emit("watch", event);
             }));
+            // Games sent for coaching: someone asking to send one, one arriving here,
+            // and one of mine arriving at the other end.
+            let handle = app.clone();
+            engine.set_coach_notifier(std::sync::Arc::new(move |kind, what| {
+                let who = what.get("name").and_then(|n| n.as_str()).filter(|n| !n.is_empty()).unwrap_or("Someone").to_string();
+                match kind {
+                    "offer" => notify(&handle, &format!("{who} wants to send you a game to review")),
+                    "received" => {
+                        notify(&handle, &format!("{who} sent you a game to review"));
+                        let _ = handle.emit("library-changed", ());
+                    }
+                    _ => {}
+                }
+                let _ = handle.emit("coaching", json!({ "kind": kind, "what": what }));
+            }));
             *slot = Some(engine.clone());
             *st.share_error.lock().unwrap() = None;
             Ok(engine)
@@ -378,16 +396,69 @@ fn pov_engine(app: &AppHandle) -> Result<std::sync::Arc<pov::Engine>, String> {
 
 /// Keep the connection to teammates in line with the settings. The app goes online
 /// when sharing with teammates is on (so a teammate's first connection can reach it
-/// and show up for pairing) or when teammates are listed. With sharing off and no
-/// teammates it stays offline.
+/// and show up for pairing), when teammates or students are listed, or while a game
+/// sent to a coach has not arrived yet. Otherwise it stays offline.
 fn apply_pov(app: &AppHandle, settings: &Settings) {
     let running = app.state::<AppState>().pov.lock().unwrap().clone();
     match running {
         Some(engine) => engine.update(settings),
-        None if !settings.friends.is_empty() || settings.share_with_friends => {
+        None if !settings.friends.is_empty() || settings.share_with_friends || !settings.students.is_empty() || !sharing::open(&sharing::store()).is_empty() => {
             let _ = pov_engine(app);
         }
         None => {}
+    }
+}
+
+/// See to the games sent to coaches that have not arrived yet: make the smaller copy
+/// of one that has none (only while nothing is played or recorded), then tell the
+/// coach's app it is there. Their app fetches it; this PC only answers.
+fn share_round(app: &AppHandle) {
+    let store = sharing::store();
+    let open = sharing::open(&store);
+    if open.is_empty() {
+        return;
+    }
+    let s = app.state::<AppState>().settings.lock().unwrap().clone();
+    let Some(root) = s.recordings_path() else { return };
+    for share in open {
+        let dir = root.join(&share.id);
+        if !dir.join("match.json").exists() {
+            continue;
+        }
+        let note = |state: &str| {
+            if sharing::set_state(&store, &share.id, &share.code, share.at, state) {
+                let _ = app.emit("coaching", json!({ "kind": "share", "what": { "id": share.id, "code": share.code, "state": state } }));
+            }
+        };
+        match sharing::video_of(&dir) {
+            sharing::Video::Gone => {
+                note("novideo");
+                continue;
+            }
+            sharing::Video::Preparing => {
+                note("preparing");
+                if !quiet(app) {
+                    continue;
+                }
+                let (ffmpeg, _) = s.ffmpeg_tools();
+                let handle = app.clone();
+                match copies::make(&ffmpeg, &dir, &move || !quiet(&handle)) {
+                    Ok(true) => {}
+                    // A game started: carry on after it.
+                    Ok(false) => continue,
+                    Err(e) => {
+                        log(format!("[coach] {e}; sending the recording as it is"));
+                        let _ = std::fs::write(dir.join(copies::FAILED), e.to_string());
+                    }
+                }
+            }
+            sharing::Video::Ready(..) => {}
+        }
+        let Some(pkg) = sharing::package(&root, &share) else { continue };
+        match pov_engine(app) {
+            Ok(engine) => note(engine.offer(&share, &pkg)),
+            Err(_) => note("offline"),
+        }
     }
 }
 
@@ -630,11 +701,13 @@ fn get_settings(state: State<AppState>) -> Settings {
 
 #[tauri::command]
 fn save_settings(app: AppHandle, state: State<AppState>, mut settings: Settings) -> CmdResult<Settings> {
-    for f in &mut settings.friends {
-        f.code = f.code.trim().to_lowercase();
-        f.name = f.name.trim().to_string();
+    for list in [&mut settings.friends, &mut settings.coaches, &mut settings.students] {
+        for f in list.iter_mut() {
+            f.code = f.code.trim().to_lowercase();
+            f.name = f.name.trim().to_string();
+        }
+        list.retain(|f| !f.code.is_empty());
     }
-    settings.friends.retain(|f| !f.code.is_empty());
     settings.save().map_err(err)?;
     allow_recordings_dir(&app, &settings);
     apply_autostart(&app, &settings);
@@ -762,7 +835,8 @@ fn pov_list(app: AppHandle, state: State<AppState>, id: String) -> CmdResult<Vec
     let doc = library::get(&s, &id).map_err(err)?;
     let Some(mine) = pov::card_from_match(&doc) else { return Ok(Vec::new()) };
     let dir = std::path::PathBuf::from(doc.get("dir").and_then(|d| d.as_str()).unwrap_or_default());
-    if s.friends.is_empty() {
+    // A game a student sent was not played with my teammates: nobody to ask.
+    if s.friends.is_empty() || sharing::from_of(&dir).is_some() {
         return Ok(pov::saved_povs(&dir, &mine));
     }
     match pov_engine(&app) {
@@ -788,7 +862,8 @@ fn pov_extras(app: AppHandle, state: State<AppState>, id: String) -> CmdResult<V
     let doc = library::get(&s, &id).map_err(err)?;
     let Some(mine) = pov::card_from_match(&doc) else { return Ok(Vec::new()) };
     let dir = std::path::PathBuf::from(doc.get("dir").and_then(|d| d.as_str()).unwrap_or_default());
-    if s.friends.is_empty() {
+    // Teammates, and the other side of a game sent for coaching.
+    if s.friends.is_empty() && sharing::audience(&sharing::store(), &dir, &id).is_empty() {
         return Ok(pov::saved_extras(&dir, &mine));
     }
     match pov_engine(&app) {
@@ -964,7 +1039,68 @@ fn update_install(app: AppHandle) -> CmdResult<UpdateState> {
 #[tauri::command(async)]
 fn list_matches(state: State<AppState>) -> Vec<Value> {
     let s = state.settings.lock().unwrap().clone();
-    library::list(&s)
+    library::list_all(&s)
+}
+
+/// Who a game has been sent to, and how each sending is getting on.
+#[tauri::command(async)]
+fn coach_shares(id: String) -> Vec<sharing::Share> {
+    sharing::of_game(&sharing::store(), &id)
+}
+
+/// Send a game to someone for review, by their friend code. They get this one game:
+/// a smaller copy of the video with game sound, the timeline and stats, the cursor and
+/// key logs and the notes on it; with `comms`, the Discord and microphone tracks too.
+#[tauri::command(async)]
+fn coach_send(app: AppHandle, state: State<AppState>, id: String, code: String, name: String, comms: bool, message: String) -> CmdResult<Vec<sharing::Share>> {
+    let s = state.settings.lock().unwrap().clone();
+    let code = code.trim().to_lowercase();
+    if pov::parse_code(&code).is_none() {
+        return Err("That does not look like a friend code. Ask them to copy it again.".into());
+    }
+    if code == pov::my_code() {
+        return Err("That is your own code.".into());
+    }
+    let doc = library::get(&s, &id).map_err(err)?;
+    let dir = std::path::PathBuf::from(doc.get("dir").and_then(|d| d.as_str()).unwrap_or_default());
+    if sharing::from_of(&dir).is_some() {
+        return Err("This game was sent to you. Only the player who recorded it can send it on.".into());
+    }
+    if sharing::video_of(&dir) == sharing::Video::Gone {
+        return Err("This game's video was deleted, so there is nothing to send.".into());
+    }
+    sharing::grant(&sharing::store(), &id, &code, &name, comms, &message).map_err(err)?;
+    // Go online if this is the first thing that needs it, and tell their app now.
+    pov_engine(&app)?;
+    state.share_wake.store(true, std::sync::atomic::Ordering::Relaxed);
+    Ok(sharing::of_game(&sharing::store(), &id))
+}
+
+/// Stop sharing a game with someone. A copy they already fetched stays with them.
+#[tauri::command(async)]
+fn coach_stop(id: String, code: String) -> CmdResult<Vec<sharing::Share>> {
+    sharing::revoke(&sharing::store(), &id, &code).map_err(err)?;
+    Ok(sharing::of_game(&sharing::store(), &id))
+}
+
+/// Games on their way to this PC, and people asking to send one who are not on the
+/// students list yet.
+#[tauri::command(async)]
+fn coach_inbox(state: State<AppState>) -> Value {
+    let engine = state.pov.lock().unwrap().clone();
+    match engine {
+        Some(e) => json!({ "offers": e.offers(), "receiving": e.receiving() }),
+        None => json!({ "offers": [], "receiving": [] }),
+    }
+}
+
+/// Turn down a game someone asked to send.
+#[tauri::command(async)]
+fn coach_decline(state: State<AppState>, code: String, id: String, at: i64) {
+    let s = state.settings.lock().unwrap().clone();
+    if let Some(engine) = state.pov.lock().unwrap().clone() {
+        engine.decline(&s, &code, &id, at);
+    }
 }
 
 #[tauri::command(async)]
@@ -1093,6 +1229,7 @@ pub fn run() {
             update: Mutex::new(UpdateState { current: update::current(), ..Default::default() }),
             fetching: Mutex::new(()),
             closed_at: Mutex::new(None),
+            share_wake: std::sync::atomic::AtomicBool::new(false),
         })
         .setup(|app| {
             let handle = app.handle().clone();
@@ -1148,8 +1285,30 @@ pub fn run() {
                         let recording = st.session.lock().unwrap().is_some();
                         if let (Some(engine), false) = (engine, recording) {
                             engine.sync_recent(&settings);
+                            // And whatever students sent while this PC was not listening.
+                            engine.sync_students();
                         }
                         std::thread::sleep(Duration::from_secs(240));
+                    }
+                });
+            }
+            {
+                // Games sent to a coach: their smaller copy, then word to the coach's
+                // app, again every minute until it has arrived.
+                let handle = handle.clone();
+                std::thread::spawn(move || {
+                    std::thread::sleep(Duration::from_secs(20));
+                    loop {
+                        let recording = handle.state::<AppState>().session.lock().unwrap().is_some();
+                        if !recording {
+                            share_round(&handle);
+                        }
+                        for _ in 0..60 {
+                            if handle.state::<AppState>().share_wake.swap(false, std::sync::atomic::Ordering::Relaxed) {
+                                break;
+                            }
+                            std::thread::sleep(Duration::from_secs(1));
+                        }
                     }
                 });
             }
@@ -1372,6 +1531,11 @@ pub fn run() {
             update_install,
             export_split,
             list_matches,
+            coach_shares,
+            coach_send,
+            coach_stop,
+            coach_inbox,
+            coach_decline,
             get_match,
             save_review,
             delete_match,
@@ -1438,6 +1602,122 @@ pub fn cli_pov_ping(code: String, identity: String) -> i32 {
             match engine.ping(&code) {
                 Ok(name) => println!("RESULT connected (name: {name})"),
                 Err(e) => println!("RESULT {e}"),
+            }
+            0
+        }
+        Err(e) => {
+            eprintln!("{e}");
+            1
+        }
+    }
+}
+
+/// `rewatch --send-game <recording folder> --to <friend code> --identity <file>
+/// [--comms] [--message <text>]`: stand in for a player sending that recording to a
+/// coach, and stay up answering their app until it has the game. The list of what is
+/// shared is kept under %APPDATA%, so point that somewhere else first. For testing.
+pub fn cli_send_game(dir: String, to: String, identity: String, comms: bool, message: String) -> i32 {
+    let dir = std::path::PathBuf::from(dir);
+    let id = dir.file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_default();
+    let mut s = Settings::default();
+    s.recordings_dir = dir.parent().map(|p| p.to_string_lossy().to_string()).unwrap_or_default();
+    s.share_name = "Test player".into();
+    s.share_with_friends = false;
+    let store = sharing::store();
+    let share = match sharing::grant(&store, &id, &to, "Test coach", comms, &message) {
+        Ok(share) => share,
+        Err(e) => {
+            eprintln!("{e}");
+            return 2;
+        }
+    };
+    let engine = match pov::Engine::start(std::path::Path::new(&identity), &s) {
+        Ok(e) => e,
+        Err(e) => {
+            eprintln!("{e}");
+            return 1;
+        }
+    };
+    println!("CODE {}", engine.code());
+    let root = std::path::PathBuf::from(&s.recordings_dir);
+    let mut last = String::new();
+    for _ in 0..600 {
+        if let sharing::Video::Preparing = sharing::video_of(&dir) {
+            let (ffmpeg, _) = s.ffmpeg_tools();
+            if let Err(e) = copies::make(&ffmpeg, &dir, &|| false) {
+                let _ = std::fs::write(dir.join(copies::FAILED), e.to_string());
+            }
+        }
+        let now = sharing::find(&store, &to, &id).map(|s| s.state).unwrap_or_default();
+        let state = if now == "received" {
+            now
+        } else {
+            let state = sharing::package(&root, &share).map(|pkg| engine.offer(&share, &pkg)).unwrap_or("novideo").to_string();
+            sharing::set_state(&store, &id, &to, share.at, &state);
+            state
+        };
+        if state != last {
+            println!("STATE {state}");
+            last = state;
+        }
+        if last == "received" {
+            // Stay a little longer so the coach's notes can be asked for.
+            for e in engine.extras(&s, &pov::card_from_match(&library::get(&s, &id).unwrap_or(Value::Null)).unwrap_or_default(), &dir) {
+                println!("NOTES {} notes={} drawings={} first={}", e.friend, e.notes.len(), e.drawings.len(), e.notes.first().map(|n| n.to_string()).unwrap_or_default());
+            }
+        }
+        std::thread::sleep(Duration::from_secs(3));
+    }
+    0
+}
+
+/// `rewatch --take-games <recordings folder> --identity <file> [--from <friend code>]`:
+/// stand in for a coach's PC. Games from `--from` are fetched into
+/// `<recordings folder>\Coaching`; anyone else's offer is only printed. For testing.
+pub fn cli_take_games(dir: String, identity: String, from: Option<String>) -> i32 {
+    let mut s = Settings::default();
+    s.recordings_dir = dir;
+    s.share_name = "Test coach".into();
+    s.share_with_friends = false;
+    if let Some(code) = from {
+        s.students = vec![settings::Friend { name: "Test player".into(), code }];
+    }
+    match pov::Engine::start(std::path::Path::new(&identity), &s) {
+        Ok(engine) => {
+            println!("CODE {}", engine.code());
+            engine.set_coach_notifier(std::sync::Arc::new(|kind, what| println!("{} {what}", kind.to_uppercase())));
+            engine.set_notifier(std::sync::Arc::new(|event| println!("WATCH {event}")));
+            let mut seen = String::new();
+            loop {
+                std::thread::sleep(Duration::from_secs(1));
+                let now = serde_json::to_string(&engine.receiving()).unwrap_or_default();
+                if now != seen && now != "[]" {
+                    println!("RECEIVING {now}");
+                }
+                seen = now;
+            }
+        }
+        Err(e) => {
+            eprintln!("{e}");
+            1
+        }
+    }
+}
+
+/// `rewatch --pov-ask <friend code> --identity <file> --json <request>`: send another
+/// app one request and print what it answers. For testing who is told what.
+pub fn cli_pov_ask(code: String, identity: String, request: String) -> i32 {
+    let Ok(req) = serde_json::from_str::<Value>(&request) else {
+        eprintln!("the request is not JSON");
+        return 2;
+    };
+    let mut s = Settings::default();
+    s.share_name = "ask test".into();
+    match pov::Engine::start(std::path::Path::new(&identity), &s) {
+        Ok(engine) => {
+            match engine.ask_raw(&code, req) {
+                Ok(head) => println!("REPLY {head}"),
+                Err(e) => println!("REFUSED {e}"),
             }
             0
         }

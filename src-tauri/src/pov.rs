@@ -340,6 +340,10 @@ struct MyWatch {
     ctl: i64,
     /// Whose position everyone is following. None means mine.
     leader: Option<EndpointId>,
+    /// The other side of a game sent for coaching: who it came from, or went to.
+    with: Vec<EndpointId>,
+    /// The game was sent to me, so teammates have no part in it.
+    received: bool,
 }
 
 #[derive(Default)]
@@ -620,10 +624,19 @@ struct Policy {
     copies: bool,
     /// Notes and drawings are shared with teammates.
     notes: bool,
+    /// People whose games are accepted for coaching, with the name they go by here.
+    students: HashMap<EndpointId, String>,
+    /// Where the games they send are kept.
+    inbox: Option<PathBuf>,
+    /// The list of games this PC has sent to coaches.
+    shares: PathBuf,
 }
 
 fn policy_from(settings: &Settings) -> Policy {
     Policy {
+        students: settings.students.iter().filter_map(|f| Some((parse_code(&f.code)?, f.name.clone()))).collect(),
+        inbox: crate::sharing::inbox(settings),
+        shares: crate::sharing::store(),
         share: settings.share_with_friends,
         friends: settings.friends.iter().filter_map(|f| parse_code(&f.code)).collect(),
         name: settings.share_name.clone(),
@@ -678,6 +691,251 @@ fn note_request(requests: &Requests, peer: EndpointId, req: &Value) {
     list.push(PairRequest { code, name, at_ms: now });
 }
 
+// ------------------------------------------------------ games sent for coaching
+
+/// Someone who is not accepted yet and wants to send this PC a game.
+#[derive(Serialize, Clone, Debug)]
+#[serde(rename_all = "camelCase")]
+pub struct Offer {
+    pub code: String,
+    pub name: String,
+    /// The recording's id on their PC, and when they sent it.
+    pub id: String,
+    pub at: i64,
+    pub game: Value,
+    pub message: String,
+    pub at_ms: i64,
+}
+
+/// One game to fetch from a student.
+#[derive(Clone)]
+struct Receive {
+    peer: EndpointId,
+    code: String,
+    name: String,
+    inbox: PathBuf,
+    pkg: Value,
+    tries: u32,
+}
+
+#[derive(Default)]
+struct Coaching {
+    /// Offers waiting for a yes.
+    offers: std::sync::Mutex<Vec<Offer>>,
+    /// Students whose apps should be asked what they have sent.
+    ask: std::sync::Mutex<Vec<EndpointId>>,
+    jobs: std::sync::Mutex<std::collections::VecDeque<Receive>>,
+    /// Games arriving right now, by "code|id".
+    progress: std::sync::Mutex<HashMap<String, Value>>,
+    /// People whose wish to send a game has been announced since the app started.
+    /// Anyone with this PC's code can offer, so each is announced once, not per offer.
+    told: std::sync::Mutex<HashSet<String>>,
+    notify: std::sync::Mutex<Option<Arc<dyn Fn(&str, Value) + Send + Sync>>>,
+}
+
+type Coach = Arc<Coaching>;
+
+impl Coaching {
+    /// Tell the app something happened: "offer", "received" or "share".
+    fn tell(&self, kind: &str, what: Value) {
+        let f = self.notify.lock().ok().and_then(|n| n.clone());
+        if let Some(f) = f {
+            f(kind, what);
+        }
+    }
+
+    fn ask_soon(&self, peer: EndpointId) {
+        if let Ok(mut ask) = self.ask.lock() {
+            if !ask.contains(&peer) {
+                ask.push(peer);
+            }
+        }
+    }
+}
+
+fn note_offer(coach: &Coach, peer: EndpointId, req: &Value) {
+    let text = |k: &str, max: usize| crate::sharing::clean(req.get(k).and_then(|x| x.as_str()).unwrap_or(""), max);
+    let id = text("id", 80);
+    if !valid_id(&id) {
+        return;
+    }
+    let offer = Offer {
+        code: peer.to_string(),
+        name: text("name", 40),
+        id,
+        at: req.get("at").and_then(|x| x.as_i64()).unwrap_or(0),
+        game: crate::sharing::clean_summary(req.get("game").unwrap_or(&Value::Null)),
+        message: text("message", 500),
+        at_ms: now_ms(),
+    };
+    {
+        let Ok(mut list) = coach.offers.lock() else { return };
+        let theirs = list.iter().filter(|o| o.code == offer.code).count();
+        match list.iter().position(|o| o.code == offer.code && o.id == offer.id) {
+            Some(i) => list[i] = offer.clone(),
+            // A few per person and a few people at most: a stranger cannot fill the list.
+            None if theirs >= 5 => return,
+            None => {
+                if list.len() >= 20 {
+                    list.remove(0);
+                }
+                list.push(offer.clone());
+            }
+        }
+    }
+    let fresh = coach.told.lock().map(|mut told| told.len() < 200 && told.insert(offer.code.clone())).unwrap_or(false);
+    if fresh {
+        log(format!("[coach] {} ({}) wants to send a game", peer.fmt_short(), if offer.name.is_empty() { "no name" } else { offer.name.as_str() }));
+        coach.tell("offer", serde_json::to_value(&offer).unwrap_or(Value::Null));
+    }
+}
+
+/// One whole file of a game sent to this PC, into memory. For the small ones.
+async fn fetch_shared(
+    endpoint: &Endpoint,
+    conns: &tokio::sync::Mutex<HashMap<EndpointId, Connection>>,
+    peer: EndpointId,
+    id: &str,
+    name: &str,
+    max: usize,
+) -> Result<Vec<u8>> {
+    let want = json!({ "op": "file", "id": id, "file": name, "shared": true, "bulk": true });
+    let (_, mut recv) = ask(endpoint, conns, peer, want).await?;
+    recv.read_to_end(max).await.map_err(|_| anyhow!("interrupted"))
+}
+
+/// Fetch a game a student sent and file it under `Coaching`: the video first (it
+/// carries on from where it stopped if the connection drops), then the files that go
+/// with it, and `match.json` last, so a game is only listed once it is whole.
+/// Returns this PC's id for it.
+async fn receive(
+    endpoint: &Endpoint,
+    conns: &tokio::sync::Mutex<HashMap<EndpointId, Connection>>,
+    job: &Receive,
+    coach: &Coach,
+) -> Result<String> {
+    let pkg = &job.pkg;
+    let id = pkg.get("id").and_then(|x| x.as_str()).filter(|id| valid_id(id)).ok_or_else(|| anyhow!("bad offer"))?.to_string();
+    let at = pkg.get("at").and_then(|x| x.as_i64()).unwrap_or(0);
+    let comms = pkg.get("comms").and_then(|x| x.as_bool()).unwrap_or(false);
+    let remote = pkg.pointer("/video/file").and_then(|x| x.as_str()).unwrap_or("");
+    let size = pkg.pointer("/video/size").and_then(|x| x.as_u64()).unwrap_or(0);
+    // Their smaller copy is this PC's whole video of the game.
+    let local = match remote {
+        "review.mp4" | "game.mp4" => "game.mp4",
+        crate::highlights::REEL_FILE => crate::highlights::REEL_FILE,
+        _ => return Err(anyhow!("bad offer")),
+    };
+    let folder = crate::sharing::folder(&id, &job.code);
+    let dir = job.inbox.join(&folder);
+    tokio::fs::create_dir_all(&dir).await?;
+    let key = format!("{}|{id}", job.code);
+    let game = crate::sharing::clean_summary(pkg.get("game").unwrap_or(&Value::Null));
+    let show = |got: u64, total: u64| {
+        if let Ok(mut p) = coach.progress.lock() {
+            p.insert(key.clone(), json!({ "code": job.code, "name": job.name, "id": id, "game": game, "got": got, "total": total }));
+        }
+    };
+    let done = dir.join(local);
+    let part = dir.join(format!("{local}.part"));
+    // Listed as arriving from here on, which also keeps it from being queued again.
+    show(if done.exists() { size } else { 0 }, size);
+    if !done.exists() {
+        let have = tokio::fs::metadata(&part).await.map(|m| m.len()).unwrap_or(0);
+        show(have, size);
+        let room = crate::winutil::free_bytes(&job.inbox).unwrap_or(u64::MAX);
+        if room < size.saturating_sub(have).saturating_add(1 << 30) {
+            return Err(anyhow!("not enough room on the drive"));
+        }
+        let want = json!({ "op": "file", "id": id, "file": remote, "start": have, "shared": true, "bulk": true });
+        match ask(endpoint, conns, job.peer, want).await {
+            Ok((head, mut recv)) => {
+                let total = head.get("total").and_then(|x| x.as_u64()).unwrap_or(0);
+                let mut file = tokio::fs::OpenOptions::new().create(true).append(true).open(&part).await?;
+                let mut got = have;
+                let mut buf = vec![0u8; 256 * 1024];
+                let mut checked = std::time::Instant::now();
+                loop {
+                    match recv.read(&mut buf).await {
+                        Ok(Some(n)) if n > 0 => {
+                            file.write_all(&buf[..n]).await?;
+                            got += n as u64;
+                            show(got, total);
+                        }
+                        Ok(_) => break,
+                        Err(_) => return Err(anyhow!("interrupted")),
+                    }
+                    // Never compete with a game for the connection.
+                    if checked.elapsed() > Duration::from_secs(2) {
+                        checked = std::time::Instant::now();
+                        if game_running() {
+                            return Err(anyhow!("paused for a game"));
+                        }
+                    }
+                }
+                file.flush().await?;
+                drop(file);
+                if got < total {
+                    return Err(anyhow!("incomplete"));
+                }
+            }
+            // Asking to continue past the end means the part file is already whole.
+            Err(e) if e.to_string() == "range" && have > 0 => {}
+            Err(e) => return Err(e),
+        }
+        tokio::fs::rename(&part, &done).await?;
+    }
+    // Only names this app knows are ever written, whatever their app lists.
+    let names: Vec<String> = pkg
+        .get("files")
+        .and_then(|f| f.as_array())
+        .map(|a| a.iter().take(30).filter_map(|f| f.get("name").and_then(|n| n.as_str()).map(String::from)).collect())
+        .unwrap_or_default();
+    for name in names.iter().filter(|n| n.as_str() != "match.json" && crate::sharing::carried(n, comms)) {
+        let max = if name.ends_with(".m4a") { 512 } else { 64 } * 1024 * 1024;
+        match fetch_shared(endpoint, conns, job.peer, &id, name, max).await {
+            Ok(bytes) => tokio::fs::write(dir.join(name), bytes).await?,
+            // Gone since it was listed: the game is still worth having.
+            Err(e) if e.to_string() == "not_found" => {}
+            Err(e) => return Err(e),
+        }
+    }
+    // The player's own notes and drawings on it, kept so they show without a connection.
+    if let Ok((reply, _)) = ask(endpoint, conns, job.peer, json!({ "op": "extras", "shared": id })).await {
+        let keep = json!({ "friend": job.name, "code": job.code, "reply": reply });
+        let _ = tokio::fs::write(extras_cache(&dir, &job.code), keep.to_string()).await;
+    }
+    let bytes = fetch_shared(endpoint, conns, job.peer, &id, "match.json", 32 * 1024 * 1024).await?;
+    let from = crate::sharing::From {
+        name: job.name.clone(),
+        code: job.code.clone(),
+        id: id.clone(),
+        at,
+        comms,
+        message: crate::sharing::clean(pkg.get("message").and_then(|x| x.as_str()).unwrap_or(""), 500),
+        received_at: now_ms(),
+    };
+    let doc = crate::sharing::localize(serde_json::from_slice(&bytes)?, &folder, &from, local)?;
+    let tmp = dir.join("match.tmp");
+    tokio::fs::write(&tmp, serde_json::to_vec_pretty(&doc)?).await?;
+    tokio::fs::rename(&tmp, dir.join("match.json")).await?;
+    // So their app can say it arrived.
+    let _ = ask(endpoint, conns, job.peer, json!({ "op": "got", "id": id, "at": at })).await;
+    Ok(folder)
+}
+
+/// Cards of the games students have sent, under this PC's ids for them.
+fn received_cards(inbox: &Path) -> CardList {
+    crate::sharing::received(inbox)
+        .into_iter()
+        .filter_map(|(dir, _)| {
+            let doc = serde_json::from_str::<Value>(&std::fs::read_to_string(dir.join("match.json")).ok()?).ok()?;
+            let card = card_from_match(&doc)?;
+            Some((dir, card))
+        })
+        .collect()
+}
+
 pub struct Engine {
     /// Always present; an Option only so it can be wound down safely on drop.
     rt: Option<tokio::runtime::Runtime>,
@@ -694,6 +952,8 @@ pub struct Engine {
     sending: Arc<std::sync::Mutex<HashSet<EndpointId>>>,
     /// Setting: save teammates' views for offline use.
     keep: Arc<AtomicBool>,
+    /// Games being sent to this PC for coaching.
+    coach: Coach,
     proxy_port: u16,
     proxy_token: String,
 }
@@ -723,6 +983,172 @@ async fn read_frame(recv: &mut RecvStream, max: usize) -> Result<Value> {
     Ok(serde_json::from_slice(&buf)?)
 }
 
+/// Send the bytes `start..=end` of a file as the reply to a request. `bulk` marks a
+/// background copy, which gives way to a game on this PC.
+async fn send_file(send: &mut SendStream, path: Option<PathBuf>, start: u64, end: Option<u64>, bulk: bool) -> Result<()> {
+    let refuse = |why: &str| json!({ "ok": false, "error": why });
+    let opened = match path {
+        Some(p) => tokio::fs::File::open(p).await.ok(),
+        None => None,
+    };
+    let Some(mut file) = opened else {
+        write_frame(send, &refuse("not_found")).await?;
+        let _ = send.finish();
+        return Ok(());
+    };
+    let total = file.metadata().await.map(|m| m.len()).unwrap_or(0);
+    let Some((start, end)) = clamp_range(start, end, total) else {
+        write_frame(send, &refuse("range")).await?;
+        let _ = send.finish();
+        return Ok(());
+    };
+    write_frame(send, &json!({ "ok": true, "total": total, "start": start, "end": end })).await?;
+    file.seek(std::io::SeekFrom::Start(start)).await?;
+    let mut left = end - start + 1;
+    let mut buf = vec![0u8; 128 * 1024];
+    let mut checked = std::time::Instant::now();
+    while left > 0 {
+        if bulk && checked.elapsed() > Duration::from_secs(2) {
+            checked = std::time::Instant::now();
+            if game_running() {
+                // Drop the stream; the other side carries on later from here.
+                return Ok(());
+            }
+        }
+        let want = buf.len().min(left as usize);
+        let n = file.read(&mut buf[..want]).await?;
+        if n == 0 {
+            break;
+        }
+        // The viewer stops reading when it has what it needs; that ends the loop.
+        if send.write_all(&buf[..n]).await.is_err() {
+            return Ok(());
+        }
+        left -= n as u64;
+    }
+    let _ = send.finish();
+    Ok(())
+}
+
+/// What became of a request that might be about a game sent for coaching.
+enum Coached {
+    /// It was, and this is the answer.
+    Reply(Value),
+    /// It was, and the answer (a file) has gone out already.
+    Sent,
+    /// It is an ordinary request between teammates.
+    No,
+}
+
+/// Answer a request about a game sent for coaching, from either side of it: the
+/// player who sent it answers the person it was sent to, and that person answers the
+/// player. Neither has to be on the other's teammates list, and "let teammates watch
+/// my recordings" has no say here: a game sent to someone was sent on purpose.
+async fn serve_coaching(send: &mut SendStream, req: &Value, peer: EndpointId, policy: &Arc<RwLock<Policy>>, coach: &Coach) -> Result<Coached> {
+    let (root, inbox, shares, student) = {
+        let p = policy.read().unwrap();
+        (p.root.clone(), p.inbox.clone(), p.shares.clone(), p.students.contains_key(&peer))
+    };
+    let refuse = |why: &str| json!({ "ok": false, "error": why });
+    let code = peer.to_string();
+    let text = |k: &str| req.get(k).and_then(|x| x.as_str()).unwrap_or("");
+    let about_shared = req.get("shared").is_some_and(|v| !v.is_null() && *v != json!(false));
+    let reply = match (text("op"), about_shared) {
+        // A player wants to send this PC a game. From someone accepted before, their
+        // app is asked for it at once; from anyone else it waits for a yes.
+        ("offer", _) => {
+            let (id, at) = (text("id"), req.get("at").and_then(|x| x.as_i64()).unwrap_or(0));
+            let turned_down = inbox.as_deref().is_some_and(|i| crate::sharing::removed(i).contains(&crate::sharing::key(&code, id, at)));
+            if turned_down {
+                json!({ "ok": true, "accepted": false, "declined": true })
+            } else if student {
+                coach.ask_soon(peer);
+                json!({ "ok": true, "accepted": true })
+            } else {
+                note_offer(coach, peer, req);
+                json!({ "ok": true, "accepted": false })
+            }
+        }
+        // The person a game was sent to has fetched it.
+        ("got", _) => {
+            let (id, at) = (text("id"), req.get("at").and_then(|x| x.as_i64()).unwrap_or(0));
+            if crate::sharing::mark_got(&shares, id, &code, at) {
+                coach.tell("share", json!({ "id": id, "code": code, "state": "received" }));
+            }
+            json!({ "ok": true })
+        }
+        // What this PC has sent to the person asking, ready to fetch.
+        ("shared", _) => {
+            let games: Vec<Value> = match &root {
+                Some(root) => crate::sharing::to_peer(&shares, &code).iter().filter_map(|s| crate::sharing::package(root, s)).collect(),
+                None => Vec::new(),
+            };
+            json!({ "ok": true, "games": games })
+        }
+        // One file of a game sent to the person asking: only what that share covers.
+        // Always a background copy, so never while a game is played on this PC.
+        ("file", true) => {
+            if game_running() {
+                return Ok(Coached::Reply(refuse("busy")));
+            }
+            let (id, name) = (text("id"), text("file"));
+            let path = match (&root, crate::sharing::find(&shares, &code, id)) {
+                (Some(root), Some(share)) if valid_id(id) && crate::sharing::may_fetch(&root.join(id), &share, name) => Some(root.join(id).join(name)),
+                _ => None,
+            };
+            let start = req.get("start").and_then(|x| x.as_u64()).unwrap_or(0);
+            send_file(send, path, start, req.get("end").and_then(|x| x.as_u64()), true).await?;
+            return Ok(Coached::Sent);
+        }
+        // Notes and drawings on a game sent for coaching, asked for by its other side.
+        ("extras", true) => {
+            let id = text("shared");
+            let mine = root.as_ref().filter(|_| valid_id(id)).and_then(|root| {
+                let share = crate::sharing::find(&shares, &code, id)?;
+                let dir = root.join(id);
+                let doc: Value = serde_json::from_str(&std::fs::read_to_string(dir.join("match.json")).ok()?).ok()?;
+                let mut reply = extras_reply(&dir, &card_from_match(&doc)?, true);
+                if !share.comms {
+                    // When I spoke belongs with the voices, which did not go along.
+                    reply["voice"] = Value::Null;
+                }
+                Some(reply)
+            });
+            let theirs = || inbox.as_deref().and_then(|inbox| crate::sharing::find_received(inbox, &code, id)).and_then(|(dir, _)| coach_reply(&dir));
+            mine.or_else(theirs).unwrap_or_else(|| refuse("none"))
+        }
+        _ => return Ok(Coached::No),
+    };
+    Ok(Coached::Reply(reply))
+}
+
+/// What a coach's PC tells the player about the game they sent: the coach's notes and
+/// drawings on it. The video is the player's own, so the times need no shifting, and
+/// a drawing with no view named lands on the player's own view.
+fn coach_reply(dir: &Path) -> Option<Value> {
+    let doc: Value = serde_json::from_str(&std::fs::read_to_string(dir.join("match.json")).ok()?).ok()?;
+    let card = card_from_match(&doc)?;
+    let review = std::fs::read_to_string(dir.join("review.json")).ok().and_then(|s| serde_json::from_str::<Value>(&s).ok()).unwrap_or(Value::Null);
+    Some(json!({
+        "ok": true,
+        "offset": card.offset,
+        "player": card.player,
+        "champion": "",
+        "championKey": "",
+        "notes": review.get("notes").cloned().unwrap_or(json!([])),
+        "drawings": review.get("drawings").cloned().unwrap_or(json!([])),
+    }))
+}
+
+/// Whether `peer` is someone this PC has sent a game to, or takes games from.
+fn coaching_with(policy: &Arc<RwLock<Policy>>, peer: EndpointId) -> bool {
+    let (student, shares) = {
+        let p = policy.read().unwrap();
+        (p.students.contains_key(&peer), p.shares.clone())
+    };
+    student || !crate::sharing::to_peer(&shares, &peer.to_string()).is_empty()
+}
+
 /// Answer one request from a teammate.
 async fn serve_stream(
     mut send: SendStream,
@@ -731,6 +1157,7 @@ async fn serve_stream(
     policy: Arc<RwLock<Policy>>,
     requests: Requests,
     hub: Hub,
+    coach: Coach,
 ) -> Result<()> {
     let req = read_frame(&mut recv, MAX_REQUEST).await?;
     let (is_friend, share, name, root, copies, notes) = {
@@ -740,7 +1167,18 @@ async fn serve_stream(
     let refuse = |why: &str| json!({ "ok": false, "error": why });
     let op = req.get("op").and_then(|x| x.as_str()).unwrap_or("");
     let cards = || root.as_deref().map(|r| cached_cards(r, copies)).unwrap_or_default();
-    let reply = if !is_friend {
+    match serve_coaching(&mut send, &req, peer, &policy, &coach).await? {
+        Coached::Reply(reply) => {
+            write_frame(&mut send, &reply).await?;
+            let _ = send.finish();
+            return Ok(());
+        }
+        Coached::Sent => return Ok(()),
+        Coached::No => {}
+    }
+    // Watching together also works with the person a game was sent to, or came from.
+    let coaching = op == "watch" && !is_friend && coaching_with(&policy, peer);
+    let reply = if !is_friend && !coaching {
         note_request(&requests, peer, &req);
         refuse("not_friend")
     } else if op == "watch" {
@@ -779,46 +1217,7 @@ async fn serve_stream(
                     (Some(root), true, Some(name @ ("game.mp4" | "review.mp4" | "mouse.csv"))) => Some(root.join(id).join(name)),
                     _ => None,
                 };
-                let opened = match path {
-                    Some(p) => tokio::fs::File::open(p).await.ok(),
-                    None => None,
-                };
-                let Some(mut file) = opened else {
-                    write_frame(&mut send, &refuse("not_found")).await?;
-                    let _ = send.finish();
-                    return Ok(());
-                };
-                let total = file.metadata().await.map(|m| m.len()).unwrap_or(0);
-                let Some((start, end)) = clamp_range(start, end, total) else {
-                    write_frame(&mut send, &refuse("range")).await?;
-                    let _ = send.finish();
-                    return Ok(());
-                };
-                write_frame(&mut send, &json!({ "ok": true, "total": total, "start": start, "end": end })).await?;
-                file.seek(std::io::SeekFrom::Start(start)).await?;
-                let mut left = end - start + 1;
-                let mut buf = vec![0u8; 128 * 1024];
-                let mut checked = std::time::Instant::now();
-                while left > 0 {
-                    if bulk && checked.elapsed() > Duration::from_secs(2) {
-                        checked = std::time::Instant::now();
-                        if game_running() {
-                            // Drop the stream; the other side carries on later from here.
-                            return Ok(());
-                        }
-                    }
-                    let want = buf.len().min(left as usize);
-                    let n = file.read(&mut buf[..want]).await?;
-                    if n == 0 {
-                        break;
-                    }
-                    // The viewer stops reading when it has what it needs; that ends the loop.
-                    if send.write_all(&buf[..n]).await.is_err() {
-                        return Ok(());
-                    }
-                    left -= n as u64;
-                }
-                let _ = send.finish();
+                send_file(&mut send, path, start, end, bulk).await?;
                 return Ok(());
             }
             _ => refuse("unknown"),
@@ -829,12 +1228,12 @@ async fn serve_stream(
     Ok(())
 }
 
-async fn serve_conn(conn: Connection, policy: Arc<RwLock<Policy>>, requests: Requests, hub: Hub) {
+async fn serve_conn(conn: Connection, policy: Arc<RwLock<Policy>>, requests: Requests, hub: Hub, coach: Coach) {
     let peer = conn.remote_id();
     while let Ok((send, recv)) = conn.accept_bi().await {
-        let (policy, requests, hub) = (policy.clone(), requests.clone(), hub.clone());
+        let (policy, requests, hub, coach) = (policy.clone(), requests.clone(), hub.clone(), coach.clone());
         tokio::spawn(async move {
-            let _ = serve_stream(send, recv, peer, policy, requests, hub).await;
+            let _ = serve_stream(send, recv, peer, policy, requests, hub, coach).await;
         });
     }
 }
@@ -1008,16 +1407,21 @@ impl Engine {
         let online = Arc::new(AtomicBool::new(false));
         let requests: Requests = Arc::new(std::sync::Mutex::new(Vec::new()));
         let hub: Hub = Arc::new(std::sync::Mutex::new(WatchHub::default()));
+        let coach: Coach = Arc::new(Coaching::default());
+        // Whatever students sent while this PC was off is asked for first thing.
+        for peer in policy.read().unwrap().students.keys() {
+            coach.ask_soon(*peer);
+        }
 
         // Answer teammates.
         {
-            let (endpoint, policy, requests, hub) = (endpoint.clone(), policy.clone(), requests.clone(), hub.clone());
+            let (endpoint, policy, requests, hub, coach) = (endpoint.clone(), policy.clone(), requests.clone(), hub.clone(), coach.clone());
             rt.spawn(async move {
                 while let Some(incoming) = endpoint.accept().await {
-                    let (policy, requests, hub) = (policy.clone(), requests.clone(), hub.clone());
+                    let (policy, requests, hub, coach) = (policy.clone(), requests.clone(), hub.clone(), coach.clone());
                     tokio::spawn(async move {
                         if let Ok(conn) = incoming.await {
-                            serve_conn(conn, policy, requests, hub).await;
+                            serve_conn(conn, policy, requests, hub, coach).await;
                         }
                     });
                 }
@@ -1089,9 +1493,99 @@ impl Engine {
                 }
             });
         }
+        // Fetches the games students send, one at a time, and never during a game.
+        {
+            let (endpoint, conns, policy, coach) = (endpoint.clone(), conns.clone(), policy.clone(), coach.clone());
+            rt.spawn(async move {
+                loop {
+                    // Ask each student's app what it has sent. Each is asked on its
+                    // own, so one who is offline holds nobody else up.
+                    let peers: Vec<EndpointId> = coach.ask.lock().map(|mut a| std::mem::take(&mut *a)).unwrap_or_default();
+                    for peer in peers {
+                        let (known, inbox, me) = {
+                            let p = policy.read().unwrap();
+                            (p.students.get(&peer).cloned(), p.inbox.clone(), p.name.clone())
+                        };
+                        let (Some(name), Some(inbox)) = (known, inbox) else { continue };
+                        let (endpoint, conns, coach) = (endpoint.clone(), conns.clone(), coach.clone());
+                        tokio::spawn(async move {
+                            let Ok((head, _)) = ask(&endpoint, &conns, peer, json!({ "op": "shared", "name": me })).await else { return };
+                            let code = peer.to_string();
+                            let games = head.get("games").and_then(|g| g.as_array()).cloned().unwrap_or_default();
+                            for pkg in games.into_iter().take(200).filter(|pkg| crate::sharing::wanted(&inbox, &code, pkg)) {
+                                // Not one that is waiting its turn or arriving right now.
+                                let id = pkg.get("id").and_then(|x| x.as_str()).unwrap_or("");
+                                if coach.progress.lock().map(|p| p.contains_key(&format!("{code}|{id}"))).unwrap_or(true) {
+                                    continue;
+                                }
+                                let Ok(mut jobs) = coach.jobs.lock() else { return };
+                                if !jobs.iter().any(|j| j.peer == peer && j.pkg.get("id") == pkg.get("id")) {
+                                    jobs.push_back(Receive { peer, code: code.clone(), name: name.clone(), inbox: inbox.clone(), pkg, tries: 0 });
+                                }
+                            }
+                        });
+                    }
+                    let job = coach.jobs.lock().ok().and_then(|mut q| q.pop_front());
+                    let Some(mut job) = job else {
+                        tokio::time::sleep(Duration::from_secs(2)).await;
+                        continue;
+                    };
+                    // Removed from the list since it was queued: not theirs to send any more.
+                    if !policy.read().unwrap().students.contains_key(&job.peer) {
+                        continue;
+                    }
+                    if game_running() {
+                        if let Ok(mut q) = coach.jobs.lock() {
+                            q.push_back(job);
+                        }
+                        tokio::time::sleep(Duration::from_secs(20)).await;
+                        continue;
+                    }
+                    let outcome = receive(&endpoint, &conns, &job, &coach).await;
+                    let id = job.pkg.get("id").and_then(|x| x.as_str()).unwrap_or("").to_string();
+                    let key = format!("{}|{id}", job.code);
+                    // Still listed while it waits to be tried again, with what went wrong.
+                    let waiting = outcome.as_ref().err().filter(|e| e.to_string() != "not_found" && job.tries + 1 < 20).map(|e| e.to_string());
+                    if let Ok(mut p) = coach.progress.lock() {
+                        match (waiting, p.get_mut(&key)) {
+                            (Some(why), Some(entry)) => entry["error"] = json!(why),
+                            _ => {
+                                p.remove(&key);
+                            }
+                        }
+                    }
+                    match outcome {
+                        Ok(local) => {
+                            log(format!("[coach] received {}'s game {id}", job.name));
+                            coach.tell("received", json!({ "id": local, "code": job.code, "name": job.name, "game": job.pkg.get("game").map(crate::sharing::clean_summary) }));
+                        }
+                        // They stopped sharing it: nothing to wait for, and nothing half fetched is kept.
+                        Err(e) if e.to_string() == "not_found" => {
+                            let dir = job.inbox.join(crate::sharing::folder(&id, &job.code));
+                            if valid_id(&id) && !dir.join("match.json").exists() {
+                                let _ = tokio::fs::remove_dir_all(&dir).await;
+                            }
+                        }
+                        Err(e) => {
+                            job.tries += 1;
+                            if job.tries == 1 {
+                                log(format!("[coach] could not fetch {}'s game yet ({e}); will retry", job.name));
+                            }
+                            // Give up after a while; the next look at what they sent queues it again.
+                            if job.tries < 20 {
+                                if let Ok(mut q) = coach.jobs.lock() {
+                                    q.push_back(job);
+                                }
+                            }
+                            tokio::time::sleep(Duration::from_secs(30)).await;
+                        }
+                    }
+                }
+            });
+        }
         log(format!("[pov] online for teammates as {}", endpoint.id().fmt_short()));
         let sending = Arc::new(std::sync::Mutex::new(HashSet::new()));
-        Ok(Engine { rt: Some(rt), endpoint, policy, conns, online, requests, queue, progress, hub, sending, keep, proxy_port, proxy_token })
+        Ok(Engine { rt: Some(rt), endpoint, policy, conns, online, requests, queue, progress, hub, sending, keep, coach, proxy_port, proxy_token })
     }
 
     fn rt(&self) -> &tokio::runtime::Runtime {
@@ -1099,8 +1593,89 @@ impl Engine {
     }
 
     pub fn update(&self, settings: &Settings) {
-        *self.policy.write().unwrap() = policy_from(settings);
+        let next = policy_from(settings);
+        // Someone just accepted as a student: fetch what they have been waiting to send.
+        let added: Vec<EndpointId> = {
+            let now = self.policy.read().unwrap();
+            next.students.keys().filter(|p| !now.students.contains_key(*p)).copied().collect()
+        };
+        *self.policy.write().unwrap() = next;
         self.keep.store(settings.keep_teammate_views, Ordering::Relaxed);
+        for peer in added {
+            self.coach.ask_soon(peer);
+        }
+    }
+
+    /// Where news about games sent for coaching is handed to (the app's window):
+    /// "offer" (someone wants to send one), "received" (one has arrived) and "share"
+    /// (one this PC sent has arrived at the other end).
+    pub fn set_coach_notifier(&self, f: Arc<dyn Fn(&str, Value) + Send + Sync>) {
+        if let Ok(mut n) = self.coach.notify.lock() {
+            *n = Some(f);
+        }
+    }
+
+    /// Ask every student's app what it has sent. Called now and then, so a game sent
+    /// while this PC was off still arrives.
+    pub fn sync_students(&self) {
+        let students: Vec<EndpointId> = self.policy.read().map(|p| p.students.keys().copied().collect()).unwrap_or_default();
+        for peer in students {
+            self.coach.ask_soon(peer);
+        }
+    }
+
+    /// People who want to send a game and have not been accepted yet.
+    pub fn offers(&self) -> Vec<Offer> {
+        let students = self.policy.read().map(|p| p.students.clone()).unwrap_or_default();
+        self.coach
+            .offers
+            .lock()
+            .map(|list| list.iter().filter(|o| parse_code(&o.code).is_some_and(|id| !students.contains_key(&id))).cloned().collect())
+            .unwrap_or_default()
+    }
+
+    /// Games arriving right now, with the bytes fetched so far and in all.
+    pub fn receiving(&self) -> Vec<Value> {
+        self.coach.progress.lock().map(|p| p.values().cloned().collect()).unwrap_or_default()
+    }
+
+    /// Turn an offer down: it goes from the list, and their app is told no the next
+    /// time it asks.
+    pub fn decline(&self, settings: &Settings, code: &str, id: &str, at: i64) {
+        if let Ok(mut list) = self.coach.offers.lock() {
+            list.retain(|o| !(o.code == code && o.id == id));
+        }
+        if let Some(inbox) = crate::sharing::inbox(settings) {
+            crate::sharing::mark_removed(&inbox, &crate::sharing::key(code, id, at));
+        }
+    }
+
+    /// Tell the person a game was sent to that it is there for them. Returns how
+    /// that went, as a share's state: "accepted" (their app is fetching it), "asked"
+    /// (they have to say yes first), "declined", "old" (their Rewatch does not know
+    /// about this yet) or "offline".
+    pub fn offer(&self, share: &crate::sharing::Share, pkg: &Value) -> &'static str {
+        let Some(peer) = parse_code(&share.code) else { return "offline" };
+        let (endpoint, conns) = (self.endpoint.clone(), self.conns.clone());
+        let req = json!({
+            "op": "offer",
+            "name": self.my_name(),
+            "id": share.id,
+            "at": share.at,
+            "comms": share.comms,
+            "message": share.message,
+            "game": pkg.get("game"),
+            "size": pkg.pointer("/video/size"),
+        });
+        let flag = |head: &Value, k: &str| head.get(k).and_then(|x| x.as_bool()).unwrap_or(false);
+        match self.wait(async move { ask(&endpoint, &conns, peer, req).await.map(|(head, _)| head) }) {
+            Some(Ok(head)) if flag(&head, "accepted") => "accepted",
+            Some(Ok(head)) if flag(&head, "declined") => "declined",
+            Some(Ok(_)) => "asked",
+            // Versions before 0.7 answer a request they do not know like this.
+            Some(Err(e)) if matches!(e.to_string().as_str(), "not_friend" | "unknown" | "sharing_off") => "old",
+            _ => "offline",
+        }
     }
 
     /// Progress of views being saved into one recording folder, by friend code.
@@ -1159,17 +1734,34 @@ impl Engine {
     /// a teammate's app answers is kept in the recording's folder, and that copy is
     /// used when they cannot be reached.
     pub fn extras(&self, settings: &Settings, mine: &GameCard, dir: &Path) -> Vec<Extras> {
-        let jobs: Vec<_> = settings
-            .friends
-            .iter()
-            .map(|friend| {
-                let (name, code) = (friend.name.clone(), friend.code.trim().to_string());
+        // The other side of a game sent for coaching is asked about that game by its
+        // id on the PC that recorded it. A game sent to me was not played by my
+        // teammates, so they are not asked about it.
+        let shares = self.policy.read().map(|p| p.shares.clone()).unwrap_or_default();
+        let mut ask_them: Vec<(String, String, Option<String>)> =
+            crate::sharing::audience(&shares, dir, &mine.id).into_iter().map(|(name, code, id)| (name, code, Some(id))).collect();
+        if crate::sharing::from_of(dir).is_none() {
+            for friend in &settings.friends {
+                let code = friend.code.trim().to_string();
+                if !ask_them.iter().any(|(_, c, _)| *c == code) {
+                    ask_them.push((friend.name.clone(), code, None));
+                }
+            }
+        }
+        let asked: HashSet<String> = ask_them.iter().map(|(_, code, _)| code.clone()).collect();
+        let jobs: Vec<_> = ask_them
+            .into_iter()
+            .map(|(name, code, shared)| {
                 let (endpoint, conns, key, my_offset) = (self.endpoint.clone(), self.conns.clone(), key_of(mine), mine.offset);
                 let cache = extras_cache(dir, &code);
                 let (tx, rx) = mpsc::channel();
                 self.rt().spawn(async move {
+                    let mut want = json!({ "op": "extras", "game": key });
+                    if let Some(id) = shared {
+                        want["shared"] = json!(id);
+                    }
                     let fresh = match parse_code(&code) {
-                        Some(peer) => ask(&endpoint, &conns, peer, json!({ "op": "extras", "game": key })).await.ok().map(|(head, _)| head),
+                        Some(peer) => ask(&endpoint, &conns, peer, want).await.ok().map(|(head, _)| head),
                         None => None,
                     };
                     let reply = match fresh {
@@ -1189,7 +1781,15 @@ impl Engine {
                 rx
             })
             .collect();
-        jobs.into_iter().filter_map(|rx| rx.recv().ok().flatten()).collect()
+        let mut out: Vec<Extras> = jobs.into_iter().filter_map(|rx| rx.recv().ok().flatten()).collect();
+        // What was kept from someone who is no longer asked (a coach the game is no
+        // longer shared with, a teammate taken off the list) still shows.
+        for kept in saved_extras(dir, mine) {
+            if !asked.contains(&kept.code) {
+                out.push(kept);
+            }
+        }
+        out
     }
 
     /// Where position reports from teammates are handed to (the app's window).
@@ -1204,40 +1804,46 @@ impl Engine {
     /// without it this is the regular "still here, at this moment" report.
     pub fn watch_set(&self, settings: &Settings, id: Option<&str>, t_video: f64, playing: bool, rate: f64, control: bool) -> Result<()> {
         let name = self.my_name();
-        let msg = {
+        let (msg, with, received) = {
             let mut h = self.hub.lock().map_err(|_| anyhow!("busy"))?;
             match id {
                 None => {
-                    if h.mine.take().is_none() {
-                        return Ok(());
-                    }
-                    WatchMsg { stop: true, name, ..Default::default() }
+                    let Some(left) = h.mine.take() else { return Ok(()) };
+                    (WatchMsg { stop: true, name, ..Default::default() }, left.with, left.received)
                 }
                 Some(id) => {
                     if h.mine.as_ref().map(|m| m.id != id).unwrap_or(true) {
                         let root = settings.recordings_path().ok_or_else(|| anyhow!("No recordings folder is set"))?;
-                        if !valid_id(id) {
-                            return Err(anyhow!("Invalid recording id"));
-                        }
-                        let card = std::fs::read_to_string(root.join(id).join("match.json"))
+                        let dir = crate::sharing::game_dir(&root, id).ok_or_else(|| anyhow!("Recording not found"))?;
+                        let card = std::fs::read_to_string(dir.join("match.json"))
                             .ok()
                             .and_then(|t| serde_json::from_str::<Value>(&t).ok())
                             .and_then(|doc| card_from_match(&doc))
                             .ok_or_else(|| anyhow!("Only game recordings can be watched together"))?;
-                        h.mine = Some(MyWatch { id: id.to_string(), card, ctl: 0, leader: None });
+                        let shares = self.policy.read().map(|p| p.shares.clone()).unwrap_or_default();
+                        let with = crate::sharing::audience(&shares, &dir, id).iter().filter_map(|(_, code, _)| parse_code(code)).collect();
+                        h.mine = Some(MyWatch { id: id.to_string(), card, ctl: 0, leader: None, with, received: crate::sharing::from_of(&dir).is_some() });
                     }
                     let mine = h.mine.as_mut().expect("just set");
                     if control {
                         mine.ctl = now_ms().max(mine.ctl + 1);
                         mine.leader = None;
                     }
-                    WatchMsg { game: key_of(&mine.card), t_game: t_video - mine.card.offset, playing, rate, ctl: mine.ctl, name, stop: false }
+                    let msg = WatchMsg { game: key_of(&mine.card), t_game: t_video - mine.card.offset, playing, rate, ctl: mine.ctl, name, stop: false };
+                    (msg, mine.with.clone(), mine.received)
                 }
             }
         };
         let mut req = serde_json::to_value(&msg)?;
         req["op"] = json!("watch");
-        let friends: Vec<EndpointId> = self.policy.read().map(|p| p.friends.iter().copied().collect()).unwrap_or_default();
+        // Teammates, and the other side of a game sent for coaching. A game that was
+        // sent to me is no business of my teammates.
+        let mut friends: Vec<EndpointId> = if received { Vec::new() } else { self.policy.read().map(|p| p.friends.iter().copied().collect()).unwrap_or_default() };
+        for peer in with {
+            if !friends.contains(&peer) {
+                friends.push(peer);
+            }
+        }
         for peer in friends {
             // One report at a time per teammate; the next one carries the newest state anyway.
             if !self.sending.lock().map(|mut s| s.insert(peer)).unwrap_or(false) {
@@ -1268,7 +1874,11 @@ impl Engine {
         if peers.is_empty() {
             return Vec::new();
         }
-        let cards = settings.recordings_path().map(|r| cached_cards(&r, false)).unwrap_or_default();
+        let mut cards = settings.recordings_path().map(|r| cached_cards(&r, false)).unwrap_or_default();
+        // A student going through the game they sent: here it is one of the received ones.
+        if let Some(inbox) = crate::sharing::inbox(settings) {
+            cards.extend(received_cards(&inbox));
+        }
         peers
             .into_iter()
             .map(|(id, msg)| {
@@ -1318,6 +1928,14 @@ impl Engine {
             let _ = tx.send(fut.await);
         });
         rx.recv().ok()
+    }
+
+    /// Send one request as it is and return the reply's first part, or why it was
+    /// refused. For testing what another app answers to whom.
+    pub fn ask_raw(&self, code: &str, req: Value) -> Result<Value> {
+        let peer = parse_code(code).ok_or_else(|| anyhow!("badcode"))?;
+        let (endpoint, conns) = (self.endpoint.clone(), self.conns.clone());
+        self.wait(async move { ask(&endpoint, &conns, peer, req).await.map(|(head, _)| head) }).unwrap_or_else(|| Err(anyhow!("offline")))
     }
 
     /// Check a teammate's code. Returns the name their app reports.
@@ -1644,7 +2262,7 @@ mod tests {
     fn the_newest_control_is_followed() {
         let a = SecretKey::generate().public();
         let b = SecretKey::generate().public();
-        let mut mine = MyWatch { id: "m".into(), card: GameCard::default(), ctl: 0, leader: None };
+        let mut mine = MyWatch { id: "m".into(), card: GameCard::default(), ctl: 0, leader: None, with: Vec::new(), received: false };
         let msg = |ctl: i64| WatchMsg { ctl, ..Default::default() };
         // A joins after someone pressed play: follow them.
         assert_eq!(watch_kind(&mut mine, a, &msg(100)), "control");

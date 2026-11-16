@@ -1,6 +1,7 @@
 import { BarChart3, Clapperboard, Download, LoaderCircle, RefreshCw, SlidersHorizontal, Square, TriangleAlert, Users } from "lucide-react";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { api, onEvent } from "./api";
+import { acceptOffer, gameLine } from "./Coaching";
 import { clock, toReview } from "./format";
 import { Games } from "./Games";
 import { Logo } from "./icons";
@@ -8,7 +9,7 @@ import { leftSetup, Onboarding, type SetupStep } from "./Onboarding";
 import { Player } from "./Player";
 import { SettingsPage } from "./SettingsPage";
 import { Trends } from "./Trends";
-import type { MatchSummary, Settings, Status, UpdateInfo, WatchPeer } from "./types";
+import type { CoachingEvent, MatchSummary, Settings, Status, UpdateInfo, WatchPeer } from "./types";
 import { humanError, Popover, useToast } from "./ui";
 
 /** One stop in a walk-through that can go across games, like "every death to no vision". */
@@ -149,6 +150,50 @@ export default function App() {
     setSettings(saved);
     refreshMatches();
   };
+  /** A change to the settings made outside the Settings page, which keeps its own copy: it starts again from this one. */
+  const saveFromElsewhere = async (next: Settings) => {
+    await saveSettings(next);
+    setSettingsRev((n) => n + 1);
+  };
+  const settingsNow = useRef(settings);
+  settingsNow.current = settings;
+  const saveNow = useRef(saveFromElsewhere);
+  saveNow.current = saveFromElsewhere;
+
+  // Games sent for review: someone asking to send one, one arriving here, one of mine arriving at a coach's.
+  useEffect(
+    () =>
+      onEvent<CoachingEvent>("coaching", ({ kind, what }) => {
+        const who = what.name || "Someone";
+        if (kind === "offer" && what.code) {
+          const code = what.code;
+          toast.show({
+            id: `offer-${code}`,
+            kind: "info",
+            text: `${who} wants to send you a game to review`,
+            detail: `${gameLine(what.game)}. Only accept people you know.`,
+            ms: 20000,
+            actions: [
+              {
+                label: "Accept",
+                run: () => {
+                  const s = settingsNow.current;
+                  if (s) saveNow.current(acceptOffer(s, { code, name: what.name ?? "" })).catch((e) => toast.show({ kind: "error", text: `That did not go through. ${humanError(e)}` }));
+                },
+              },
+              { label: "See it", run: () => setView({ name: "library" }) },
+            ],
+          });
+        } else if (kind === "received" && what.id) {
+          const id = what.id;
+          toast.show({ id: `got-${id}`, kind: "success", text: `${who} sent you a game to review`, detail: gameLine(what.game), ms: 15000, actions: [{ label: "Open", run: () => setView({ name: "player", id }) }] });
+        } else if (kind === "share" && what.state === "received") {
+          const coach = settingsNow.current?.coaches.find((f) => f.code === what.code)?.name || settingsNow.current?.friends.find((f) => f.code === what.code)?.name;
+          toast.show({ kind: "success", text: `${coach || "Your coach"} has your game`, detail: "What they write and draw on it shows up in your recording." });
+        }
+      }),
+    [toast],
+  );
 
   const matches = useMemo(
     () =>
@@ -159,6 +204,9 @@ export default function App() {
         : null,
     [allMatches, hidden, videoGone],
   );
+  // The player's own games, and the games students sent. Only the first count as theirs anywhere.
+  const own = useMemo(() => (matches ? matches.filter((m) => !m.from) : null), [matches]);
+  const sent = useMemo(() => (matches ?? []).filter((m) => !!m.from), [matches]);
   const recording = status?.state === "recording" || status?.state === "starting";
   const saving = status?.state === "finalizing";
   const stop = async () => {
@@ -354,6 +402,13 @@ export default function App() {
   const invite = peers.find((p) => p.matchId && !declined.includes(p.code + p.matchId) && p.matchId !== session);
   const inviteName = invite ? settings?.friends.find((f) => f.code === invite.code)?.name || invite.name || "A teammate" : "";
   const inviteGame = invite ? matches?.find((m) => m.id === invite.matchId) : undefined;
+  // Mine, or one a student sent me: then it is theirs, and usually they are the one going through it.
+  const inviteChamp = inviteGame?.game?.me?.champion;
+  const inviteWhat = inviteGame?.from
+    ? `the ${inviteChamp ? `${inviteChamp} ` : ""}game ${inviteGame.from.code === invite?.code ? "they" : inviteGame.from.name || "a student"} sent you`
+    : inviteChamp
+      ? `your ${inviteChamp} game`
+      : "a game you both recorded";
   // Inside that same game the player offers joining in its own header.
   const inviteHere = !!invite && view.name === "player" && view.id === invite.matchId;
   const watchTogether = (id: string) => {
@@ -373,7 +428,7 @@ export default function App() {
     toast.show({
       id: `invite-${key}`,
       kind: "info",
-      text: `${inviteName} is reviewing ${inviteGame?.game?.me?.champion ? `your ${inviteGame.game.me.champion} game` : "a game you both recorded"}`,
+      text: `${inviteName} is reviewing ${inviteWhat}`,
       detail: "Watch it together: you pause, play and jump around as one.",
       ms: 15000,
       actions: [{ label: "Watch together", run: () => watchTogether(invite.matchId!) }],
@@ -381,7 +436,7 @@ export default function App() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [invite?.code, invite?.matchId, inviteHere, !!settings, !!setup]);
 
-  const reviewCount = toReview(matches).length;
+  const reviewCount = toReview(own).length;
   const state = saving ? "saving" : recording ? "rec" : status?.gameRunning ? "game" : settings?.autoRecord === false ? "off" : "";
   const stateText = saving
     ? "Saving the recording"
@@ -436,7 +491,7 @@ export default function App() {
               <Popover anchor={invBtn} open={invOpen} onClose={() => setInvOpen(false)} placement="bottom-end" label="Watch together">
                 <div className="pop-pad">
                   <h3>
-                    {inviteName} is reviewing {inviteGame?.game?.me?.champion ? `your ${inviteGame.game.me.champion} game` : "a game you both recorded"}
+                    {inviteName} is reviewing {inviteWhat}
                   </h3>
                   <p>
                     {inviteGame?.game?.queueName ? `${inviteGame.game.queueName}. ` : ""}Watch it together: you see each other's place in the game, and pausing or jumping
@@ -563,7 +618,9 @@ export default function App() {
             key={view.id + (view.together ? "-together" : "")}
             id={view.id}
             friends={settings?.friends ?? []}
-            matches={matches ?? undefined}
+            settings={settings}
+            onSaveSettings={saveFromElsewhere}
+            matches={own ?? undefined}
             joinTogether={view.together}
             hintsOn={!!settings?.aiReview && !!settings.geminiKey.trim()}
             peers={peers}
@@ -595,8 +652,10 @@ export default function App() {
           settings && <SettingsPage key={settingsRev} settings={settings} onSave={saveSettings} matches={matches} onSetup={openSetup} />
         ) : (
           <Games
-            matches={matches}
+            matches={own}
+            sent={sent}
             settings={settings}
+            onSaveSettings={saveFromElsewhere}
             busy={recording || saving}
             onOpen={(id, start) => setView({ name: "player", id, start })}
             onRecord={startManual}

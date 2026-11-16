@@ -1,5 +1,5 @@
 import {
-  ArrowLeft, Bookmark, Circle, Download, Eraser, FolderOpen, Grid2x2, HardDriveDownload, ImageDown, LayoutGrid, LayoutPanelLeft, Maximize2, MoreHorizontal, MoveUpRight,
+  ArrowLeft, Bookmark, Circle, Download, Eraser, FolderOpen, GraduationCap, Grid2x2, HardDriveDownload, ImageDown, LayoutGrid, LayoutPanelLeft, Maximize2, MoreHorizontal, MoveUpRight,
   PanelRightClose, PanelRightOpen, Pause, Pencil, Play, Presentation, Scissors, SkipBack, SkipForward, Skull, Star, Swords, Table2, Trash2, Undo2, Users, VideoOff, Volume2, Wand2, X,
   type LucideIcon,
 } from "lucide-react";
@@ -7,6 +7,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type { Playlist } from "./App";
 import { api, fileUrl, onEvent, showInFolder } from "./api";
 import { ItemIcon, Portrait, type Side } from "./ChampIcon";
+import { SendToCoach, shareStatus } from "./Coaching";
 import { ClipBar, FILTERS, ShortcutsButton, ShowControl, SoundControl, type Overlay } from "./Deck";
 import { bytes, categorize, clock, describe, gameClockAt, laneName, uid, videoTimeAt, when } from "./format";
 import { eventGlyph } from "./icons";
@@ -18,7 +19,7 @@ import { MatchBoard, TeamBoard } from "./Scoreboard";
 import { canShare, shareCardPng } from "./ShareCard";
 import { ItemSlots, Kda, KdaRatio, ScoreBadge, scoresOf } from "./Stats";
 import { Timeline, type Marker } from "./Timeline";
-import type { AudioPrefs, Coach, Drawing, Extras, FocusCheck, Friend, Highlight, Insights, MatchFull, MatchSummary, NextFocus, Pov, Review, Shape, TeamReview, Tool, TrackName, Voice, WatchEvent, WatchPeer } from "./types";
+import type { AudioPrefs, Coach, Drawing, Extras, FocusCheck, Friend, Highlight, Insights, MatchFull, MatchSummary, NextFocus, Pov, Review, Settings, Shape, Share, TeamReview, Tool, TrackName, Voice, WatchEvent, WatchPeer } from "./types";
 import { humanError, Menu, ownsKeys, Select, Skeleton, useToast } from "./ui";
 import { drawKeys, drawMouse, KeyOverlay, parseKeys, parseMouse, ShapeView, SideView, Splitter, TileBar, usePovMouse, ZoomPane, type KeyLog, type MouseLog } from "./Views";
 
@@ -179,6 +180,9 @@ interface PlayerProps {
   onBack: () => void;
   /** The teammates list, for watching together. */
   friends: Friend[];
+  /** For sending the game to a coach: the people it can go to, and saving a new one. */
+  settings?: Settings | null;
+  onSaveSettings?: (next: Settings) => Promise<void>;
   /** Library matches, for game comparison and the focus loop. */
   matches?: MatchSummary[];
   /** Opened from a teammate's invitation: start in watch-together. */
@@ -216,7 +220,7 @@ function otherGame(p: Playlist): { index: number; back: boolean } | null {
   return end < p.items.length ? { index: end, back: false } : null;
 }
 
-export function Player({ id, onBack, friends, matches, joinTogether, onTogether, hintsOn, peers = [], playlist, onPlaylist, onDelete, onDeleteVideo, videoGone, onReviewed, start }: PlayerProps) {
+export function Player({ id, onBack, friends, settings, onSaveSettings, matches, joinTogether, onTogether, hintsOn, peers = [], playlist, onPlaylist, onDelete, onDeleteVideo, videoGone, onReviewed, start }: PlayerProps) {
   const toast = useToast();
   const [match, setMatch] = useState<MatchFull | null>(null);
   const [loadError, setLoadError] = useState<string | null>(null);
@@ -251,8 +255,20 @@ export function Player({ id, onBack, friends, matches, joinTogether, onTogether,
   const [together, setTogether] = useState(!!joinTogether);
   const togetherRef = useRef(false);
   const [mates, setMates] = useState<string[]>([]);
-  const friendsRef = useRef(friends);
-  friendsRef.current = friends;
+  // Everyone who may turn up here: teammates, and the other side of a game sent for review.
+  const people = useMemo(() => [...friends, ...(settings?.coaches ?? []), ...(settings?.students ?? [])], [friends, settings?.coaches, settings?.students]);
+  const friendsRef = useRef(people);
+  friendsRef.current = people;
+  /** Who this game has been sent to for review, and how each sending is going. */
+  const [shares, setShares] = useState<Share[]>([]);
+  const [sendOpen, setSendOpen] = useState(false);
+  /** The line about who sent this game was closed. */
+  const [fromSeen, setFromSeen] = useState(false);
+  useEffect(() => {
+    const load = () => api.coachShares(id).then(setShares).catch(() => {});
+    load();
+    return onEvent("coaching", load);
+  }, [id, sendOpen]);
   const [prefs, setPrefs] = useState<Prefs>(() => loadPrefs("rewatch.player", DEFAULT_PREFS));
   const [tool, setTool] = useState<Tool | null>(null);
   const [ink, setInk] = useState(INKS[0]);
@@ -1458,14 +1474,14 @@ export function Player({ id, onBack, friends, matches, joinTogether, onTogether,
                 cpm={cpm}
                 duration={duration}
                 gameLength={match.game?.length ?? null}
-                focus={match.mode === "game" ? activeFocus : null}
+                focus={match.mode === "game" && !match.from ? activeFocus : null}
                 focusCheck={review.focusCheck ?? null}
                 onFocusCheck={setFocusCheck}
                 reviewedAt={review.reviewedAt ?? null}
                 nextFocus={review.nextFocus ?? null}
                 onFinish={match.mode === "game" ? finishReview : undefined}
                 onReopen={reopenReview}
-                usual={usual}
+                usual={match.from ? null : usual}
                 postgame={match.postgame ?? null}
                 clockSamples={match.clock}
                 story={match.story ?? null}
@@ -1504,7 +1520,11 @@ export function Player({ id, onBack, friends, matches, joinTogether, onTogether,
   const ratio = `${match.width} / ${match.height}`;
   const videoSrc = fileUrl(match.dir, match.video);
   const here = peers.filter((p) => p.matchId === id);
-  const nameOf = (p: WatchPeer) => friends.find((f) => f.code === p.code)?.name || p.name || "Teammate";
+  const nameOf = (p: WatchPeer) => people.find((f) => f.code === p.code)?.name || p.name || "Teammate";
+  // A game sent for review can be watched in step with its other side, teammates or not.
+  const canTogether = friends.length > 0 || !!match.from || shares.length > 0;
+  const canSend = !match.from && !!settings && !!onSaveSettings;
+  const sentHint = shares.length ? shares.map((s) => `${s.name || "Coach"}: ${shareStatus(s).text}`).join(" ") : null;
   const readyPovs = povs.filter((p) => p.status === "ready");
   const awayPovs = povs.filter((p) => p.status !== "ready");
   const captions =
@@ -1532,7 +1552,7 @@ export function Player({ id, onBack, friends, matches, joinTogether, onTogether,
         <button className="btn quiet sq" onClick={onBack} aria-label="Back to games" title="Back to games">
           <ArrowLeft size={18} />
         </button>
-        {pid([match.game?.queueName, trimmed ? "Highlights reel" : null, when(match.startedEpochMs), bytes(match.sizeBytes)])}
+        {pid([match.from ? `From ${match.from.name || "a student"}` : null, match.game?.queueName, trimmed ? "Highlights reel" : null, when(match.startedEpochMs), bytes(match.sizeBytes)])}
         <span className="grow" />
         {!together && here.length > 0 && (
           <button className="btn sm presence" onClick={() => setTogether(true)} title="They have this game open. Join to watch in step: pausing and jumping moves you both.">
@@ -1545,7 +1565,7 @@ export function Player({ id, onBack, friends, matches, joinTogether, onTogether,
             <b>Join</b>
           </button>
         )}
-        {friends.length > 0 && match.clock.length > 0 && (together || here.length === 0) && (
+        {canTogether && match.clock.length > 0 && (together || here.length === 0) && (
           <button
             className={`btn sm ${together ? "on" : ""}`}
             aria-pressed={together}
@@ -1572,6 +1592,9 @@ export function Player({ id, onBack, friends, matches, joinTogether, onTogether,
           items={[
             { label: "Show in folder", icon: <FolderOpen size={15} />, onSelect: () => showInFolder(`${match.dir}\\${match.video}`) },
             { label: "Export for editing", hint: "One file, every sound track separate", icon: <Download size={15} />, disabled: busy, onSelect: exportFull },
+            ...(canSend
+              ? [{ label: "Send to a coach", hint: sentHint ?? "This one game, into their Rewatch. Their notes and drawings come back here.", icon: <GraduationCap size={15} />, onSelect: () => setSendOpen(true) }]
+              : []),
             ...(canShare(match)
               ? [{ label: "Copy a picture of the game", hint: "Result, LP, KDA, damage share and where you died, to paste in Discord", icon: <ImageDown size={15} />, onSelect: copyCard }]
               : []),
@@ -1597,6 +1620,19 @@ export function Player({ id, onBack, friends, matches, joinTogether, onTogether,
         </button>
       </div>
 
+      {match.from && !fromSeen && !share && (
+        <div className="sentnote" role="note">
+          <GraduationCap size={16} aria-hidden />
+          <span>
+            <b>{match.from.name || "A student"}</b> sent you this game to review.{match.from.message ? <q>{match.from.message}</q> : " "}
+            <small>What you write and draw on it shows up in their own recording.</small>
+          </span>
+          <button className="btn sm sq quiet" aria-label="Close" title="Close" onClick={() => setFromSeen(true)}>
+            <X size={15} />
+          </button>
+        </div>
+      )}
+      {sendOpen && settings && onSaveSettings && <SendToCoach match={match} settings={settings} onSaveSettings={onSaveSettings} onClose={() => setSendOpen(false)} />}
       <div className={`pbody ${prefs.theater || share ? "theater" : ""}`} style={prefs.theater || share ? undefined : { gridTemplateColumns: `minmax(0, 1fr) 8px ${prefs.sideWidth}px` }}>
         <div className="stagecol">
           {board && canBoard && <MatchBoard match={match} titles={titles} onClose={() => setBoard(false)} />}
@@ -1999,14 +2035,14 @@ export function Player({ id, onBack, friends, matches, joinTogether, onTogether,
               cpm={trimmed ? [] : cpm}
               duration={duration}
               gameLength={match.game?.length ?? null}
-              focus={match.mode === "game" ? activeFocus : null}
+              focus={match.mode === "game" && !match.from ? activeFocus : null}
               focusCheck={review.focusCheck ?? null}
               onFocusCheck={setFocusCheck}
               reviewedAt={review.reviewedAt ?? null}
               nextFocus={review.nextFocus ?? null}
               onFinish={match.mode === "game" ? finishReview : undefined}
               onReopen={reopenReview}
-              usual={usual}
+              usual={match.from ? null : usual}
               postgame={trimmed ? null : (match.postgame ?? null)}
               clockSamples={match.clock}
               story={match.story ?? null}

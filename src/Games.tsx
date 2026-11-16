@@ -2,6 +2,7 @@ import { Bookmark, Check, CircleCheck, CircleDashed, CircleDot, Crosshair, Film,
 import { useEffect, useMemo, useRef, useState } from "react";
 import { absoluteFileUrl, api, fileUrl } from "./api";
 import { Portrait } from "./ChampIcon";
+import { CoachInboxStrip } from "./Coaching";
 import { ago, bytes, clock, dayLabel, timeOfDay, toReview } from "./format";
 import { STORY_HINT, storyLabel } from "./Insights";
 import type { SetupStep } from "./Onboarding";
@@ -11,8 +12,12 @@ import type { Environment, MatchSummary, NextFocus, Review, Settings, Story } fr
 import { humanError, ownsKeys, Popover, Select, Skeleton, useToast } from "./ui";
 
 interface Props {
+  /** The player's own recordings. */
   matches: MatchSummary[] | null;
+  /** Games students sent for review. Kept out of everything that counts the player's own games. */
+  sent: MatchSummary[];
   settings: Settings | null;
+  onSaveSettings: (next: Settings) => Promise<void>;
   busy: boolean;
   /** Open a game; "deaths" starts straight on a walk-through of its deaths. */
   onOpen: (id: string, start?: "deaths") => void;
@@ -28,7 +33,7 @@ interface Props {
   onSettings: () => void;
 }
 
-type Filter = "all" | "review" | "win" | "lose" | "kept";
+type Filter = "all" | "review" | "win" | "lose" | "kept" | "sent";
 type Layout = "grid" | "list";
 
 const LAYOUT_KEY = "rewatch.library.layout";
@@ -405,7 +410,7 @@ function Recap({ m, focus, onOpen }: { m: MatchSummary; focus: NextFocus | null;
 
 const FOCUS_WORD = { yes: "Did it", partly: "Partly", no: "Not really" } as const;
 
-export function Games({ matches, settings, busy, onOpen, onRecord, onSetup, onDelete, onDeleteVideo, onChanged, onSettings }: Props) {
+export function Games({ matches, sent, settings, onSaveSettings, busy, onOpen, onRecord, onSetup, onDelete, onDeleteVideo, onChanged, onSettings }: Props) {
   const toast = useToast();
   const [filter, setFilter] = useState<Filter>("all");
   const [activeTag, setActiveTag] = useState("");
@@ -430,6 +435,10 @@ export function Games({ matches, settings, busy, onOpen, onRecord, onSetup, onDe
   };
 
   const all = useMemo(() => [...(matches ?? [])].sort((a, b) => b.startedEpochMs - a.startedEpochMs), [matches]);
+  // Newest arrival first: what a coach looks at next is what came in last.
+  const sentAll = useMemo(() => [...sent].sort((a, b) => (b.from?.receivedAt ?? 0) - (a.from?.receivedAt ?? 0)), [sent]);
+  // Someone who only coaches has no games of their own: the list is their students' games.
+  const showSent = sentAll.length > 0 && (filter === "sent" || all.length === 0);
   const pending = useMemo(() => new Set(toReview(all).map((m) => m.id)), [all]);
   const allTags = useMemo(() => {
     const counts = new Map<string, number>();
@@ -444,7 +453,7 @@ export function Games({ matches, settings, busy, onOpen, onRecord, onSetup, onDe
 
   const shown = useMemo(() => {
     const q = query.trim().toLowerCase();
-    return all.filter((m) => {
+    return (showSent ? sentAll : all).filter((m) => {
       if (filter === "review" && !pending.has(m.id)) return false;
       if (filter === "win" && m.game?.result !== "Win") return false;
       if (filter === "lose" && m.game?.result !== "Lose") return false;
@@ -453,12 +462,12 @@ export function Games({ matches, settings, busy, onOpen, onRecord, onSetup, onDe
       if (story && m.story !== story) return false;
       if (q) {
         const players = (m.game?.players ?? []).map((p) => `${p.name} ${p.champion}`).join(" ");
-        const hay = `${champName(m)} ${queueName(m)} ${(m.tags ?? []).join(" ")} ${m.notesText ?? ""} ${players}`.toLowerCase();
+        const hay = `${champName(m)} ${queueName(m)} ${(m.tags ?? []).join(" ")} ${m.notesText ?? ""} ${players} ${m.from?.name ?? ""}`.toLowerCase();
         if (!hay.includes(q)) return false;
       }
       return true;
     });
-  }, [all, filter, activeTag, story, query, pending]);
+  }, [all, sentAll, showSent, filter, activeTag, story, query, pending]);
 
   const groups = useMemo(() => {
     const out: { key: string; label: string; items: MatchSummary[] }[] = [];
@@ -551,7 +560,7 @@ export function Games({ matches, settings, busy, onOpen, onRecord, onSetup, onDe
 
   const wins = all.filter((m) => m.game?.result === "Win").length;
   const losses = all.filter((m) => m.game?.result === "Lose").length;
-  const selMatches = all.filter((m) => visibleSel.includes(m.id));
+  const selMatches = [...all, ...sentAll].filter((m) => visibleSel.includes(m.id));
   const allKept = selMatches.length > 0 && selMatches.every((m) => m.keep);
   const unreviewed = selMatches.filter((m) => m.mode === "game" && !m.reviewed);
   const withVideo = selMatches.filter((m) => m.mode === "game" && m.hasVideo !== false);
@@ -586,13 +595,14 @@ export function Games({ matches, settings, busy, onOpen, onRecord, onSetup, onDe
             )}
           </div>
           <span className="grow" />
-          {all.length > 0 && <Storage matches={all} settings={settings} env={env} onSettings={onSettings} />}
+          {all.length + sentAll.length > 0 && <Storage matches={[...all, ...sentAll]} settings={settings} env={env} onSettings={onSettings} />}
           <button className="btn" onClick={onRecord} disabled={busy} title="Record your main screen now, without a game">
             <CircleDot size={15} aria-hidden />
             Record now
           </button>
         </div>
 
+        {settings && <CoachInboxStrip settings={settings} onSaveSettings={onSaveSettings} />}
         {matches !== null && recap && <Recap m={recap} focus={recapFocus} onOpen={onOpen} />}
         {matches !== null && !recap && focus && (
           <div className="focuspin" title={`Chosen after your ${champName(focus.from)} game. Finish a review to choose a new one.`}>
@@ -609,19 +619,24 @@ export function Games({ matches, settings, busy, onOpen, onRecord, onSetup, onDe
           </div>
         )}
 
-        {all.length > 0 && (
+        {all.length + sentAll.length > 0 && (
           <div className="lib-bar">
             <div className="seg" role="group" aria-label="Show">
               {(
                 [
-                  ["all", "All", 0],
-                  ["review", "To review", pending.size],
-                  ["win", "Wins", 0],
-                  ["lose", "Losses", 0],
-                  ["kept", "Kept", 0],
+                  ...(all.length > 0
+                    ? [
+                        ["all", "All", 0],
+                        ["review", "To review", pending.size],
+                        ["win", "Wins", 0],
+                        ["lose", "Losses", 0],
+                        ["kept", "Kept", 0],
+                      ]
+                    : []),
+                  ...(sentAll.length > 0 ? [["sent", "From students", sentAll.length]] : []),
                 ] as [Filter, string, number][]
               ).map(([key, label, n]) => (
-                <button key={key} aria-pressed={filter === key} onClick={() => setFilter(key)}>
+                <button key={key} aria-pressed={key === "sent" ? showSent : !showSent && filter === key} onClick={() => setFilter(key)} title={key === "sent" ? "Games sent to you for review. They are not counted among your own." : undefined}>
                   {label}
                   {n > 0 && <span className="count">{n}</span>}
                 </button>
@@ -681,7 +696,7 @@ export function Games({ matches, settings, busy, onOpen, onRecord, onSetup, onDe
               </div>
             ))}
           </div>
-        ) : all.length === 0 ? (
+        ) : all.length + sentAll.length === 0 ? (
           <div className="empty-lib">
             <Video size={34} strokeWidth={1.4} aria-hidden />
             <h2>No games recorded yet</h2>
@@ -753,8 +768,13 @@ export function Games({ matches, settings, busy, onOpen, onRecord, onSetup, onDe
                                 </span>
                               </span>
                               {me && <KdaRatio k={me.kills} d={me.deaths} a={me.assists} />}
-                              {(tags.length > 0 || m.story) && (
+                              {(tags.length > 0 || m.story || m.from) && (
                                 <span className="card-tags">
+                                  {m.from && (
+                                    <i className="from" title={m.from.message || undefined}>
+                                      From {m.from.name || "a student"}
+                                    </i>
+                                  )}
                                   <StoryChip m={m} />
                                   {tags.slice(0, 3).map((t) => (
                                     <i key={t}>#{t}</i>
@@ -812,6 +832,11 @@ export function Games({ matches, settings, busy, onOpen, onRecord, onSetup, onDe
                                 {pending.has(m.id) && <i className="todo" title="Not reviewed yet" />}
                               </b>
                               <small>
+                                {m.from && (
+                                  <span className="lfrom" title={m.from.message || undefined}>
+                                    From {m.from.name || "a student"}
+                                  </span>
+                                )}
                                 <LpDelta rank={m.rank} />
                                 <StoryChip m={m} />
                               </small>

@@ -12,18 +12,14 @@ fn valid_id(id: &str) -> bool {
     !id.is_empty() && id.chars().all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
 }
 
+/// The folder of a recording: one of the player's own, or one a student sent (those
+/// live under `Coaching`, see `sharing`).
 fn match_dir(settings: &Settings, id: &str) -> Result<PathBuf> {
     if !valid_id(id) {
         return Err(anyhow!("Invalid recording id"));
     }
-    let dir = settings
-        .recordings_path()
-        .ok_or_else(|| anyhow!("No recordings folder is set"))?
-        .join(id);
-    if !dir.join("match.json").exists() {
-        return Err(anyhow!("Recording not found"));
-    }
-    Ok(dir)
+    let root = settings.recordings_path().ok_or_else(|| anyhow!("No recordings folder is set"))?;
+    crate::sharing::game_dir(&root, id).ok_or_else(|| anyhow!("Recording not found"))
 }
 
 /// Bytes in a recording's folder: all of it, and the part that is video and sound
@@ -133,11 +129,27 @@ fn side_track(dir: &Path, name: &str) -> Option<PathBuf> {
     (!trimmed && file.exists()).then_some(file)
 }
 
-/// All recordings, newest first, without the heavy per-event data.
+/// The player's own recordings, newest first, without the heavy per-event data.
 pub fn list(settings: &Settings) -> Vec<Value> {
+    let Some(root) = settings.recordings_path() else { return Vec::new() };
+    list_in(&root)
+}
+
+/// The player's own recordings and the games students sent (marked with `from`),
+/// newest first. For the library and the size limit; everything that counts games
+/// (Trends, the losing streak, the focus) looks at the player's own only.
+pub fn list_all(settings: &Settings) -> Vec<Value> {
+    let mut out = list(settings);
+    if let Some(inbox) = crate::sharing::inbox(settings) {
+        out.extend(list_in(&inbox).into_iter().filter(|m| m.get("from").is_some_and(|f| f.is_object())));
+    }
+    out.sort_by(|a, b| b["id"].as_str().cmp(&a["id"].as_str()));
+    out
+}
+
+fn list_in(root: &Path) -> Vec<Value> {
     let mut out = Vec::new();
-    let Some(root) = settings.recordings_path() else { return out };
-    let Ok(entries) = fs::read_dir(&root) else { return out };
+    let Ok(entries) = fs::read_dir(root) else { return out };
     for entry in entries.flatten() {
         let dir = entry.path();
         let Some(mut doc) = read_json(&dir.join("match.json")) else { continue };
@@ -226,7 +238,11 @@ pub fn get(settings: &Settings, id: &str) -> Result<Value> {
         let reel = dir.join(crate::highlights::REEL_FILE);
         o.insert("reel".into(), if reel.exists() { json!(reel.to_string_lossy()) } else { Value::Null });
         // Riot's record of the game, everyone's rank, the LP it won or lost, and why
-        // the record is missing if it is (see `riot`).
+        // the record is missing if it is (see `riot`). A game a student sent may carry
+        // a summary from an older app.
+        if o.get("from").is_some_and(|f| f.is_object()) {
+            crate::riot::resummarize(&dir);
+        }
         let pg = crate::riot::load(&dir);
         o.insert("playerRanks".into(), crate::riot::player_ranks(&dir, pg.as_ref()));
         o.insert("story".into(), json!(pg.as_ref().and_then(crate::riot::story)));
@@ -583,7 +599,14 @@ pub fn save_share_card(settings: &Settings, id: &str, png_base64: &str) -> Resul
 
 pub fn delete(settings: &Settings, id: &str) -> Result<()> {
     let dir = match_dir(settings, id)?;
+    let from = crate::sharing::from_of(&dir);
     fs::remove_dir_all(dir)?;
+    match (from, crate::sharing::inbox(settings)) {
+        // A game a student sent: remember it was deleted, or it would be fetched again.
+        (Some(from), Some(inbox)) => crate::sharing::mark_removed(&inbox, &crate::sharing::key(&from.code, &from.id, from.at)),
+        // One of mine: nobody it was sent to can fetch it now.
+        _ => crate::sharing::forget(&crate::sharing::store(), id),
+    }
     Ok(())
 }
 
@@ -649,8 +672,8 @@ pub fn enforce_quota(settings: &Settings, protect: Option<&str>) -> Vec<String> 
 /// `enforce_quota` with the cap in bytes.
 fn fit_under(settings: &Settings, cap: u64, protect: Option<&str>) -> Vec<String> {
     let mut changed = Vec::new();
-    let Some(root) = settings.recordings_path() else { return changed };
-    let mut all = list(settings);
+    // Games students sent take room too, and are thinned out the same way.
+    let mut all = list_all(settings);
     let mut total: u64 = all.iter().map(|m| m["sizeBytes"].as_u64().unwrap_or(0)).sum();
     all.reverse(); // oldest first
     for m in all {
@@ -669,7 +692,8 @@ fn fit_under(settings: &Settings, cap: u64, protect: Option<&str>) -> Vec<String
                 changed.push(id.to_string());
             }
         } else {
-            match delete_video_in(&root.join(id), "limit") {
+            let Ok(dir) = match_dir(settings, id) else { continue };
+            match delete_video_in(&dir, "limit") {
                 // Only the stats were left: nothing to free here.
                 Ok(0) => {}
                 Ok(freed) => {

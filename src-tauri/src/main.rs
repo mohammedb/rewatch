@@ -8,6 +8,19 @@ fn main() {
         let identity = value_of("--identity").unwrap_or_else(|| "pov-test-identity.key".into());
         std::process::exit(rewatch_lib::cli_pov_serve(dir, identity, value_of("--allow").unwrap_or_default(), value_of("--watch")));
     }
+    if let Some(dir) = value_of("--send-game") {
+        let identity = value_of("--identity").unwrap_or_else(|| "pov-test-identity.key".into());
+        let comms = args.iter().any(|a| a == "--comms");
+        std::process::exit(rewatch_lib::cli_send_game(dir, value_of("--to").unwrap_or_default(), identity, comms, value_of("--message").unwrap_or_default()));
+    }
+    if let Some(dir) = value_of("--take-games") {
+        let identity = value_of("--identity").unwrap_or_else(|| "pov-test-identity.key".into());
+        std::process::exit(rewatch_lib::cli_take_games(dir, identity, value_of("--from")));
+    }
+    if let Some(code) = value_of("--pov-ask") {
+        let identity = value_of("--identity").unwrap_or_else(|| "pov-test-identity.key".into());
+        std::process::exit(rewatch_lib::cli_pov_ask(code, identity, value_of("--json").unwrap_or_default()));
+    }
     if args.iter().any(|a| a == "--pov-code") {
         std::process::exit(rewatch_lib::cli_pov_code(value_of("--identity").unwrap_or_else(|| "pov-test-identity.key".into())));
     }

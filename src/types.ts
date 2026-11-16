@@ -60,6 +60,10 @@ export interface Settings {
   /** After this many losses in a row in one sitting, a notification asks whether to stop for today. 0 is off. */
   breakAfterLosses: number;
   friends: Friend[];
+  /** People this player sends games to for review. Each gets only the games sent to them. */
+  coaches: Friend[];
+  /** People whose games this PC accepts for review. */
+  students: Friend[];
 }
 
 export interface Friend {
@@ -76,6 +80,88 @@ export interface ShareInfo {
   error: string | null;
   /** People who tried to connect and are not on the teammates list yet. */
   requests: { code: string; name: string; atMs: number }[];
+}
+
+/** One game sent to one person for review. */
+export interface Share {
+  /** The recording. */
+  id: string;
+  /** Their friend code. */
+  code: string;
+  name: string;
+  /** When it was sent. */
+  at: number;
+  /** The Discord and microphone tracks went along. */
+  comms: boolean;
+  message: string;
+  /**
+   * "" (just sent), "preparing" (the smaller copy is being made), "novideo", "offline" (they could not be
+   * reached), "asked" (they have not said yes yet), "accepted" (their app is fetching it), "declined",
+   * "old" (their Rewatch is too old) or "received".
+   */
+  state: "" | "preparing" | "novideo" | "offline" | "asked" | "accepted" | "declined" | "old" | "received";
+  gotAt: number | null;
+}
+
+/** Who a game in the library came from, when a student sent it for review. */
+export interface SentFrom {
+  name: string;
+  code: string;
+  /** The recording's id on their PC. */
+  id: string;
+  at: number;
+  comms: boolean;
+  /** What they want looked at. */
+  message: string;
+  receivedAt: number;
+}
+
+/** The few facts that say which game an offer is about. Any of them may be missing. */
+export interface OfferedGame {
+  player?: string | null;
+  champion?: string | null;
+  championKey?: string | null;
+  kills?: number | null;
+  deaths?: number | null;
+  assists?: number | null;
+  queueName?: string | null;
+  result?: string | null;
+  duration?: number | null;
+  startedEpochMs?: number | null;
+}
+
+/** Someone who is not on the students list yet and wants to send a game. */
+export interface CoachOffer {
+  code: string;
+  name: string;
+  id: string;
+  at: number;
+  game: OfferedGame;
+  message: string;
+  atMs: number;
+}
+
+/** A game arriving from a student right now. */
+export interface Receiving {
+  code: string;
+  name: string;
+  id: string;
+  game: OfferedGame;
+  got: number;
+  total: number;
+  /** The last try failed, and why; it is tried again by itself. */
+  error?: string | null;
+}
+
+export interface CoachInbox {
+  offers: CoachOffer[];
+  receiving: Receiving[];
+}
+
+/** News about games sent for review, as it arrives. */
+export interface CoachingEvent {
+  kind: "offer" | "received" | "share";
+  what: { id?: string; code?: string; name?: string; state?: string; game?: OfferedGame };
 }
 
 /** A teammate's view of the same game. */
@@ -249,6 +335,8 @@ export interface MatchSummary {
   rank?: RankChange | null;
   /** What kind of game it was, from Riot's gold numbers. */
   story?: Story | null;
+  /** Set on a game a student sent for review: it is theirs, not one of this player's own. */
+  from?: SentFrom | null;
 }
 
 /**

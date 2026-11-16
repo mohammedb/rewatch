@@ -2,7 +2,7 @@
 // inside the desktop app.
 
 import type {
-  Coach, Extras, GameEvent, Highlight, TeamReview, Insights, LeagueBackup, MatchFull, MatchSummary, MatchupNote, PgKill, PgPlayer, PlayerRanks, PlayerRow, PostGame, RankChange, Review, Settings, Stats, Status,
+  Coach, CoachInbox, Extras, GameEvent, Highlight, TeamReview, Insights, LeagueBackup, MatchFull, MatchSummary, MatchupNote, PgKill, PgPlayer, PlayerRanks, PlayerRow, PostGame, RankChange, Review, Settings, Share, Stats, Status,
   Story, TrendMatch, TrendPg, TrendSpot, UpdateInfo, Voice, WatchPeer,
 } from "./types";
 
@@ -256,6 +256,8 @@ reviews[matches[0].id] = {
 };
 matches[0] = { ...matches[0], noteCount: 2, notesText: "Walked up without vision of Zed.\nBaron call was late." };
 watchPeers[0].matchId = matches[0].id;
+// One game came from a student, for review.
+matches[3] = { ...matches[3], reviewed: true, from: { name: "Lumen", code: "5e8a1c3f7d9b2046e8c0a2b4d6f8e1c3a5b7d9f0e2c4a6b8d0f1e3c5a7b9d1f2", id: "2026-11-15_19-02-44", at: now - 5 * 3600e3, comms: false, message: "Was the baron call at 24 minutes right, or should we have gone for the inhibitor?", receivedAt: now - 4 * 3600e3 } };
 // One screen recording, between games.
 {
   const ms = now - 52 * 3600e3;
@@ -561,6 +563,19 @@ let settings: Settings = {
     { name: "Kaja", code: "3f9a1c0b7d2e4a6f8b1c3d5e7f9a0b2c4d6e8f0a1b3c5d7e9f1a2b4c6d8e0f13" },
     { name: "Tor", code: "a81d4e6f0b2c3d5e7f9a1b3c5d7e9f0a2b4c6d8e0f1a3b5c7d9e1f2a4b6c8d0e" },
   ],
+  coaches: [{ name: "Coach Vale", code: "7b2e9c4d1a6f8035c2d4e6f8a0b1c3d5e7f9a1b2c4d6e8f0a2b3c5d7e9f1a3b5" }],
+  students: [{ name: "Lumen", code: "5e8a1c3f7d9b2046e8c0a2b4d6f8e1c3a5b7d9f0e2c4a6b8d0f1e3c5a7b9d1f2" }],
+};
+
+// Games sent for review. One of the sample games came from a student, one of mine is with a coach, and
+// someone new is asking to send theirs while another game is on its way in.
+let shares: Share[] = [];
+const mockInbox = (): CoachInbox => {
+  const got = 2e8 + ((Date.now() - loadedAt) / 1000) * 4e7;
+  return {
+  offers: settings.students.some((f) => f.code === IDA) ? [] : [{ code: IDA, name: "Ida", id: "2026-11-14_21-10-05", at: 1, game: { player: "Ida", champion: "Ornn", championKey: "Ornn", kills: 2, deaths: 4, assists: 10, queueName: "Ranked Solo", result: "Lose", duration: 1930, startedEpochMs: Date.now() - 26 * 3600e3 }, message: "I keep losing lane to ranged tops. What should I do differently before level 6?", atMs: Date.now() - 40000 }],
+  receiving: got < 1.2e9 ? [{ code: settings.students[0]?.code ?? "", name: "Lumen", id: "2026-11-15_19-02-44", game: { champion: "Kai'Sa", championKey: "Kaisa", kills: 7, deaths: 4, assists: 5, queueName: "Ranked Flex", result: "Win", duration: 2105 }, got, total: 1.2e9 }] : [],
+  };
 };
 
 const status: Status = {
@@ -647,6 +662,21 @@ export async function mock<T>(cmd: string, args?: Record<string, unknown>): Prom
       }
       case "list_microphones": return [{ id: "a", name: "Headset Microphone", isDefault: true, isDefaultComms: true, level: 0.2 }, { id: "b", name: "Webcam Microphone", isDefault: false, isDefaultComms: false, level: 0 }];
       case "list_matches": return matches;
+      case "coach_shares": return shares.filter((x) => x.id === args!.id);
+      case "coach_send": {
+        const code = String(args!.code).trim().toLowerCase();
+        if (!/^[0-9a-f]{64}$/.test(code)) throw "That does not look like a friend code. Ask them to copy it again.";
+        const share: Share = { id: args!.id as string, code, name: (args!.name as string) || "Coach", at: Date.now(), comms: !!args!.comms, message: (args!.message as string) ?? "", state: "preparing", gotAt: null };
+        shares = [...shares.filter((x) => !(x.id === share.id && x.code === code)), share];
+        // It moves along by itself: the copy is made, their app fetches it, it has arrived.
+        const step = (state: Share["state"], ms: number) => setTimeout(() => { shares = shares.map((x) => (x.id === share.id && x.code === code && x.at === share.at ? { ...x, state, gotAt: state === "received" ? Date.now() : null } : x)); }, ms);
+        step(/^[45]/.test(code) ? "offline" : "accepted", 2500);
+        if (!/^[45]/.test(code)) step("received", 7000);
+        return shares.filter((x) => x.id === args!.id);
+      }
+      case "coach_stop": shares = shares.filter((x) => !(x.id === args!.id && x.code === args!.code)); return shares.filter((x) => x.id === args!.id);
+      case "coach_inbox": return mockInbox();
+      case "coach_decline": return null;
       case "get_match": {
         const m = matches.find((x) => x.id === args!.id) ?? matches[0];
         const game = m.mode !== "manual";

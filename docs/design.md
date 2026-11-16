@@ -60,8 +60,16 @@ Nothing from the RiftRec installer, code, name or artwork is used.
 ## Not being built
 
 Accounts, cloud storage, upload/share links, a public clips feed, a phone
-app, AI coaching, and shared online review rooms. These are RiftRec's hosted
+app, and shared online review rooms. These are RiftRec's hosted
 service; Discord screen share was chosen instead.
+
+Changed since: an AI review was added from 0.2.1 on, with the user's own key. Sending a
+game to a coach was added in 0.7.0, and it keeps to the line above: no link
+and no upload. The coach installs Rewatch and their app fetches that one game
+straight from the player's PC, over the connection teammates already use (see
+"Sending a game to a coach" in the README). A link a coach could open in a
+browser would mean hosting other people's games and voices, which is still not
+being built.
 
 ## The two hard rules (extremely important)
 

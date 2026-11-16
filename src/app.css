@@ -249,6 +249,59 @@ kbd { font: 600 11.5px/1 var(--body); background: var(--raised); border: 1px sol
 .modal-body { color: var(--soft); font-size: 13.5px; line-height: 1.5; display: grid; gap: 8px; }
 .modal-acts { display: flex; justify-content: flex-end; gap: 8px; margin-top: 8px; }
 
+/* Sending a game to a coach. */
+.modal.send { width: min(560px, 100%); max-height: calc(100vh - 48px); overflow-y: auto; }
+.modal.send .modal-body { gap: 14px; }
+.send-list { list-style: none; margin: 0; padding: 0; border: 1px solid var(--line); border-radius: 10px; background: var(--bg-2); }
+.send-list li { display: grid; grid-template-columns: minmax(0, 1fr) auto auto; gap: 4px 8px; align-items: center; padding: 10px 12px; }
+.send-list li + li { border-top: 1px solid var(--line); }
+.send-who { display: grid; gap: 1px; min-width: 0; }
+.send-who b { color: var(--text); font-weight: 600; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.send-who small { color: var(--muted); font-size: 12px; }
+.send-st { grid-column: 1 / -1; display: flex; gap: 6px; align-items: flex-start; font-size: 12.5px; line-height: 1.4; color: var(--soft); }
+.send-st svg { flex: none; margin-top: 2px; }
+.send-st.ok { color: var(--up); }
+.send-st.bad { color: var(--down); }
+.send-add, .send-opts { display: grid; gap: 6px; }
+.send-label { font-size: 12.5px; font-weight: 600; color: var(--text); }
+.send-label .muted { font-weight: 400; }
+.send-row { display: grid; grid-template-columns: minmax(0, 0.7fr) minmax(0, 1.5fr) auto; gap: 8px; }
+.send-add .muted, .send-add .fres { font-size: 12.5px; margin: 0; }
+.send-opts textarea { resize: vertical; min-height: 54px; padding: 8px 10px; line-height: 1.4; font: inherit; }
+.send-check { display: flex; gap: 9px; align-items: flex-start; margin-top: 4px; cursor: pointer; color: var(--text); }
+.send-check input { margin-top: 3px; accent-color: var(--ally); }
+.send-check small { display: block; color: var(--muted); font-size: 12.5px; line-height: 1.4; }
+@media (max-width: 560px) { .send-row { grid-template-columns: 1fr; } }
+
+/* Games sent to this PC for review: requests and arrivals on the Games page, and the line in the player. */
+.coachbox { display: grid; gap: 8px; margin-bottom: 20px; }
+.coach-ask { display: grid; grid-template-columns: auto minmax(0, 1fr) auto auto; gap: 12px; align-items: center; padding: 12px 14px; border-radius: 10px; background: rgb(91 141 239 / 0.07); border: 1px solid rgb(91 141 239 / 0.3); }
+.coach-ask > svg { color: var(--ally); }
+.coach-t { display: grid; gap: 3px; min-width: 0; font-size: 13px; color: var(--soft); }
+.coach-t b { color: var(--text); font-size: 13.5px; }
+.coach-t q { color: var(--text); font-style: italic; }
+.coach-t small { color: var(--muted); font-size: 12px; line-height: 1.4; max-width: 78ch; }
+.coach-in { display: flex; align-items: center; gap: 10px; padding: 9px 14px; border-radius: 10px; background: var(--panel); border: 1px solid var(--line); font-size: 13px; color: var(--soft); }
+.coach-in b { color: var(--text); }
+.coach-in.stuck > svg { color: var(--down); flex: none; }
+.coach-in.stuck > span:nth-of-type(1) { white-space: normal; }
+.coach-in > span:nth-of-type(1) { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.coach-bar { flex: none; width: 140px; height: 5px; border-radius: 3px; background: var(--raised); overflow: hidden; }
+.coach-bar i { display: block; height: 100%; background: var(--ally); transition: width 400ms linear; }
+@media (max-width: 760px) { .coach-ask { grid-template-columns: auto minmax(0, 1fr); } .coach-ask .btn { grid-column: span 1; justify-self: start; } .coach-bar { width: 70px; } }
+.card-tags i.from, .lfrom { color: var(--text); background: rgb(91 141 239 / 0.14); border: 1px solid rgb(91 141 239 / 0.35); }
+.lfrom { font-size: 11px; padding: 1px 6px; border-radius: 4px; margin-right: 6px; }
+/* The line sits between the top bar and the video. */
+.player:has(> .sentnote) { grid-template-rows: auto auto minmax(0, 1fr); }
+.sentnote { display: flex; align-items: flex-start; gap: 10px; padding: 9px 12px 9px 14px; background: rgb(91 141 239 / 0.07); border-bottom: 1px solid rgb(91 141 239 / 0.25); font-size: 13px; line-height: 1.45; color: var(--soft); }
+.sentnote > svg { color: var(--ally); flex: none; margin-top: 2px; }
+.sentnote > span { flex: 1; min-width: 0; }
+.sentnote b { color: var(--text); }
+.sentnote q { color: var(--text); font-style: italic; margin: 0 6px; }
+.sentnote small { color: var(--muted); font-size: 12.5px; }
+.friend.person { grid-template-columns: minmax(0, 1fr) auto auto; }
+.muted.pad { padding: 4px 16px 12px; font-size: 12.5px; margin: 0; }
+
 @media (prefers-reduced-motion: reduce) {
   *, *::before, *::after { animation-duration: 1ms !important; animation-iteration-count: 1 !important; transition: none !important; }
 }

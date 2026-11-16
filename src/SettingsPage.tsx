@@ -9,6 +9,7 @@ import {
   Copy,
   Download,
   FolderOpen,
+  GraduationCap,
   HeartPulse,
   ListVideo,
   Loader2,
@@ -69,6 +70,7 @@ const SECTIONS: { id: string; title: string; icon: LucideIcon }[] = [
   { id: "set-video", title: "Video", icon: Video },
   { id: "set-sound", title: "Sound and input", icon: AudioLines },
   { id: "set-team", title: "Teammates", icon: Users },
+  { id: "set-coach", title: "Coaching", icon: GraduationCap },
   { id: "set-ai", title: "AI review", icon: Sparkles },
   { id: "set-backup", title: "League backups", icon: Archive },
   { id: "set-updates", title: "Updates", icon: Download },
@@ -274,6 +276,21 @@ function FriendRow({ friend, onRename, onRemove, beforeCheck }: { friend: Friend
           {result.text}
         </span>
       )}
+    </div>
+  );
+}
+
+/** A coach or a student: their name, the start of their code, and taking them off the list. */
+function PersonRow({ person, what, onRename, onRemove }: { person: Friend; what: string; onRename: (name: string) => void; onRemove: () => void }) {
+  return (
+    <div className="friend person">
+      <Field value={person.name} placeholder="Name" aria-label={`${what}'s name`} onCommit={onRename} />
+      <code className="fcode" title={person.code}>
+        {shortCode(person.code)}
+      </code>
+      <button className="btn sm sq quiet danger" aria-label={`Remove ${person.name || what}`} title="Remove" onClick={onRemove}>
+        <X size={15} />
+      </button>
     </div>
   );
 }
@@ -1180,6 +1197,45 @@ export function SettingsPage({
             <Opt title="Your name" hint="What teammates see when they check the connection.">
               <Field className="namefield" type="text" value={s.shareName} aria-label="Your name" onCommit={(v) => set("shareName", v.trim(), 0)} />
             </Opt>
+          </Section>
+
+          <Section
+            id="set-coach"
+            icon={GraduationCap}
+            title="Coaching"
+            intro={
+              <p className="muted">
+                Send a game to a coach from the game itself: open it, then More, Send to a coach. They get that one game in their Rewatch, and what they write and draw on it shows up in
+                your recording. Both PCs have to be on with Rewatch running for it to travel; nothing is uploaded anywhere else.
+              </p>
+            }
+          >
+            <Opt title="Your coaches" hint="People you have sent a game to. Each gets only the games you send them, never the rest of your library." wide />
+            {s.coaches.length === 0 && <p className="muted pad">Nobody yet. They're added here the first time you send a game.</p>}
+            {s.coaches.map((f, i) => (
+              <PersonRow
+                key={`${i}:${f.code}`}
+                person={f}
+                what="Coach"
+                onRename={(name) => change({ ...latest.current, coaches: latest.current.coaches.map((x, j) => (j === i ? { ...x, name } : x)) }, 0)}
+                onRemove={() => change({ ...latest.current, coaches: latest.current.coaches.filter((_, j) => j !== i) }, 0)}
+              />
+            ))}
+            <Opt
+              title="Your students"
+              hint="People whose games you accept for review. Their games are kept under Coaching in your recordings folder and listed under From students, apart from your own. They see none of yours."
+              wide
+            />
+            {s.students.length === 0 && <p className="muted pad">Nobody yet. When someone sends you a game, the request shows on the Games page. Give them your friend code from Teammates above.</p>}
+            {s.students.map((f, i) => (
+              <PersonRow
+                key={`${i}:${f.code}`}
+                person={f}
+                what="Student"
+                onRename={(name) => change({ ...latest.current, students: latest.current.students.map((x, j) => (j === i ? { ...x, name } : x)) }, 0)}
+                onRemove={() => change({ ...latest.current, students: latest.current.students.filter((_, j) => j !== i) }, 0)}
+              />
+            ))}
           </Section>
 
           <Section

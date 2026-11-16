@@ -16,7 +16,8 @@ use std::time::Duration;
 
 pub const FILE: &str = "review.mp4";
 const PART: &str = "review.part";
-const FAILED: &str = "review.failed";
+/// Left beside a recording whose copy could not be made or would not be smaller.
+pub const FAILED: &str = "review.failed";
 const IDLE_PRIORITY_CLASS: u32 = 0x0000_0040;
 /// Recordings older than this are handed out as they are.
 const RECENT_MS: i64 = 7 * 24 * 3600 * 1000;
@@ -76,6 +77,13 @@ fn height_of(ffmpeg: &Path, file: &Path) -> i64 {
 /// Encode `game.mp4` in `dir` to a smaller file. `stop` is asked twice a second;
 /// when it says yes the work is abandoned. Returns Ok(false) if it was abandoned.
 pub fn make(ffmpeg: &Path, dir: &Path, stop: &dyn Fn() -> bool) -> Result<bool> {
+    // One copy at a time: the background loop and a game being sent to a coach may
+    // both want the same one, and they would write over each other's half-made file.
+    static ONE: std::sync::Mutex<()> = std::sync::Mutex::new(());
+    let _one = ONE.lock().unwrap_or_else(|e| e.into_inner());
+    if dir.join(FILE).exists() || dir.join(FAILED).exists() {
+        return Ok(true);
+    }
     let src = dir.join("game.mp4");
     let part = dir.join(PART);
     let p = |x: &Path| x.to_string_lossy().to_string();

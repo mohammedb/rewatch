@@ -160,6 +160,88 @@ could be asked, so two players' recordings of the same game can be lined up exac
 - The identity behind the friend code is `%APPDATA%\Rewatch\identity.key`. Deleting
   it gives a new code.
 
+## Sending a game to a coach
+
+A player can send one game to someone for review, and get their notes back in the app.
+New in version 0.7.0; both sides need at least that version.
+
+- In the player: More, Send to a coach. Pick someone (coaches sent to before, then
+  teammates) or paste a new person's friend code, say what they should look at, and
+  choose whether the Discord call and microphone go along (off unless ticked).
+- The coach's Rewatch shows the request on the Games page with the game and the
+  message. Accepting puts the player on the coach's students list (Settings, Coaching);
+  from then on that player's games arrive without asking. "No thanks" turns that game
+  down, and the player's app is told. Someone not accepted yet is announced once, however
+  many games they offer, since anyone holding the coach's code can ask.
+- What travels: a smaller copy of the video with game sound (`review.mp4`, made on the
+  spot if there is none; the recording itself when a copy would not be smaller),
+  `match.json`, Riot's record (summarized and raw, so a newer app at the other end can
+  summarize it again) and the ranks, the cursor and key logs, the thumbnail and the AI
+  review if there is one. With the voices: `discord.m4a`, `mic.m4a` and
+  `voice.json`. The player's notes and drawings show in the coach's player under the
+  player's name.
+- It is fetched by the coach's app, over the same direct connection teammates use,
+  while both PCs are on with Rewatch running; nothing is uploaded anywhere else. It
+  carries on where it stopped if the connection drops, and waits while either side is
+  in a game. The player's app offers it again every minute for up to 30 days. A game
+  that keeps failing to arrive says why on the coach's Games page (no room on the
+  drive, a game running, the other PC out of reach).
+- The coach's copy lives in `Coaching\<their id>_<start of their code>` inside the
+  recordings folder and is listed under "From students" on the Games page. It is not
+  one of the coach's own games: Trends, the losing streak, the focus, the post-game
+  job, highlights, the AI review job and teammates' requests never see it. It does
+  count towards the size limit. Deleting it there keeps it from being fetched again.
+- The coach's notes and drawings on it show up in the player's own recording, the way
+  teammates' do (kept in `pov_<code>.extras.json` for when the coach is offline), and
+  a reply to a note threads under it on both PCs. Both can press "Watch together" on
+  the game to go through it in step.
+- Who gets what (`sharing.rs`, and `serve_coaching` in `pov.rs`): a share is one game
+  for one friend code, kept in `%APPDATA%\Rewatch\shares.json`. That person can ask
+  for the files of that game named above and nothing else: not the player's other
+  games, not the list of them, not the voices unless they were included. Nobody else
+  can ask for anything. Being someone's coach does not make them a teammate, in either
+  direction, and "Let teammates watch my recordings" has no say over a game that was
+  sent on purpose. "Stop sharing" ends it; a copy already fetched stays with the coach.
+- What the coach's app writes to disk is checked on its side too: only file names it
+  knows, sizes capped, the game's id and file names in `match.json` replaced by its
+  own, text cut to length, and nothing fetched without a gigabyte to spare.
+- An app older than this answers the request with a refusal it already had; the sender
+  then shows "Their Rewatch is too old to receive games".
+
+Checked on 2026-11-16, everything on this PC with each side given its own identity,
+settings and folders, over the real connection:
+
+- Two stand-ins (`--send-game` and `--take-games`, under Tests): an offer from someone
+  not accepted is shown and nothing is fetched; once accepted, a 108 MB copy arrived in
+  about five seconds, was filed under `Coaching` with the player's notes, and the
+  player's side went to "received"; the voice tracks came only with `--comms`; the
+  coach's notes, a reply and a drawing came back; a game sent again was fetched once
+  and kept the coach's notes; watch-together reports from the player reached the coach.
+- Who is told what (`--pov-ask`): a third identity was refused the files, the notes and
+  the list, and the coach was refused the Discord track, the player's `review.json`,
+  another game and the list of games.
+- A test copy of the app as the player, against a stand-in coach: it was offline
+  (sharing off, nobody listed), went online when the game was sent, made the smaller
+  copy on the spot (about 55 seconds for a 4-minute AV1 recording), and went through
+  "preparing", "accepted" and "received".
+- The same copy as the coach, against a stand-in student sending a ranked game: the
+  request showed with the game and the message and was announced once while the
+  student's app kept offering; after Accept the game arrived, was listed under "From
+  students" and not in Trends, opened with the scoreboard data, ranks, story, AI review
+  and the student's note, played from the `Coaching` folder, and could not be sent on.
+  A note and a reply written there reached the student's app.
+- Teammates' views still save as before (`--pov-serve` with `--pov-fetch`), since the
+  file sending was moved into one place.
+- The send dialog, the request, the arrival bar and the Settings lists were also
+  looked at in a browser with sample data.
+
+Not checked: two real PCs, a full-size game (a 35-minute recording's copy is about
+1.3 GB, and making it took about a quarter of the game's length here), the size limit
+reaching a received game, the stuck-transfer line with a real full drive, and an app
+on 0.6.3 or older at the other end. A coach whose app is offline because sharing with
+teammates is off and nobody is listed cannot be reached by a first request; they have
+to switch that on, or add a teammate or student, first.
+
 ## How a recording is made
 
 - **Video**: FFmpeg grabs the display the game is on (Desktop Duplication) and feeds
@@ -201,6 +283,16 @@ target\debug\rewatch.exe --test-record 10 --out C:\some\folder   # headless capt
 target\debug\rewatch.exe --list-mics
 ```
 
+Sending a game to a coach, with two stand-ins on one PC. Each needs its own `APPDATA`
+(the list of shares lives there) and its own identity file:
+
+```
+rewatch.exe --pov-code --identity coach.key                      # prints a friend code
+rewatch.exe --take-games C:\coach\recordings --identity coach.key [--from <player's code>]
+rewatch.exe --send-game C:\player\recordings\<id> --to <coach's code> --identity player.key [--comms] [--message "..."]
+rewatch.exe --pov-ask <code> --identity any.key --json "{\"op\":\"shared\"}"   # what another app answers
+```
+
 Two environment variables exist only for testing the automatic flow without League:
 `REWATCH_GAME_EXE` (process name to treat as the game) and `REWATCH_LIVE_URL`
 (address of a stand-in for the live-game feed).
@@ -210,14 +302,14 @@ Two environment variables exist only for testing the automatic flow without Leag
 - `src-tauri/src/` Rust core: `session.rs` (one recording), `video.rs`, `audio.rs`,
   `liveclient.rs` (game feed and the numbers for the graph), `library.rs` (folders,
   clips, size limit), `pov.rs` (everything between teammates: views, notes, speech
-  times, watching together), `copies.rs` (smaller copies for teammates), `voice.rs`
+  times, watching together), `copies.rs` (smaller copies for teammates), `sharing.rs` (games sent to a coach: who gets what, and how a received game is kept), `voice.rs`
   (when someone was talking), `update.rs`, `insight.rs` (hints about deaths), `coach.rs` (written review), `team.rs` (team review of a fight), `titles.rs`, `highlights.rs`, `riot.rs`
   (post-game data and ranks, from the League client or Riot's web API), `winutil.rs`, `settings.rs`, `lib.rs` (app
   wiring, watcher, commands).
 - `src/` interface (React + TypeScript): `Games.tsx`, `Player.tsx`, `Views.tsx` (split
   view, zoom, cursor), `Timeline.tsx`, `Insights.tsx` (review tab, comms rows, graph),
   `PostGame.tsx` (the Players tab's post-game panel), `MapView.tsx` (minimap), `Rank.tsx`
-  (LP and the rank chart), `SettingsPage.tsx`, `api.ts`.
+  (LP and the rank chart), `Coaching.tsx` (the send dialog and the coach's requests), `SettingsPage.tsx`, `api.ts`.
 - `updates-site/` the update address; `scripts/release.mjs` publishes a version. `mock.ts` and `public/mock/` are sample data for
   working on the interface in a plain browser; they are not part of release builds.
 
@@ -784,6 +876,19 @@ Released: the update site was deployed first, and its landing page stayed the sa
 for byte. Then 0.6.3 went out with its interface file, which the site serves. The installed
 0.6.2 found 0.6.3, downloaded the installer and accepted its signature. The 0.6.3 build,
 checked against the same announcement, says it's up to date.
+
+## Version 0.7.0 (2026-11-16)
+
+**Send a game to a coach.** In the player: More, Send to a coach. The coach gets that one
+game in their own Rewatch (a smaller copy of the video with game sound, the timeline and
+stats, the cursor and keys, the player's notes; the voice call and microphone only if
+ticked), kept under "From students" apart from their own games, and what they write and
+draw on it shows up in the player's recording. It travels straight between the two PCs,
+like teammates' views; nothing is uploaded. How it works, who is told what, and what was
+checked: "Sending a game to a coach" above. New files: `sharing.rs`, `Coaching.tsx`; new
+settings: `coaches`, `students`; new section in Settings: Coaching.
+
+This version changes the program, so it comes by installer and restarts the app.
 
 ## Not built yet
 
