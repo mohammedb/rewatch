@@ -926,7 +926,7 @@ Released: the installer and the interface file are on the site, which was left a
 The installed 0.6.3 found 0.7.0, downloaded the installer and accepted its signature, and
 the 0.7.0 build, checked against the same announcement, says it's up to date.
 
-## Next version (not released, 2026-11-16)
+## Version 0.8.0 (2026-11-17)
 
 **Only League's window is recorded**, not the screen: other windows, alt-tabs and
 notifications stay out. Needs Windows 11; elsewhere, or if the window can't be captured,
@@ -1024,6 +1024,15 @@ fullscreen (which may give black pictures rather than none), AMD and Intel encod
 on-card resize on a PC where it works, and Windows 10. For champion select: blind pick,
 ARAM, Arena and custom games, and whether a player who has locked in can still swap pick
 order (the list would then tell their pick again).
+
+This version changes the program, so it comes by installer and restarts the app.
+
+Released: before it went out, the release build recorded 4 seconds of the League client's
+window (1280x720 at 60 fps from the NVIDIA encoder, with the client's sound, `capture:
+window` in `match.json`). The installer and the interface file are on the site, which was
+left as it was. The installed 0.7.0 found 0.8.0, downloaded the installer and accepted its
+signature, and the 0.8.0 build, checked against the same announcement, says it's up to
+date.
 
 ## Not built yet
 
