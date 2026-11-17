@@ -443,7 +443,9 @@ export default function App() {
     : recording
       ? status?.mode === "manual"
         ? "Recording your screen"
-        : `Recording ${status?.queueName ?? "the game"}`
+        : status?.mode === "draft"
+          ? "Recording champion select"
+          : `Recording ${status?.queueName ?? "the game"}`
       : status?.gameRunning
         ? "In game"
         : settings?.autoRecord === false
@@ -602,7 +604,12 @@ export default function App() {
                 <TriangleAlert size={13} aria-label="Discord is not running" />
               </span>
             )}
-            {recording && (
+            {recording && status?.mode === "draft" ? (
+              <button className="st-stop" onClick={stop} title="Stop recording this champion select. It isn't kept." aria-label="Stop recording champion select">
+                <Square size={9} fill="currentColor" aria-hidden />
+                Stop
+              </button>
+            ) : recording && (
               <button className="st-stop" onClick={stop} title="Stop and save the recording" aria-label="Stop and save the recording">
                 <Square size={9} fill="currentColor" aria-hidden />
                 Stop

@@ -244,10 +244,32 @@ to switch that on, or add a teammate or student, first.
 
 ## How a recording is made
 
-- **Video**: FFmpeg grabs the display the game is on (Desktop Duplication) and feeds
-  the graphics card's encoder directly. The encoder is picked automatically (NVIDIA,
-  then AMD, then Intel, then the processor as a fallback that works anywhere). Each frame is stamped with wall-clock
-  time, so the file itself records when video started.
+- **Video**: FFmpeg records League's own window (Windows' window capture, FFmpeg's
+  `gfxcapture`), so other windows, alt-tabs and notifications stay out of it, and a
+  covered or moved window is still recorded. The picture is sized on the graphics card
+  as it is captured. This needs Windows 11 (Windows 10 can't hide the yellow frame it
+  draws around a captured window) and an FFmpeg that has `gfxcapture` (8.0 or newer).
+  Without them, with Settings, Video, *Record only League's window* off, or when the
+  window can't be captured, FFmpeg grabs the whole display the game is on (Desktop
+  Duplication), and the "Recording" notification says so. Either way the frames go
+  to the graphics card's encoder directly. The encoder is picked automatically
+  (NVIDIA, then AMD, then Intel, then the processor as a fallback that works anywhere).
+  Each frame is stamped with wall-clock time, so the file itself records when video
+  started. A minimized game sends no frames; the last one is held until it comes back.
+  When the game's window closes, its recording ends as if the game had.
+- **Champion select**: with *Ask the League client* and *Record champion select* on,
+  the League client is asked for its phase (lobby, champion select, game...) every 2
+  seconds while it is open. During champion select it is also asked, once a second,
+  what champion select looks like (`/lol-champ-select/v1/session`, a GET like every
+  other request): each seat's role, hover, locked champion and summoner spells, the
+  bans, whose turn it is, and the phase with its timer. No names or accounts are kept.
+  Only the answers that show a change are kept (`champselect.rs`), on the same clock as
+  the client's sound, Discord and the microphone, which are recorded with them into
+  `.draft` in the recordings folder. The client's window is recorded too (at 30 fps at
+  most) only with *Also record the client's window*. If a game starts within 10
+  minutes, it all moves into that game's folder; a dodge, leaving the lobby, or the
+  Stop button drops it. It stays on this PC: copies sent to a coach or a teammate
+  leave it out.
 - **Sound**: three WASAPI captures written to separate files on the same clock:
   the game process, Discord's process tree, and the microphone.
 - **Mouse**: cursor position and button state are polled (no input hook) into `mouse.csv`.
@@ -263,6 +285,10 @@ to switch that on, or add a teammate or student, first.
 - When the game exits, the pieces are joined (video is copied, not re-encoded) into one
   folder per game: `game.mp4` (video + game sound), `discord.m4a`, `mic.m4a`,
   `mouse.csv`, `match.json`, `thumb.jpg`, and `review.json` for notes and drawings.
+  Champion select, when recorded, is `draft-picks.json` (what the client reported, the
+  champions' names, and a list of what happened), `draft-game.m4a` (the client's sound),
+  `draft-discord.m4a` and `draft-mic.m4a`, listed under `draft` in `match.json`. With
+  the client's window recorded, `draft.mp4` holds its video and the client's sound.
 
 ## Two hard rules
 
@@ -280,6 +306,8 @@ cargo test --lib                      # event and purchase detection, post-game 
 target\debug\rewatch.exe --riot-probe   # what the League client and the key can see now
 target\debug\rewatch.exe --postgame C:\recording\folder [--key-file key.txt]   # fetch one game's record
 target\debug\rewatch.exe --test-record 10 --out C:\some\folder   # headless capture test
+target\debug\rewatch.exe --test-record 10 --out C:\some\folder --window notepad.exe   # one program's window, as a game's
+target\debug\rewatch.exe --test-draft 8 --out C:\some\folder --window notepad.exe     # champion select as the settings record it, then that program as its game
 target\debug\rewatch.exe --list-mics
 ```
 
@@ -293,9 +321,13 @@ rewatch.exe --send-game C:\player\recordings\<id> --to <coach's code> --identity
 rewatch.exe --pov-ask <code> --identity any.key --json "{\"op\":\"shared\"}"   # what another app answers
 ```
 
-Two environment variables exist only for testing the automatic flow without League:
-`REWATCH_GAME_EXE` (process name to treat as the game) and `REWATCH_LIVE_URL`
-(address of a stand-in for the live-game feed).
+Three environment variables exist only for testing the automatic flow without League:
+`REWATCH_GAME_EXE` (process name to treat as the game), `REWATCH_LIVE_URL` (address of
+a stand-in for the live-game feed) and `REWATCH_CLIENT_URL` (address of a stand-in for
+the League client's API, asked without a password; it answers the phase, such as
+`"ChampSelect"`, the game's queue, and what champion select looks like). Champion select
+also needs the real League client open, since its sound (and, if asked for, its window)
+is recorded.
 
 ## Layout
 
@@ -893,6 +925,105 @@ This version changes the program, so it comes by installer and restarts the app.
 Released: the installer and the interface file are on the site, which was left as it was.
 The installed 0.6.3 found 0.7.0, downloaded the installer and accepted its signature, and
 the 0.7.0 build, checked against the same announcement, says it's up to date.
+
+## Next version (not released, 2026-11-16)
+
+**Only League's window is recorded**, not the screen: other windows, alt-tabs and
+notifications stay out. Needs Windows 11; elsewhere, or if the window can't be captured,
+the whole screen is recorded as before and the notification says so. Setting: Video,
+*Record only League's window* (on by default). `match.json` says which under `capture`.
+
+**Champion select is rebuilt from what the League client reports**, and kept with the
+game that follows. A *Champion select* button in the player shows both teams with their
+roles and summoner spells, the bans, what your side is hovering, whose turn it is and
+the timer, as they went, with the Discord call, the microphone and the client's sound
+following the same sound controls. A list beside it says what happened (phases, bans,
+hovers, picks, champions traded after locking in); a click on a line plays from just
+before it, and marks on the timeline show the bans and picks. Space plays and pauses,
+the arrow keys skip 5 seconds. Nothing on screen is recorded for it, so a minimized or
+covered client makes no difference. The other team's hovers stay hidden, as in the
+client (one sometimes shows in its last second). Settings: Which games, *Record
+champion select* (on by default; needs *Ask the League client*), and *Also record the
+client's window* (off by default) for a video of the client beside the picks, with a
+*Picks* / *Client* switch between the two. It is never sent to a coach or a teammate.
+New files: `champselect.rs`, `draft.rs`, `Draft.tsx`. How it works: "How a recording is
+made" above.
+
+**Less work for the processor.** League's window is sized to the chosen resolution on
+the graphics card, as it is captured. The whole screen had to be copied back and
+resized on the processor on this PC: the on-card resize has never worked here (`on-card
+downscale (NVIDIA) unavailable` in the log since 2026-11-15). Measured over 10 seconds of
+video: 9.6 seconds of processor time for the whole 2560x1440 screen made 1080p, 0.5
+seconds for the 1280x720 League client window sized inside the capture. A 2560x1440 game
+window hasn't been measured.
+
+**Colours.** A recording whose colours are converted on the processor (a whole-screen
+recording that is resized, or anything made with the processor encoder) now says which
+colour formula it used. Before, the player read AV1 and H.265 recordings, and any HD
+recording, with a different one: reds came out slightly orange and greens darker. The
+NVIDIA encoder's files also said their picture was RGB at full range while the video
+inside said BT.601; both now say BT.601. Recordings made before stay as they were.
+
+**When League's window gives no picture.** If no picture comes from the window in the
+first 5 seconds of a game, the recording switches to the whole screen; the first 7
+seconds or so are then missing. A window that changes size mid-game is fitted into the
+same picture, with black bars if its shape changed. When the game starts, a video of
+the client's window, if one is recorded, gets 3 seconds to stop; if the window isn't
+changing then (nothing to capture means FFmpeg doesn't hear the stop), FFmpeg is ended
+and its last moments can be lost. The picks and the sound stop at once.
+
+Bundles FFmpeg 9.0.2 (gyan.dev essentials, sha256
+`60f467265b1e312373dbcd92200c2618a74850f98d3d078e94296bb3fa2047ba`) instead of 7.1.1;
+with an older FFmpeg the app still records, but only the whole screen.
+
+Checked:
+
+- The League client's window (1280x720) and test windows recorded on their own through
+  the app, also while covered, with no frame drawn around them.
+- A test copy of the app with a stand-in League client (`REWATCH_CLIENT_URL`) and a
+  stand-in game, when champion select was recorded from the client's window: recorded
+  3 seconds after the phase changed, then kept and joined into the game's folder
+  (`draft.mp4` and its entry in `match.json`, nothing left in `.draft`); thrown away
+  when the phase went back to `Lobby` or to `None`; after Stop, not started again in
+  the same champion select, even after one unanswered request to the client, but
+  started in the next one; the game's recording ended when its window closed, with no
+  second recording while its process stayed; a game whose window came 6 seconds after
+  its process still recorded from its window (the app waits up to 20 seconds for it);
+  only GET requests went to the client.
+- A window that gives no picture: the recording switched to the whole screen.
+- Red, green, blue and grey from a test window come out right in Edge (the engine of
+  the app's player): at 1080p for AV1 and H.264 recorded from a window with the NVIDIA
+  encoder and with the processor encoder, and at 640x360 for a resized whole-screen
+  recording in all three codecs. H.265 from a window is still slightly off in the
+  player, as it was before.
+- FFmpeg 9 with every existing FFmpeg job, the new interface with the sample data,
+  `cargo test` (93) and the TypeScript build.
+- A Practice Tool game with `npm run tauri dev`: League's borderless 2560x1440 window
+  came out at 1920x1080, with no black pictures and nothing stuck beyond 1.6 seconds of
+  loading screen; 87% of frames were new pictures. League's own log gave 236 fps on
+  average while it was recorded (earlier 5v5 games, recorded the old way: 197 to 227).
+  Champion select came from the client's window with the client's sound, Discord and
+  the microphone, and went with the game. Its picture stops about 6 seconds before its
+  sound: the client stopped drawing about 2 seconds before the game's process
+  appeared, then FFmpeg was ended after its 3 seconds, which also started the game's
+  recording 3 seconds later (still before the game clock started).
+- Champion select as the client reported it in a ranked flex game and a Practice Tool
+  game, kept as test data without names or accounts (`src-tauri/testdata`). Every pick,
+  ban, role and summoner spell comes out as the client showed it; ten bans made at once,
+  the other side's shown once revealed; the timer as the client counted it (it repeats
+  its last count with when it was made, which is taken off); seats that swapped pick
+  order; and the empty seat across in Practice Tool, which "locks in" nothing.
+- A ranked flex game with `npm run tauri dev`: champion select kept for its game (198
+  seconds, 28 changes) with the client's sound, Discord and the microphone. When the app
+  restarted during a later champion select (the development build rebuilding itself),
+  what was recorded before was thrown away; the last 58 seconds were recorded and went
+  with the game.
+
+Not yet checked: a 5v5 game's frame rate against one recorded the old way, exclusive
+fullscreen (which may give black pictures rather than none), AMD and Intel encoders, the
+on-card resize on a PC where it works, and Windows 10. For champion select: blind pick,
+ARAM, Arena and custom games, and whether a player who has locked in can still swap pick
+order (the list would then tell their pick again).
 
 ## Not built yet
 

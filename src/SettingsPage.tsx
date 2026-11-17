@@ -913,6 +913,27 @@ export function SettingsPage({
             >
               <Switch label="Ask the League client" checked={s.useClientApi} onChange={(v) => set("useClientApi", v)} />
             </Opt>
+            <Opt
+              title="Record champion select"
+              hint={
+                s.useClientApi
+                  ? "Picks, bans, hovers and the timer as the League client reports them, with the Discord call and your mic, kept with the game that follows. Nothing on screen is recorded. Dodged lobbies aren't kept. It stays on this PC: it isn't sent to a coach."
+                  : "Needs Ask the League client: that's how Rewatch knows champion select has started, and what is picked."
+              }
+            >
+              <Switch label="Record champion select" checked={s.recordDraft && s.useClientApi} disabled={!s.useClientApi} onChange={(v) => set("recordDraft", v)} />
+            </Opt>
+            <Opt
+              title="Also record the client's window"
+              hint="A video of the League client during champion select, beside the picks. The picks and the sound don't need it; leave it off unless you want to see the client itself."
+            >
+              <Switch
+                label="Also record the client's window"
+                checked={s.draftVideo && s.recordDraft && s.useClientApi}
+                disabled={!s.recordDraft || !s.useClientApi}
+                onChange={(v) => set("draftVideo", v)}
+              />
+            </Opt>
             <Opt title="Queues to record" hint={s.useClientApi ? undefined : "Every queue is recorded while the switch above is off."} wide>
               <div className="qchips" role="group" aria-label="Queues to record">
                 {QUEUES.map(([key, label]) => {
@@ -976,6 +997,21 @@ export function SettingsPage({
           </Section>
 
           <Section id="set-video" icon={Video} title="Video">
+            <Opt
+              title="Record only League's window"
+              hint={
+                env?.windowCapture === false
+                  ? "Needs Windows 11. On this PC the whole screen League is on is recorded."
+                  : "Other windows, alt-tabs and notifications stay out of the recording. If League's window can't be recorded on its own, the whole screen is."
+              }
+            >
+              <Switch
+                label="Record only League's window"
+                checked={s.captureWindow && env?.windowCapture !== false}
+                disabled={env?.windowCapture === false}
+                onChange={(v) => set("captureWindow", v)}
+              />
+            </Opt>
             <Opt title="Resolution" hint="Scaled down on the graphics card while recording.">
               <div className="seg" role="group" aria-label="Resolution">
                 {(

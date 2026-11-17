@@ -109,6 +109,35 @@ fn video_to_cut(dir: &Path) -> Result<PathBuf> {
     }
 }
 
+/// Champion select's entry in match.json, as far as its files are still there. The picks
+/// stay when the media is deleted (to free space, or by the size limit), like the
+/// game's stats; its video and sound go with the rest. With neither, or never sent
+/// along with a game from someone else, there is nothing to show.
+fn check_draft(dir: &Path, o: &mut serde_json::Map<String, Value>) {
+    let there = |name: Option<&Value>| {
+        name.and_then(|v| v.as_str()).is_some_and(|name| !name.contains(['/', '\\']) && dir.join(name).exists())
+    };
+    let Some(draft) = o.get_mut("draft").and_then(|d| d.as_object_mut()) else {
+        o.insert("draft".into(), Value::Null);
+        return;
+    };
+    let (picks, video) = (there(draft.get("picks")), there(draft.get("video")));
+    if !picks && !video {
+        o.insert("draft".into(), Value::Null);
+        return;
+    }
+    if !video {
+        draft.insert("video".into(), Value::Null);
+    }
+    // A track without a file of its own is in the video.
+    if let Some(tracks) = draft.get_mut("tracks").and_then(|t| t.as_array_mut()) {
+        tracks.retain(|t| match t.get("file") {
+            Some(Value::String(_)) => there(t.get("file")),
+            _ => video,
+        });
+    }
+}
+
 /// The kinds of file that hold a recording's picture or sound: the full game, the
 /// smaller copy for teammates, the highlight reel and clips, the Discord and microphone
 /// tracks, teammates' views saved here, an export for editing, and any of those half
@@ -171,6 +200,7 @@ fn list_in(root: &Path) -> Vec<Value> {
             o.remove("events");
             o.remove("clock");
             o.remove("stats");
+            check_draft(&dir, o);
             o.insert("summary".into(), summary);
             o.insert("dir".into(), json!(dir.to_string_lossy()));
             let (size, media) = sizes(&dir);
@@ -223,6 +253,7 @@ pub fn get(settings: &Settings, id: &str) -> Result<Value> {
         o.insert("sizeBytes".into(), json!(size));
         o.insert("videoBytes".into(), json!(media));
         o.insert("hasVideo".into(), json!(video));
+        check_draft(&dir, o);
         o.insert("review".into(), read_review(&dir));
         // A title per player, from the game's own numbers.
         let titles = crate::titles::for_match(&Value::Object(o.clone()));

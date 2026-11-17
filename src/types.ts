@@ -27,6 +27,15 @@ export interface Settings {
   autoRecord: boolean;
   startWithWindows: boolean;
   fps: number;
+  /** Record only League's own window (Windows 11). Otherwise, or if that fails, the whole screen it is on. */
+  captureWindow: boolean;
+  /**
+   * Keep champion select with the game that follows: the picks, bans and timer as the
+   * League client reports them, with the Discord call and the microphone. Needs useClientApi.
+   */
+  recordDraft: boolean;
+  /** Also record a video of the League client's window during champion select. */
+  draftVideo: boolean;
   resolution: "native" | "1440" | "1080" | "720";
   codec: "h264" | "hevc" | "av1";
   encoder: "auto" | "nvenc" | "amf" | "qsv" | "cpu";
@@ -211,6 +220,8 @@ export interface Environment {
   suggestedRecordingsDir: string;
   /** Free space on the drive that holds the recordings. */
   freeBytes?: number | null;
+  /** League's window can be recorded on its own here: Windows 11, and an FFmpeg that can. */
+  windowCapture?: boolean;
 }
 
 export interface MicInfo {
@@ -290,6 +301,86 @@ export interface KeysMeta {
   rows?: string[][];
 }
 
+/**
+ * Champion select before the game: the picks and bans as the League client reported
+ * them, with its own sound, and a video of the client's window when that was asked for.
+ */
+export interface DraftRecording {
+  /** The picks file in the game's folder (see DraftPicks); missing on the first versions. */
+  picks?: string | null;
+  /** A video of the League client's window, when one was recorded. */
+  video?: string | null;
+  /** Seconds on the picks' clock where the sound and the video start. */
+  offset?: number;
+  duration: number;
+  width?: number;
+  height?: number;
+  capture?: "window" | "display" | null;
+  startedEpochMs?: number | null;
+  /** The client's sound, Discord and the microphone. A track without a file is in the video. */
+  tracks: Track[];
+}
+
+/** One seat in champion select. */
+export interface PickSeat {
+  cell: number;
+  ally: boolean;
+  me: boolean;
+  /** "top", "jungle", "middle", "bottom", "utility", or empty (the other team's, and modes without roles). */
+  position: string;
+  /** The champion locked in; 0 before that. */
+  champion: number;
+  /** The champion hovered: wished for before the seat's turn, looked at during it. */
+  intent: number;
+  locked: boolean;
+  spells: [number, number];
+}
+
+export interface PickBan {
+  id: number;
+  /** The seat that bans; -1 when not known. */
+  cell: number;
+  ally: boolean;
+  /** Hovered while banning, or banned; 0 for none. */
+  champion: number;
+  done: boolean;
+}
+
+/** Champion select at one moment, as the client said it was. */
+export interface PickSnapshot {
+  /** Seconds on the picks' clock. */
+  t: number;
+  phase: "PLANNING" | "BAN_PICK" | "FINALIZATION" | "GAME_STARTING" | string;
+  /** Seconds left on the timer at `t`; null without a timer. */
+  left: number | null;
+  /** What the timer ran from. Missing in files from the first test builds. */
+  total?: number | null;
+  /** The player's side: 1 blue, 2 red, 0 not known. */
+  side: number;
+  seats: PickSeat[];
+  bans: PickBan[];
+  /** The seats whose turn it is. */
+  turn: number[];
+}
+
+export interface PickEvent {
+  t: number;
+  kind: "phase" | "ban" | "hover" | "pick" | "swap";
+  cell?: number;
+  ally?: boolean;
+  champion?: number;
+  phase?: string;
+}
+
+/** draft-picks.json */
+export interface DraftPicks {
+  version: number;
+  /** The champions in it, by id: the client's name for their pictures, and the one people read. */
+  champions: Record<string, { alias: string; name: string }>;
+  snapshots: PickSnapshot[];
+  events: PickEvent[];
+}
+
 export interface MatchSummary {
   id: string;
   startedAt: string;
@@ -302,6 +393,10 @@ export interface MatchSummary {
   codec: string;
   video: string;
   tracks: Track[];
+  /** What was recorded: League's window alone, or the whole screen. Missing on older games. */
+  capture?: "window" | "display";
+  /** Champion select before this game, when it was recorded. */
+  draft?: DraftRecording | null;
   game: GameInfo;
   bookmarks: { t: number }[];
   mouse: MouseMeta | null;

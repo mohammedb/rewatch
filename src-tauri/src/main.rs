@@ -99,7 +99,11 @@ fn main() {
             .iter()
             .position(|a| a == "--hotkey")
             .and_then(|j| args.get(j + 1).cloned());
-        std::process::exit(rewatch_lib::cli_test_record(secs, out, encoder, hotkey, value_of("--codec")));
+        std::process::exit(rewatch_lib::cli_test_record(secs, out, encoder, hotkey, value_of("--codec"), value_of("--window")));
+    }
+    if let Some(i) = args.iter().position(|a| a == "--test-draft") {
+        let secs = args.get(i + 1).and_then(|s| s.parse().ok()).unwrap_or(8);
+        std::process::exit(rewatch_lib::cli_test_draft(secs, value_of("--out").unwrap_or_default(), value_of("--window").unwrap_or_default()));
     }
     rewatch_lib::run()
 }

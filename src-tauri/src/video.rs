@@ -1,14 +1,17 @@
-//! Video capture: one FFmpeg process that grabs a display on the graphics card and
-//! feeds it straight to the hardware encoder. Frames never pass through main memory.
+//! Video capture: one FFmpeg process that grabs League's window (or a whole display)
+//! on the graphics card and feeds it straight to the hardware encoder. Frames never
+//! pass through main memory.
 
 use crate::settings::Settings;
 use crate::winutil::CaptureTarget;
 use anyhow::{anyhow, Result};
 use std::fs::File;
-use std::io::Write;
+use std::io::{BufRead, BufReader, Write};
 use std::os::windows::process::CommandExt;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 pub const CREATE_NO_WINDOW: u32 = 0x0800_0000;
@@ -17,6 +20,8 @@ const BELOW_NORMAL_PRIORITY_CLASS: u32 = 0x0000_4000;
 pub struct VideoRecorder {
     child: Child,
     log_path: PathBuf,
+    /// Frames written so far, from FFmpeg's progress report.
+    frames: Arc<AtomicU64>,
 }
 
 /// Which encoder does the work. The three graphics-card families keep the picture on
@@ -72,6 +77,29 @@ pub fn target_height(s: &Settings, target: &CaptureTarget) -> Option<u32> {
     (target.h as u32 > h).then_some(h)
 }
 
+/// Picture size for a window capture: the window's inside, made smaller when the
+/// resolution setting asks for it, in even numbers as the encoders need.
+fn window_size(target: &CaptureTarget, scale_h: Option<u32>) -> (u32, u32) {
+    let (w, h) = (target.w.max(2) as u32, target.h.max(2) as u32);
+    match scale_h {
+        Some(sh) if sh < h => {
+            let sw = (w as u64 * sh as u64 + h as u64 / 2) / h as u64;
+            (sw as u32 & !1, sh & !1)
+        }
+        _ => (w & !1, h & !1),
+    }
+}
+
+/// The colour formula for pictures the processor converts: the HD standard, at the
+/// usual video range.
+const BT709: &str = "out_color_matrix=bt709:out_range=tv";
+
+/// NVIDIA's encoder makes the captured picture into video with the SD colour formula
+/// (BT.601) at video range, and says so inside the video. Unless told, the file around
+/// the video said otherwise, "RGB, full range" (the captured picture's own label), for
+/// any player that goes by the file's label. This makes the two agree.
+const NVENC_FROM_RGB: &str = ",setparams=colorspace=bt470bg:range=tv";
+
 fn capture_chain(
     target: &CaptureTarget,
     fps: u32,
@@ -80,7 +108,17 @@ fn capture_chain(
     scale_h: Option<u32>,
     gpu_scale: bool,
 ) -> String {
-    let mut g = format!("ddagrab=output_idx={}:framerate={}:draw_mouse=1", target.output_idx, fps);
+    let mut g = match target.window {
+        // Windows' window capture: only this window's picture, wherever it is and
+        // whatever covers it, without the frame Windows would draw around it. The
+        // picture is sized here, on the graphics card. A window that changes size later
+        // is fitted into the same picture, with black bars if its shape changed.
+        Some(hwnd) => {
+            let (w, h) = window_size(target, scale_h);
+            format!("gfxcapture=hwnd={hwnd}:max_framerate={fps}:capture_cursor=1:display_border=0:width={w}:height={h}:resize_mode=scale_aspect")
+        }
+        None => format!("ddagrab=output_idx={}:framerate={}:draw_mouse=1", target.output_idx, fps),
+    };
     if let Some(x) = stamp_epoch_us {
         g += &format!(",setpts=(RTCTIME-{x})/(TB*1000000)");
         // State the frame rate again after stamping. The grabber's clock counts in
@@ -90,6 +128,20 @@ fn capture_chain(
         // not affected). This also makes the file constant frame rate.
         g += &format!(",fps={fps}");
     }
+    if target.window.is_some() {
+        // Already at its final size.
+        match family {
+            Family::Qsv => g += ",hwmap=derive_device=qsv,format=qsv",
+            Family::Cpu => g += &format!(",hwdownload,format=bgra,scale={BT709},format=yuv420p"),
+            Family::Nvenc => g += NVENC_FROM_RGB,
+            Family::Amf => {}
+        }
+        return g;
+    }
+    // Where the processor makes the colour version of the picture, it also says which
+    // formula it used. Left unsaid, the app's player guessed a different one for HD
+    // video (and for AV1 and H.265 at any size): reds came out orange and greens darker
+    // (checked 2026-11-16).
     match (family, scale_h, gpu_scale) {
         (Family::Nvenc, Some(h), true) => {
             g += &format!(",hwmap=derive_device=cuda,scale_cuda=w=-2:h={h}:force_original_aspect_ratio=decrease:force_divisible_by=2:format=nv12");
@@ -99,17 +151,18 @@ fn capture_chain(
         }
         (Family::Qsv, None, _) => g += ",hwmap=derive_device=qsv,format=qsv",
         (Family::Cpu, Some(h), _) => {
-            g += &format!(",hwdownload,format=bgra,scale=-2:{h}:flags=fast_bilinear");
+            g += &format!(",hwdownload,format=bgra,scale=-2:{h}:flags=fast_bilinear:{BT709},format=yuv420p");
         }
-        (Family::Cpu, None, _) => g += ",hwdownload,format=bgra",
+        (Family::Cpu, None, _) => g += &format!(",hwdownload,format=bgra,scale={BT709},format=yuv420p"),
         // QSV encoders take nv12, not yuv420p.
         (Family::Qsv, Some(h), _) => {
-            g += &format!(",hwdownload,format=bgra,scale=-2:{h}:flags=fast_bilinear,format=nv12");
+            g += &format!(",hwdownload,format=bgra,scale=-2:{h}:flags=fast_bilinear:{BT709},format=nv12");
         }
         (Family::Nvenc | Family::Amf, Some(h), _) => {
-            g += &format!(",hwdownload,format=bgra,scale=-2:{h}:flags=fast_bilinear,format=yuv420p");
+            g += &format!(",hwdownload,format=bgra,scale=-2:{h}:flags=fast_bilinear:{BT709},format=yuv420p");
         }
-        (Family::Nvenc | Family::Amf, None, _) => {}
+        (Family::Nvenc, None, _) => g += NVENC_FROM_RGB,
+        (Family::Amf, None, _) => {}
     }
     g
 }
@@ -206,9 +259,12 @@ pub fn resolve_family(ffmpeg: &Path, target: &CaptureTarget, settings: &Settings
     if let Some(f) = *CHOSEN.lock().unwrap() {
         return f;
     }
+    // Tried on the display, which is always there: a window can be minimized or closing
+    // at that moment, and the choice is kept until the app closes.
+    let display = target.display();
     let mut chosen = Family::Cpu;
     for family in [Family::Nvenc, Family::Amf, Family::Qsv] {
-        if probe_chain(ffmpeg, target, settings, family, None, false) {
+        if probe_chain(ffmpeg, &display, settings, family, None, false) {
             chosen = family;
             break;
         }
@@ -218,8 +274,27 @@ pub fn resolve_family(ffmpeg: &Path, target: &CaptureTarget, settings: &Settings
     chosen
 }
 
+/// Whether this FFmpeg has Windows' window capture (`gfxcapture`, FFmpeg 8 and up). A
+/// copy chosen in Settings, or an older one on the PC, may not. Asked once per FFmpeg.
+pub fn has_window_capture(ffmpeg: &Path) -> bool {
+    static KNOWN: std::sync::Mutex<Option<(PathBuf, bool)>> = std::sync::Mutex::new(None);
+    if let Some((path, ok)) = KNOWN.lock().unwrap().as_ref() {
+        if path == ffmpeg {
+            return *ok;
+        }
+    }
+    let help = run_tool(ffmpeg, &["-hide_banner".into(), "-h".into(), "filter=gfxcapture".into()]).unwrap_or_default();
+    let ok = help.contains("gfxcapture AVOptions");
+    if !ok {
+        crate::settings::log(format!("[video] {} has no window capture; recording whole displays", ffmpeg.display()));
+    }
+    *KNOWN.lock().unwrap() = Some((ffmpeg.to_path_buf(), ok));
+    ok
+}
+
 fn can_gpu_scale(ffmpeg: &Path, target: &CaptureTarget, settings: &Settings, family: Family, h: u32) -> bool {
-    if !matches!(family, Family::Nvenc | Family::Qsv) {
+    // A window capture is sized by the capture itself.
+    if !matches!(family, Family::Nvenc | Family::Qsv) || target.window.is_some() {
         return false;
     }
     if let Some((f, fh, out, ok)) = *GPU_SCALE_WORKS.lock().unwrap() {
@@ -257,19 +332,32 @@ impl VideoRecorder {
         let log = File::create(&log_path)?;
 
         let mut cmd = Command::new(ffmpeg);
-        cmd.args(["-hide_banner", "-loglevel", "warning", "-y", "-copyts"]);
+        // The progress report says how many frames are written, twice a second.
+        cmd.args(["-hide_banner", "-loglevel", "warning", "-y", "-copyts", "-progress", "pipe:1"]);
         cmd.args(device_args(target));
         cmd.args(["-f", "lavfi", "-i", &graph]);
         cmd.args(encoder_args(settings, family));
         cmd.args(["-an"]).arg(out);
         cmd.stdin(Stdio::piped())
-            .stdout(Stdio::null())
+            .stdout(Stdio::piped())
             .stderr(Stdio::from(log))
             .creation_flags(CREATE_NO_WINDOW | BELOW_NORMAL_PRIORITY_CLASS);
 
         let mut child = cmd
             .spawn()
             .map_err(|e| anyhow!("could not start FFmpeg ({}): {e}", ffmpeg.display()))?;
+        // Read it all the time: a full pipe would stop FFmpeg.
+        let frames = Arc::new(AtomicU64::new(0));
+        if let Some(report) = child.stdout.take() {
+            let frames = frames.clone();
+            std::thread::spawn(move || {
+                for line in BufReader::new(report).lines().map_while(|l| l.ok()) {
+                    if let Some(n) = line.strip_prefix("frame=").and_then(|n| n.trim().parse().ok()) {
+                        frames.store(n, Ordering::Relaxed);
+                    }
+                }
+            });
+        }
 
         // Fail fast if the capture or encoder could not be opened.
         let begun = Instant::now();
@@ -286,6 +374,7 @@ impl VideoRecorder {
         Ok(VideoRecorder {
             child,
             log_path,
+            frames,
         })
     }
 
@@ -293,8 +382,29 @@ impl VideoRecorder {
         matches!(self.child.try_wait(), Ok(None))
     }
 
+    /// Wait for the first frame to be written, up to `limit`. False if none came: a
+    /// window Windows can't capture starts cleanly and then sends nothing at all.
+    pub fn wait_for_picture(&mut self, limit: Duration) -> bool {
+        let begun = Instant::now();
+        while self.frames.load(Ordering::Relaxed) == 0 {
+            if begun.elapsed() > limit || !self.is_running() {
+                return false;
+            }
+            std::thread::sleep(Duration::from_millis(100));
+        }
+        true
+    }
+
     /// Ask FFmpeg to finish the file, and wait for it.
-    pub fn stop(mut self) -> Result<()> {
+    pub fn stop(self) -> Result<()> {
+        self.stop_within(Duration::from_secs(15))
+    }
+
+    /// Ask FFmpeg to finish the file, and end it if it hasn't within `patience`. While
+    /// a captured window sends nothing new (minimized, or not drawing), FFmpeg only
+    /// hears the request once a frame comes, which may be never. Ended that way, the
+    /// file loses its last few seconds and stays readable.
+    pub fn stop_within(mut self, patience: Duration) -> Result<()> {
         if let Some(mut stdin) = self.child.stdin.take() {
             let _ = stdin.write_all(b"q\n");
             let _ = stdin.flush();
@@ -304,18 +414,30 @@ impl VideoRecorder {
             if self.child.try_wait()?.is_some() {
                 break;
             }
-            if begun.elapsed() > Duration::from_secs(15) {
+            if begun.elapsed() > patience {
+                crate::settings::log("[video] FFmpeg did not finish in time; ended it");
                 let _ = self.child.kill();
                 let _ = self.child.wait();
                 break;
             }
             std::thread::sleep(Duration::from_millis(50));
         }
-        // Keep the log only if FFmpeg had something to say.
+        self.drop_empty_log();
+        Ok(())
+    }
+
+    /// End FFmpeg without finishing the file: for a capture that is being replaced.
+    pub fn abandon(mut self) {
+        let _ = self.child.kill();
+        let _ = self.child.wait();
+        self.drop_empty_log();
+    }
+
+    /// Keep the log only if FFmpeg had something to say.
+    fn drop_empty_log(&self) {
         if std::fs::metadata(&self.log_path).map(|m| m.len() == 0).unwrap_or(false) {
             let _ = std::fs::remove_file(&self.log_path);
         }
-        Ok(())
     }
 }
 
@@ -419,23 +541,29 @@ mod tests {
         s.codec = "hevc".into();
         assert_eq!(effective_codec(&s, Family::Qsv), "hevc");
         assert_eq!(effective_codec(&s, Family::Cpu), "h264");
-        let target = CaptureTarget { adapter_idx: 0, output_idx: 1, x: 0, y: 0, w: 1920, h: 1080 };
-        assert!(capture_chain(&target, 60, Family::Cpu, Some(5), None, false).ends_with(",hwdownload,format=bgra"));
+        let target = CaptureTarget { adapter_idx: 0, output_idx: 1, x: 0, y: 0, w: 1920, h: 1080, window: None };
+        assert!(capture_chain(&target, 60, Family::Cpu, Some(5), None, false).ends_with(",hwdownload,format=bgra,scale=out_color_matrix=bt709:out_range=tv,format=yuv420p"));
         // The frame rate is stated right after the wall-clock stamp, for every encoder.
         for family in [Family::Nvenc, Family::Amf, Family::Qsv, Family::Cpu] {
             assert!(capture_chain(&target, 60, family, Some(5), None, false).contains("setpts=(RTCTIME-5)/(TB*1000000),fps=60"));
         }
         assert!(!capture_chain(&target, 60, Family::Nvenc, None, None, false).contains("fps="));
         assert!(capture_chain(&target, 60, Family::Nvenc, None, None, false).starts_with("ddagrab=output_idx=1:framerate=60"));
+        // The whole display at its own size goes to NVIDIA's encoder as captured, labelled as it encodes it.
+        assert!(capture_chain(&target, 60, Family::Nvenc, Some(5), None, false).ends_with(",fps=60,setparams=colorspace=bt470bg:range=tv"));
 
         // Downscaling: only triggers when display height exceeds target height.
         s.resolution = "1080".into();
-        let uhd = CaptureTarget { adapter_idx: 0, output_idx: 0, x: 0, y: 0, w: 3840, h: 2160 };
+        let uhd = CaptureTarget { adapter_idx: 0, output_idx: 0, x: 0, y: 0, w: 3840, h: 2160, window: None };
         assert_eq!(target_height(&s, &uhd), Some(1080));
         assert_eq!(target_height(&s, &target), None);
         assert!(capture_chain(&uhd, 60, Family::Nvenc, Some(5), Some(1080), true).contains("scale_cuda=w=-2:h=1080"));
         assert!(capture_chain(&uhd, 60, Family::Qsv, Some(5), Some(1080), true).contains("scale_qsv=w=-2:h=1080"));
         assert!(capture_chain(&uhd, 60, Family::Nvenc, Some(5), Some(1080), false).contains("hwdownload,format=bgra,scale=-2:1080"));
+        // A picture the processor converts says which colour formula it used.
+        for family in [Family::Nvenc, Family::Amf, Family::Qsv, Family::Cpu] {
+            assert!(capture_chain(&uhd, 60, family, Some(5), Some(1080), false).contains(":out_color_matrix=bt709:out_range=tv,format="));
+        }
         // One encoder ladder for clips: quality mode keeps the old numbers (the processor
         // 2 lower), bitrate mode caps every encoder at the same rate.
         let q = h264_ladder(Rate::Quality(23));
@@ -447,5 +575,36 @@ mod tests {
         assert!(k[3].join(" ").ends_with("-pix_fmt yuv420p"));
         // Without on-card scaling, QSV still gets a pixel format its encoder accepts.
         assert!(capture_chain(&uhd, 60, Family::Qsv, Some(5), Some(1080), false).ends_with("format=nv12"));
+    }
+
+    #[test]
+    fn a_window_is_captured_alone_and_sized_by_the_capture() {
+        // A 1440p borderless game window, recorded at 1080p.
+        let game = CaptureTarget { adapter_idx: 0, output_idx: 0, x: 0, y: 0, w: 2560, h: 1440, window: Some(0x1A0EDA) };
+        let g = capture_chain(&game, 60, Family::Nvenc, Some(5), Some(1080), false);
+        assert!(g.starts_with("gfxcapture=hwnd=1707738:max_framerate=60:capture_cursor=1:display_border=0:width=1920:height=1080:resize_mode=scale_aspect"), "{g}");
+        assert!(g.ends_with("setpts=(RTCTIME-5)/(TB*1000000),fps=60,setparams=colorspace=bt470bg:range=tv"), "the frames go to the encoder as they are: {g}");
+        assert!(!g.contains("ddagrab") && !g.contains("hwdownload") && !g.contains(",scale"), "no scaling step after the capture: {g}");
+        // Native size, and the encoders that need their own last step.
+        assert!(capture_chain(&game, 60, Family::Amf, Some(5), None, false).contains(":width=2560:height=1440:"));
+        assert!(capture_chain(&game, 60, Family::Amf, Some(5), None, false).ends_with(",fps=60"));
+        assert!(capture_chain(&game, 60, Family::Qsv, Some(5), None, false).ends_with(",fps=60,hwmap=derive_device=qsv,format=qsv"));
+        assert!(capture_chain(&game, 60, Family::Cpu, Some(5), Some(720), false).ends_with(",fps=60,hwdownload,format=bgra,scale=out_color_matrix=bt709:out_range=tv,format=yuv420p"));
+        // Odd sizes become even, and the width follows the window's shape.
+        let odd = CaptureTarget { w: 1279, h: 721, ..game };
+        assert_eq!(window_size(&odd, None), (1278, 720));
+        let wide = CaptureTarget { w: 3440, h: 1440, ..game };
+        assert_eq!(window_size(&wide, Some(1080)), (2580, 1080));
+        assert_eq!(window_size(&game, Some(1440)), (2560, 1440), "never made bigger");
+        // The display behind a window target, for when the window cannot be captured.
+        assert_eq!(game.kind(), "window");
+        assert_eq!(CaptureTarget { window: None, ..game }.kind(), "display");
+    }
+
+    #[test]
+    fn old_session_files_still_read() {
+        let old = r#"{"adapter_idx":0,"output_idx":1,"x":0,"y":0,"w":2560,"h":1440}"#;
+        let t: CaptureTarget = serde_json::from_str(old).unwrap();
+        assert_eq!(t.window, None);
     }
 }

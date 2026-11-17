@@ -88,8 +88,10 @@ being built.
 - It never touches the game process: no injection, no reading or writing
   game memory, no hooks placed in the game, no overlay inside it, no
   automation of any input. It only observes from outside.
-- Picture: Windows' own screen duplication, the same kind of capture OBS's
-  display capture uses.
+- Picture: Windows' own window capture of League's window (and, only when asked
+  for, the League client's during champion select), the same kind of capture
+  OBS's window capture uses. Where that can't be used, Windows' screen
+  duplication of the whole display, the kind OBS's display capture uses.
 - Sound: Windows' own per-application sound capture.
 - Mouse: read from Windows (cursor position polling and Windows' raw input
   feed). No input hook is installed, so nothing sits in the path between the
@@ -100,7 +102,13 @@ being built.
 - The League client's local API is used read-only, behind one setting, and
   never while a game is being played beyond a few reads as it loads: the
   queue name (ranked solo, flex, normal...), which the live feed does not
-  give, and who is playing with their rank. After the game, while no game is
+  give, and who is playing with their rank. Before the game, while the client
+  is open and champion select recording is on, its phase (lobby, champion
+  select...) every 2 seconds, to know when champion select starts and ends, and
+  during champion select, once a second, what it looks like: seats, roles, hovers,
+  locked champions, summoner spells, bans and the timer, with no names or accounts.
+  The player rebuilds champion select from that, so the client's window need not be
+  recorded. After the game, while no game is
   on, it gives Riot's record of the game (damage, gold, vision, every kill's
   place on the map, everyone's position once a minute) and the rank again,
   for the LP won or lost. Once per game, within six hours of its end, it also
@@ -140,7 +148,8 @@ position), not a fixed one.
 Checked on 2026-11-12: FFmpeg grabbed a display at 60 fps straight into the NVIDIA
 H.264 encoder with no dropped frames in a 3-second test. That FFmpeg has no on-card
 downscaler for this capture path.
-Tools: Node 22, Rust, the Visual Studio build tools and FFmpeg 7.1.1.
+Tools: Node 22, Rust, the Visual Studio build tools and FFmpeg 9.0.2 (7.1.1 until
+2026-11-16; recording only League's window needs FFmpeg's `gfxcapture`, from 8.0 on).
 
 ## Approaches considered
 
@@ -151,7 +160,9 @@ sources itself, using Windows' per-application sound capture for League and
 Discord and the normal microphone input. When the game ends the pieces are
 joined into the final files. Self-contained, small, all our own code. Cost:
 the sound/video joining and timing is ours to get right, and it records the
-whole monitor rather than only the game window.
+whole monitor rather than only the game window. (Since 2026-11-16 it records
+only the game window where Windows 11 and FFmpeg allow, through FFmpeg's
+window capture, and the whole monitor otherwise.)
 
 **B. Drive OBS Studio in the background.** OBS already does screen capture,
 per-application sound and multi-track files, and can be remote-controlled.
@@ -237,7 +248,10 @@ capture is harder to do there); reusing RiftRec's binaries (not ours to use).
 
 - Exact FFmpeg capture/encode settings, and whether downscaling 4K to 1440p
   can be done on the graphics card with this FFmpeg version. If not, record
-  at native resolution or bundle a newer FFmpeg.
+  at native resolution or bundle a newer FFmpeg. (2026-11-16: window capture
+  sizes the picture on the graphics card as it captures. The whole-display
+  path still scales on the processor where FFmpeg's on-card scaler won't
+  start, as on the NVIDIA PC this was built on.)
 - The crash-safe container used *while* recording, and how sound start times
   are measured and applied.
 - Interface framework details (React + TypeScript + Vite assumed) and the

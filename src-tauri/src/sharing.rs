@@ -389,6 +389,9 @@ pub fn localize(mut doc: Value, local_id: &str, from: &From, video: &str) -> Res
     o.insert("id".into(), json!(local_id));
     o.insert("from".into(), serde_json::to_value(from)?);
     o.insert("video".into(), json!(video));
+    // Champion select is not sent: it shows the player's client (friends list, chat)
+    // and carries their voices from before the game.
+    o.remove("draft");
     // File names are this app's own, whatever theirs says: nothing it names can point
     // outside the game's folder.
     if let Some(tracks) = o.get_mut("tracks").and_then(|t| t.as_array_mut()) {

@@ -73,6 +73,17 @@ pub struct Settings {
     /// opening the app first.
     pub start_with_windows: bool,
     pub fps: u32,
+    /// Record only League's own window (the game, and the client in champion select)
+    /// with Windows' window capture, so other windows, notifications and the desktop
+    /// stay out of the video. Needs Windows 11; without it, or if the window cannot be
+    /// captured, the whole display the game is on is recorded instead.
+    pub capture_window: bool,
+    /// Keep champion select with the game that follows: the picks, bans and timer as
+    /// the League client reports them, with the Discord call and the microphone. Needs
+    /// `use_client_api`, which says when it starts and what is picked.
+    pub record_draft: bool,
+    /// Also record a video of the League client's window during champion select.
+    pub draft_video: bool,
     /// "native" | "1440" | "1080" | "720"
     pub resolution: String,
     /// "h264" | "hevc" | "av1"
@@ -154,6 +165,9 @@ impl Default for Settings {
             auto_record: true,
             start_with_windows: true,
             fps: 60,
+            capture_window: true,
+            record_draft: true,
+            draft_video: false,
             resolution: "native".into(),
             codec: "h264".into(),
             encoder: "auto".into(),

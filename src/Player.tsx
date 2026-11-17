@@ -1,5 +1,5 @@
 import {
-  ArrowLeft, Bookmark, Circle, Download, Eraser, FolderOpen, GraduationCap, Grid2x2, HardDriveDownload, ImageDown, LayoutGrid, LayoutPanelLeft, Maximize2, MoreHorizontal, MoveUpRight,
+  ArrowLeft, Bookmark, Circle, Download, Eraser, FolderOpen, GraduationCap, Grid2x2, HardDriveDownload, Hourglass, ImageDown, LayoutGrid, LayoutPanelLeft, Maximize2, MoreHorizontal, MoveUpRight,
   PanelRightClose, PanelRightOpen, Pause, Pencil, Play, Presentation, Scissors, SkipBack, SkipForward, Skull, Star, Swords, Table2, Trash2, Undo2, Users, VideoOff, Volume2, Wand2, X,
   type LucideIcon,
 } from "lucide-react";
@@ -8,6 +8,7 @@ import type { Playlist } from "./App";
 import { api, fileUrl, onEvent, showInFolder } from "./api";
 import { ItemIcon, Portrait, type Side } from "./ChampIcon";
 import { SendToCoach, shareStatus } from "./Coaching";
+import { DraftView } from "./Draft";
 import { ClipBar, FILTERS, ShortcutsButton, ShowControl, SoundControl, type Overlay } from "./Deck";
 import { bytes, categorize, clock, describe, gameClockAt, laneName, uid, videoTimeAt, when } from "./format";
 import { eventGlyph } from "./icons";
@@ -284,8 +285,12 @@ export function Player({ id, onBack, friends, settings, onSaveSettings, matches,
   const [help, setHelp] = useState(false);
   // The whole scoreboard over the video (O).
   const [board, setBoard] = useState(false);
+  /** Champion select before the game, over the video. */
+  const [draftOpen, setDraftOpen] = useState(false);
   /** Share mode: a clean, large view for screen sharing in Discord. */
   const [share, setShare] = useState(false);
+  const draftRef = useRef(false);
+  draftRef.current = draftOpen && !share;
   const [mouse, setMouse] = useState<MouseLog | null>(null);
   const [keys, setKeys] = useState<KeyLog | null>(null);
   const keysElRef = useRef<HTMLDivElement>(null);
@@ -1067,6 +1072,16 @@ export function Player({ id, onBack, friends, settings, onSaveSettings, matches,
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
       if (ownsKeys(e.target)) return;
+      if (draftRef.current) {
+        // Champion select is showing and plays with its own keys (see DraftView).
+        const n = ({ "1": "game", "2": "discord", "3": "mic" } as Record<string, TrackName | undefined>)[e.key];
+        if (e.key === "Escape") setDraftOpen(false);
+        else if (n && !e.ctrlKey && !e.altKey && !e.metaKey) {
+          const a = audioRef.current;
+          setTrackAudio({ muted: { ...a.muted, [n]: !a.muted[n] } });
+        }
+        return;
+      }
       const v = videoRef.current;
       if (!v) return;
       if ((e.ctrlKey || e.metaKey) && !e.altKey && e.key.toLowerCase() === "z") {
@@ -1577,8 +1592,33 @@ export function Player({ id, onBack, friends, settings, onSaveSettings, matches,
           </button>
         )}
         {keepBtn}
+        {match.draft && !share && (
+          <button
+            className={`btn sm ${draftOpen ? "on" : ""}`}
+            aria-pressed={draftOpen}
+            onClick={() => {
+              if (!draftOpen) {
+                videoRef.current?.pause();
+                setBoard(false);
+              }
+              setDraftOpen(!draftOpen);
+            }}
+            title={match.draft.picks ? "Picks, bans and hovers before this game, as the League client reported them, with what was said" : "Champion select before this game, recorded from the League client's window"}
+          >
+            <Hourglass size={15} aria-hidden />
+            <span className="w">Champion select</span>
+          </button>
+        )}
         {canBoard && (
-          <button className={`btn sm ${board ? "on" : ""}`} aria-pressed={board} onClick={() => setBoard((b) => !b)} title="Both teams in full: score, KDA, damage, gold, vision, runes and items (O)">
+          <button
+            className={`btn sm ${board ? "on" : ""}`}
+            aria-pressed={board}
+            onClick={() => {
+              setBoard((b) => !b);
+              setDraftOpen(false);
+            }}
+            title="Both teams in full: score, KDA, damage, gold, vision, runes and items (O)"
+          >
             <Table2 size={15} aria-hidden />
             <span className="w">Scoreboard</span>
           </button>
@@ -1636,6 +1676,7 @@ export function Player({ id, onBack, friends, settings, onSaveSettings, matches,
       <div className={`pbody ${prefs.theater || share ? "theater" : ""}`} style={prefs.theater || share ? undefined : { gridTemplateColumns: `minmax(0, 1fr) 8px ${prefs.sideWidth}px` }}>
         <div className="stagecol">
           {board && canBoard && <MatchBoard match={match} titles={titles} onClose={() => setBoard(false)} />}
+          {draftOpen && match.draft && !share && <DraftView dir={match.dir} draft={match.draft} audio={audio} onAudio={setTrackAudio} onClose={() => setDraftOpen(false)} />}
           <div className="stage">
             <div
               className={`tiles n${1 + split.length} ${split.length > 0 ? prefs.layout : ""}`}

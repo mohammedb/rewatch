@@ -477,10 +477,14 @@ pub struct ClientInfo {
     pub game_id: Option<i64>,
 }
 
-/// One read-only request to the League client's local API. Used to name the queue,
-/// honour the per-queue switches and identify the game. Returns None if the client
-/// is not reachable.
-pub fn client_info(league_dir: &std::path::Path) -> Option<ClientInfo> {
+/// Where the League client's local API answers, and the header that opens it, from the
+/// lockfile the client writes while it runs. `REWATCH_CLIENT_URL` points it at a
+/// stand-in instead (no password), so the champion select flow can be tested without
+/// touching the real client.
+fn client_api(league_dir: &std::path::Path) -> Option<(String, Option<String>)> {
+    if let Ok(url) = std::env::var("REWATCH_CLIENT_URL") {
+        return Some((url.trim_end_matches('/').to_string(), None));
+    }
     let lock = std::fs::read_to_string(league_dir.join("lockfile")).ok()?;
     let parts: Vec<&str> = lock.trim().split(':').collect();
     if parts.len() < 5 {
@@ -488,15 +492,33 @@ pub fn client_info(league_dir: &std::path::Path) -> Option<ClientInfo> {
     }
     let (port, password) = (parts[2], parts[3]);
     let auth = format!("Basic {}", base64(format!("riot:{password}").as_bytes()));
-    let v: Value = local_agent()
-        .get(&format!("https://127.0.0.1:{port}/lol-gameflow/v1/session"))
-        .header("Authorization", &auth)
-        .call()
-        .ok()?
-        .body_mut()
-        .read_json()
-        .ok()?;
-    Some(parse_client_info(&v))
+    Some((format!("https://127.0.0.1:{port}"), Some(auth)))
+}
+
+/// One read-only request to the League client's local API. None if the client is not
+/// running or did not answer.
+pub(crate) fn client_get(league_dir: &std::path::Path, path: &str) -> Option<Value> {
+    let (base, auth) = client_api(league_dir)?;
+    let mut request = local_agent().get(&format!("{base}{path}"));
+    if let Some(auth) = &auth {
+        request = request.header("Authorization", auth);
+    }
+    request.call().ok()?.body_mut().read_json().ok()
+}
+
+/// What the League client says about the game being set up. Used to name the queue,
+/// honour the per-queue switches and identify the game. Returns None if the client
+/// is not reachable. Between games the game id is the last game's, so it is only taken
+/// once that game's own process runs.
+pub fn client_info(league_dir: &std::path::Path) -> Option<ClientInfo> {
+    client_get(league_dir, "/lol-gameflow/v1/session").map(|v| parse_client_info(&v))
+}
+
+/// Where the League client is in its flow: "Lobby", "Matchmaking", "ReadyCheck",
+/// "ChampSelect", "GameStart", "InProgress" and so on. One small read-only request.
+/// None if the client is not running or did not answer.
+pub fn gameflow_phase(league_dir: &std::path::Path) -> Option<String> {
+    client_get(league_dir, "/lol-gameflow/v1/gameflow-phase")?.as_str().map(String::from)
 }
 
 fn parse_client_info(v: &Value) -> ClientInfo {

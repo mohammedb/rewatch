@@ -2,7 +2,9 @@
 
 mod audio;
 mod coach;
+mod champselect;
 mod copies;
+mod draft;
 mod highlights;
 mod insight;
 mod keys;
@@ -38,6 +40,7 @@ use tauri_plugin_autostart::ManagerExt as _;
 pub struct Status {
     /// "idle" | "starting" | "recording" | "finalizing"
     state: String,
+    /// "game", "manual", or "draft" while champion select is recorded.
     mode: Option<String>,
     started_epoch_ms: Option<i64>,
     queue_name: Option<String>,
@@ -51,6 +54,10 @@ pub struct Status {
 pub struct AppState {
     settings: Mutex<Settings>,
     session: Mutex<Option<Session>>,
+    /// Champion select being recorded, before its game's process exists.
+    draft: Mutex<Option<draft::Draft>>,
+    /// The user stopped this champion select's recording: not started again until it ends.
+    draft_stopped: Mutex<bool>,
     status: Mutex<Status>,
     /// Game process that must not be (re)recorded: its queue is switched off, or the
     /// user stopped its recording by hand.
@@ -474,10 +481,19 @@ fn start_session(app: &AppHandle, game_pid: Option<u32>, client: liveclient::Cli
     emit_status(app);
     let settings = st.settings.lock().unwrap().clone();
     let result = Session::start(&settings, game_pid, client);
+    if let (Ok(session), Some(_)) = (&result, game_pid) {
+        // The champion select that led to this game, if it was recorded.
+        draft::attach(&settings, &session.dir);
+    }
     let mut started: Option<(std::path::PathBuf, Option<i64>)> = None;
+    // League's window was to be recorded on its own, but the whole screen is.
+    let mut whole_screen = false;
     let mut status = st.status.lock().unwrap();
     let out = match result {
         Ok(session) => {
+            whole_screen = game_pid.is_some()
+                && session.meta.target.window.is_none()
+                && session::wants_window(&settings, &settings.ffmpeg_tools().0);
             started = Some((session.dir.clone(), session.meta.game_id));
             status.state = "recording".into();
             status.mode = Some(session.meta.mode.clone());
@@ -509,6 +525,11 @@ fn start_session(app: &AppHandle, game_pid: Option<u32>, client: liveclient::Cli
     match &out {
         Ok(what) => {
             set_tray_tip(app, &format!("Rewatch: recording {what}"));
+            let what = if whole_screen {
+                format!("{what} (the whole screen: League's window couldn't be recorded on its own)")
+            } else {
+                what.clone()
+            };
             // The one thing the player chose to work on, while it can still help.
             match library::latest_focus(&settings) {
                 Some(focus) => notify(app, &format!("Recording {what}. Your focus: {focus}")),
@@ -518,6 +539,107 @@ fn start_session(app: &AppHandle, game_pid: Option<u32>, client: liveclient::Cli
         Err(e) => notify(app, &format!("Could not start recording: {e}")),
     }
     out.map(|_| ())
+}
+
+/// Champion select: start recording it when it begins, and let it go if it ends
+/// without a game. The game's own start keeps it (see `watcher`). The client is only
+/// asked while it is open, and only with its connection and this recording switched on.
+fn draft_tick(app: &AppHandle, settings: &Settings) {
+    static LAST_ERROR: Mutex<String> = Mutex::new(String::new());
+    let st = app.state::<AppState>();
+    let running = st.draft.lock().unwrap().is_some();
+    let wanted = settings.record_draft && settings.auto_record && settings.use_client_api && settings.recordings_path().is_some();
+    if !running && (!wanted || winutil::find_pid_by_name(winutil::CLIENT_UX_EXE).is_none()) {
+        return;
+    }
+    let phase = settings.league_path().and_then(|d| liveclient::gameflow_phase(&d));
+    if running {
+        let why = if wanted {
+            st.draft.lock().unwrap().as_mut().and_then(|d| d.give_up(phase.as_deref()))
+        } else {
+            Some("recording champion select was switched off")
+        };
+        if let Some(why) = why {
+            stop_draft(app, false, why);
+        }
+        return;
+    }
+    if !draft::begins(phase.as_deref()) {
+        // Only a phase the client gave ends a stop by hand: an unanswered request says
+        // nothing about whether this champion select is over.
+        if phase.is_some() {
+            *st.draft_stopped.lock().unwrap() = false;
+        }
+        return;
+    }
+    if *st.draft_stopped.lock().unwrap() {
+        return;
+    }
+    // The queue, for the per-queue switches. Only the queue: between games the
+    // client's game id is still the last game's.
+    let queue = settings.league_path().and_then(|d| liveclient::client_info(&d)).and_then(|c| c.queue);
+    if let Some((id, name)) = &queue {
+        if !settings.queues.allows(*id) {
+            log(format!("[draft] not recording: queue '{name}' is switched off"));
+            *st.draft_stopped.lock().unwrap() = true;
+            return;
+        }
+    }
+    {
+        let mut s = st.status.lock().unwrap();
+        if s.state != "idle" {
+            return;
+        }
+        s.state = "starting".into();
+    }
+    emit_status(app);
+    match draft::Draft::start(settings, queue) {
+        Ok(d) => {
+            {
+                let mut s = st.status.lock().unwrap();
+                s.state = "recording".into();
+                s.mode = Some("draft".into());
+                s.started_epoch_ms = Some(d.meta.started_epoch_ms);
+                s.queue_name = d.meta.queue_name.clone();
+                s.bookmarks = 0;
+                s.last_error = None;
+            }
+            *st.draft.lock().unwrap() = Some(d);
+            LAST_ERROR.lock().unwrap().clear();
+            // No notification: champion selects that end in a dodge come one after another.
+            set_tray_tip(app, "Rewatch: recording champion select");
+        }
+        Err(e) => {
+            st.status.lock().unwrap().state = "idle".into();
+            // Not shown either: the window may only be minimized, and it is tried again
+            // in a moment. Logged once per kind of failure.
+            let text = e.to_string();
+            let mut last = LAST_ERROR.lock().unwrap();
+            if *last != text {
+                log(format!("[draft] could not start: {text}"));
+                *last = text;
+            }
+        }
+    }
+    emit_status(app);
+}
+
+/// Stop recording champion select: kept for the game that is starting, or thrown away.
+fn stop_draft(app: &AppHandle, keep: bool, why: &str) {
+    let st = app.state::<AppState>();
+    let Some(d) = st.draft.lock().unwrap().take() else { return };
+    d.stop(keep, why);
+    {
+        let mut s = st.status.lock().unwrap();
+        if s.mode.as_deref() == Some("draft") {
+            s.state = "idle".into();
+            s.mode = None;
+            s.started_epoch_ms = None;
+            s.queue_name = None;
+        }
+    }
+    emit_status(app);
+    set_tray_tip(app, "Rewatch");
 }
 
 /// Stop the running recording (if any) and produce its files.
@@ -602,17 +724,19 @@ fn watcher(app: AppHandle) {
     let mut checked_root: Option<std::path::PathBuf> = None;
     let mut attempts: (u32, u32) = (0, 0); // (pid, tries)
     let mut backed_pid: Option<u32> = None;
+    // A game whose window closed, ending its recording, while its process lingers.
+    let mut closed_pid: Option<u32> = None;
     loop {
         std::thread::sleep(Duration::from_secs(2));
         let game_pid = winutil::find_pid_by_name(&winutil::game_exe());
         let discord = winutil::find_discord_root_pid().is_some();
         let settings = st.settings.lock().unwrap().clone();
 
-        let (recording_pid, alive, bookmarks) = {
+        let (recording_pid, alive, bookmarks, window) = {
             let mut guard = st.session.lock().unwrap();
             match guard.as_mut() {
-                Some(s) => (s.game_pid, Some(s.video_alive()), s.bookmark_count()),
-                None => (None, None, 0),
+                Some(s) => (s.game_pid, Some(s.video_alive()), s.bookmark_count(), s.meta.target.window),
+                None => (None, None, 0, None),
             }
         };
         {
@@ -634,6 +758,12 @@ fn watcher(app: AppHandle) {
             let game_gone = recording_pid.map(|p| !winutil::pid_alive(p)).unwrap_or(false);
             if game_gone {
                 let _ = finish_session(&app, None);
+            } else if !alive && window.is_some_and(|w| !winutil::window_exists(w)) {
+                // Only the game's window was captured, and that capture ends when the
+                // window closes: the game is over, though its process takes a moment
+                // longer to go.
+                let _ = finish_session(&app, None);
+                closed_pid = recording_pid;
             } else if !alive {
                 let _ = finish_session(&app, Some("Video capture stopped unexpectedly; the part before that was saved."));
             }
@@ -645,6 +775,9 @@ fn watcher(app: AppHandle) {
         // (a fresh install has no folder yet at start-up).
         if settings.recordings_path() != checked_root {
             checked_root = settings.recordings_path();
+            if st.draft.lock().unwrap().is_none() {
+                draft::clear_pending(&settings);
+            }
             if !session::recover_interrupted(&settings, None).is_empty() {
                 let _ = app.emit("library-changed", ());
             }
@@ -654,8 +787,24 @@ fn watcher(app: AppHandle) {
         let Some(pid) = game_pid else {
             *st.skip_pid.lock().unwrap() = None;
             backed_pid = None;
+            closed_pid = None;
+            // Before a game's process exists, champion select may be on.
+            draft_tick(&app, &settings);
             continue;
         };
+        // The game has started: its champion select ends here and waits for it.
+        if st.draft.lock().unwrap().is_some() {
+            stop_draft(&app, true, "the game started");
+        }
+        if closed_pid == Some(pid) {
+            // Its recording ended with its window. Another starts only if the same
+            // process opens a window again (League made a new one mid-game).
+            if !winutil::has_window(pid) {
+                continue;
+            }
+            log("[watch] the game opened a new window; recording again");
+            closed_pid = None;
+        }
         if backed_pid != Some(pid) {
             backed_pid = Some(pid);
             league_cfg::auto_backup(&settings);
@@ -742,6 +891,7 @@ fn environment(state: State<AppState>) -> Value {
         "leagueDir": s.league_path().map(|p| p.to_string_lossy().to_string()),
         "suggestedRecordingsDir": videos,
         "freeBytes": free,
+        "windowCapture": winutil::window_capture_possible() && video::has_window_capture(&ffmpeg),
     })
 }
 
@@ -1139,6 +1289,13 @@ fn start_manual_recording(app: AppHandle) -> CmdResult<()> {
 
 #[tauri::command(async)]
 fn stop_recording(app: AppHandle, state: State<AppState>) -> CmdResult<Option<String>> {
+    if state.draft.lock().unwrap().is_some() {
+        // Champion select: thrown away, and not started again until it is over. The
+        // game after it is still recorded.
+        *state.draft_stopped.lock().unwrap() = true;
+        stop_draft(&app, false, "stopped by hand");
+        return Ok(None);
+    }
     // Stopped by hand: do not start recording the same game again.
     let pid = state.session.lock().unwrap().as_ref().and_then(|s| s.game_pid);
     if pid.is_some() {
@@ -1219,6 +1376,8 @@ pub fn run() {
         .manage(AppState {
             settings: Mutex::new(Settings::load()),
             session: Mutex::new(None),
+            draft: Mutex::new(None),
+            draft_stopped: Mutex::new(false),
             status: Mutex::new(Status {
                 state: "idle".into(),
                 ..Default::default()
@@ -1257,6 +1416,7 @@ pub fn run() {
                 .on_menu_event(|app, event| match event.id.as_ref() {
                     "open" => show_main(app),
                     "quit" => {
+                        stop_draft(app, false, "the app was closed");
                         let _ = finish_session(app, None);
                         app.exit(0);
                     }
@@ -1793,7 +1953,56 @@ pub fn cli_list_mics() -> i32 {
 
 /// Headless capture test: `rewatch --test-record <seconds> [--out <folder>]`.
 /// Records the primary display with all sound tracks and prints what was produced.
-pub fn cli_test_record(secs: u64, out: Option<String>, encoder: Option<String>, hotkey: Option<String>, codec: Option<String>) -> i32 {
+/// `rewatch --test-draft <secs> --out <folder> --window <program.exe>`: record champion
+/// select for `secs` as the settings say (the picks need a champion select in the
+/// client, or a stand-in client through `REWATCH_CLIENT_URL`), keep it, then record the
+/// window of `program.exe` as if it were the game for `secs` more, and finish both into
+/// one recording. For testing without a real game.
+pub fn cli_test_draft(secs: u64, out: String, game_exe: String) -> i32 {
+    winutil::set_dpi_aware();
+    winutil::end_helpers_with_app();
+    let mut settings = Settings::load();
+    settings.recordings_dir = out;
+    settings.bookmark_hotkey = String::new();
+    let draft = match draft::Draft::start(&settings, Some((420, "Ranked Solo/Duo".into()))) {
+        Ok(d) => d,
+        Err(e) => {
+            eprintln!("Could not start champion select: {e}");
+            return 1;
+        }
+    };
+    println!("Recording champion select for {secs}s ({})", draft.meta.target.map(|t| t.kind()).unwrap_or("picks and bans only"));
+    std::thread::sleep(Duration::from_secs(secs));
+    draft.stop(true, "test");
+    let Some(pid) = winutil::find_pid_by_name(&game_exe) else {
+        eprintln!("{game_exe} is not running");
+        return 1;
+    };
+    let session = match Session::start(&settings, Some(pid), liveclient::ClientInfo::default()) {
+        Ok(s) => s,
+        Err(e) => {
+            eprintln!("Could not start the game: {e}");
+            return 1;
+        }
+    };
+    draft::attach(&settings, &session.dir);
+    let dir = session.dir.clone();
+    println!("Recording the game for {secs}s into {} ({})", dir.display(), session.meta.target.kind());
+    std::thread::sleep(Duration::from_secs(secs));
+    match session.stop_and_finalize(&settings) {
+        Ok(id) => {
+            println!("Saved {id}");
+            println!("{}", dir.display());
+            0
+        }
+        Err(e) => {
+            eprintln!("Could not finish: {e}");
+            1
+        }
+    }
+}
+
+pub fn cli_test_record(secs: u64, out: Option<String>, encoder: Option<String>, hotkey: Option<String>, codec: Option<String>, window: Option<String>) -> i32 {
     winutil::set_dpi_aware();
     winutil::end_helpers_with_app();
     let mut settings = Settings::load();
@@ -1813,7 +2022,16 @@ pub fn cli_test_record(secs: u64, out: Option<String>, encoder: Option<String>, 
         eprintln!("No recordings folder: pass --out <folder>");
         return 2;
     }
-    let session = match Session::start(&settings, None, liveclient::ClientInfo::default()) {
+    // With `--window <program.exe>`, that program's window is recorded as a game is.
+    let pid = match window.as_deref().map(|exe| (exe, winutil::find_pid_by_name(exe))) {
+        Some((exe, None)) => {
+            eprintln!("{exe} is not running");
+            return 2;
+        }
+        Some((_, pid)) => pid,
+        None => None,
+    };
+    let session = match Session::start(&settings, pid, liveclient::ClientInfo::default()) {
         Ok(s) => s,
         Err(e) => {
             eprintln!("Could not start: {e}");

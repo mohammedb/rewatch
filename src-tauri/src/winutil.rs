@@ -9,7 +9,7 @@ use windows::core::BOOL;
 use windows::Win32::Foundation::{CloseHandle, HWND, LPARAM, POINT, RECT};
 use windows::Win32::Graphics::Dxgi::{CreateDXGIFactory1, IDXGIFactory1};
 use windows::Win32::Graphics::Gdi::{
-    GetMonitorInfoW, MonitorFromPoint, MonitorFromWindow, HMONITOR, MONITORINFO,
+    ClientToScreen, GetMonitorInfoW, MonitorFromPoint, MonitorFromWindow, HMONITOR, MONITORINFO,
     MONITOR_DEFAULTTONEAREST, MONITOR_DEFAULTTOPRIMARY,
 };
 use windows::Win32::System::Diagnostics::ToolHelp::{
@@ -21,10 +21,13 @@ use windows::Win32::UI::HiDpi::{
 };
 use windows::Win32::UI::Input::KeyboardAndMouse::{GetAsyncKeyState, VK_LBUTTON, VK_RBUTTON};
 use windows::Win32::UI::WindowsAndMessaging::{
-    EnumWindows, GetCursorPos, GetForegroundWindow, GetWindowRect, GetWindowThreadProcessId, IsWindowVisible,
+    EnumWindows, GetClientRect, GetCursorPos, GetForegroundWindow, GetWindowRect, GetWindowThreadProcessId, IsIconic,
+    IsWindow, IsWindowVisible,
 };
 
 const GAME_EXE: &str = "League of Legends.exe";
+/// The League client's interface process, which owns the client's window.
+pub const CLIENT_UX_EXE: &str = "LeagueClientUx.exe";
 
 /// Name of the game process to watch for. `REWATCH_GAME_EXE` overrides it so the
 /// whole record-and-save flow can be tested with a harmless stand-in process.
@@ -130,9 +133,12 @@ pub fn set_dpi_aware() {
     }
 }
 
-/// Display to capture: which graphics adapter/output it is for FFmpeg, and where it
-/// sits on the desktop (physical pixels) so mouse positions can be made relative.
-#[derive(Debug, Clone, Copy, serde::Serialize, serde::Deserialize)]
+/// What to capture. For a whole display: which graphics adapter/output it is for
+/// FFmpeg, and where it sits on the desktop. For one window: its handle, and where its
+/// inside (without title bar or frame) sat on the desktop when recording began, plus the
+/// display it was on. Positions are physical pixels, so mouse positions can be made
+/// relative to the picture.
+#[derive(Debug, Clone, Copy, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct CaptureTarget {
     pub adapter_idx: u32,
     pub output_idx: u32,
@@ -140,6 +146,55 @@ pub struct CaptureTarget {
     pub y: i32,
     pub w: i32,
     pub h: i32,
+    /// The window recorded through Windows' window capture, or None when the whole
+    /// display is recorded. Recordings made before window capture have none.
+    #[serde(default)]
+    pub window: Option<u64>,
+}
+
+impl CaptureTarget {
+    /// The whole display this target is on, for when its window cannot be captured.
+    pub fn display(&self) -> CaptureTarget {
+        if self.window.is_none() {
+            return *self;
+        }
+        // Found from where the window's middle was, which holds even if it has closed.
+        let middle = POINT { x: self.x + self.w / 2, y: self.y + self.h / 2 };
+        let hmon = unsafe { MonitorFromPoint(middle, MONITOR_DEFAULTTONEAREST) };
+        target_for_monitor(hmon).unwrap_or_else(|| fallback_target(hmon))
+    }
+
+    /// "window" or "display", as match.json and the log say it.
+    pub fn kind(&self) -> &'static str {
+        if self.window.is_some() { "window" } else { "display" }
+    }
+}
+
+fn window_handle(handle: Option<u64>) -> Option<HWND> {
+    handle.filter(|h| *h != 0).map(|h| HWND(h as usize as *mut core::ffi::c_void))
+}
+
+/// Whether a window still exists. Only asks Windows; the window's process is not opened.
+pub fn window_exists(handle: u64) -> bool {
+    window_handle(Some(handle)).is_some_and(|h| unsafe { IsWindow(Some(h)) }.as_bool())
+}
+
+/// Windows' build number: 22000 and up is Windows 11.
+pub fn windows_build() -> u32 {
+    use windows::Wdk::System::SystemServices::RtlGetVersion;
+    use windows::Win32::System::SystemInformation::OSVERSIONINFOW;
+    let mut v = OSVERSIONINFOW { dwOSVersionInfoSize: size_of::<OSVERSIONINFOW>() as u32, ..Default::default() };
+    unsafe {
+        let _ = RtlGetVersion(&mut v);
+    }
+    v.dwBuildNumber
+}
+
+/// Whether one window can be captured without anything being drawn on the screen.
+/// Windows 10 puts a yellow frame around a window while it is captured, over the game,
+/// and only Windows 11 lets a recorder leave it out.
+pub fn window_capture_possible() -> bool {
+    windows_build() >= 22000
 }
 
 struct EnumState {
@@ -167,8 +222,8 @@ unsafe extern "system" fn enum_cb(hwnd: HWND, lparam: LPARAM) -> BOOL {
     }
 }
 
-/// Monitor that shows the largest visible window of the given process, if it has one.
-fn monitor_of_process_window(pid: u32) -> Option<HMONITOR> {
+/// The largest visible window of the given process: its main window.
+fn main_window(pid: u32) -> Option<HWND> {
     let mut state = EnumState {
         pid,
         best: None,
@@ -176,10 +231,66 @@ fn monitor_of_process_window(pid: u32) -> Option<HMONITOR> {
     };
     unsafe {
         let _ = EnumWindows(Some(enum_cb), LPARAM(&mut state as *mut _ as isize));
-        state
-            .best
-            .map(|h| MonitorFromWindow(h, MONITOR_DEFAULTTONEAREST))
     }
+    state.best
+}
+
+/// Whether the process shows a window right now.
+pub fn has_window(pid: u32) -> bool {
+    main_window(pid).is_some()
+}
+
+/// Monitor that shows the largest visible window of the given process, if it has one.
+fn monitor_of_process_window(pid: u32) -> Option<HMONITOR> {
+    main_window(pid).map(|h| unsafe { MonitorFromWindow(h, MONITOR_DEFAULTTONEAREST) })
+}
+
+/// The inside of a window (no title bar or frame) in desktop pixels. None while the
+/// window is minimized, since it then has no picture to capture.
+fn client_area(hwnd: HWND) -> Option<RECT> {
+    unsafe {
+        if IsIconic(hwnd).as_bool() {
+            return None;
+        }
+        let mut r = RECT::default();
+        GetClientRect(hwnd, &mut r).ok()?;
+        let mut origin = POINT { x: 0, y: 0 };
+        if !ClientToScreen(hwnd, &mut origin).as_bool() {
+            return None;
+        }
+        Some(RECT { left: origin.x, top: origin.y, right: origin.x + r.right, bottom: origin.y + r.bottom })
+    }
+}
+
+/// What to capture for the main window of a process: its inside, on the display it
+/// is on. Waits up to `wait_secs` for the process to show a window and for that
+/// window's size to hold still (League may size its window as it opens). None if no
+/// usable window turned up: no window, a minimized one, or a tiny one.
+pub fn window_target(pid: u32, wait_secs: u32) -> Option<CaptureTarget> {
+    let mut seen: Option<(HWND, RECT)> = None;
+    for _ in 0..(wait_secs * 4).max(2) {
+        let found = main_window(pid).and_then(|h| client_area(h).map(|r| (h, r)));
+        if let Some((hwnd, r)) = found.filter(|(_, r)| r.right - r.left >= 320 && r.bottom - r.top >= 200) {
+            let size = |r: &RECT| (r.right - r.left, r.bottom - r.top);
+            if seen.is_some_and(|(h, before)| h == hwnd && size(&before) == size(&r)) {
+                let hmon = unsafe { MonitorFromWindow(hwnd, MONITOR_DEFAULTTONEAREST) };
+                let display = target_for_monitor(hmon).unwrap_or_else(|| fallback_target(hmon));
+                return Some(CaptureTarget {
+                    x: r.left,
+                    y: r.top,
+                    w: r.right - r.left,
+                    h: r.bottom - r.top,
+                    window: Some(hwnd.0 as usize as u64),
+                    ..display
+                });
+            }
+            seen = Some((hwnd, r));
+        } else if !pid_alive(pid) {
+            return None;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(250));
+    }
+    None
 }
 
 fn primary_monitor() -> HMONITOR {
@@ -203,6 +314,7 @@ fn target_for_monitor(hmon: HMONITOR) -> Option<CaptureTarget> {
                             y: r.top,
                             w: r.right - r.left,
                             h: r.bottom - r.top,
+                            window: None,
                         });
                     }
                 }
@@ -235,6 +347,7 @@ fn fallback_target(hmon: HMONITOR) -> CaptureTarget {
         y,
         w,
         h,
+        window: None,
     }
 }
 

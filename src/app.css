@@ -1526,6 +1526,93 @@ button.mdot { cursor: pointer; }
 .mb { position: absolute; inset: 0; z-index: var(--z-over); overflow: auto; display: flex; flex-direction: column; gap: 12px; padding: 16px 20px 24px; background: rgb(9 10 13 / 0.97); animation: mb-in 160ms var(--ease); }
 @keyframes mb-in { from { opacity: 0; transform: translateY(6px); } }
 @media (prefers-reduced-motion: reduce) { .mb { animation: none; } }
+/* Champion select, over the game's video and its controls. */
+.dv { position: absolute; inset: 0; z-index: var(--z-over); display: flex; flex-direction: column; background: var(--stage); animation: mb-in 160ms var(--ease); }
+@media (prefers-reduced-motion: reduce) { .dv { animation: none; } }
+.dv-h { display: flex; align-items: center; gap: 12px; padding: 8px 10px 8px 16px; border-bottom: 1px solid var(--line); background: var(--panel); flex: none; }
+.dv-h .num { color: var(--muted); font-size: 12.5px; }
+.dv-h .grow { flex: 1; }
+.dv { container-type: inline-size; }
+.cs-sidetag { font: 600 10.5px/18px var(--body); letter-spacing: 0.06em; text-transform: uppercase; padding: 0 7px; border-radius: 5px; }
+.cs-sidetag.s1 { color: var(--win-ink); background: var(--win-bg); }
+.cs-sidetag.s2 { color: var(--loss-ink); background: var(--loss-bg); }
+.cs-body { flex: 1; min-height: 0; display: grid; grid-template-columns: minmax(0, 1fr) 300px; }
+.cs-main { min-width: 0; min-height: 0; display: flex; flex-direction: column; }
+.cs-video { flex: 1; min-height: 0; width: 100%; object-fit: contain; display: block; background: var(--stage); cursor: pointer; }
+.cs-note { flex: 1; display: grid; place-items: center; margin: 0; padding: 24px; color: var(--muted); text-align: center; }
+/* The board: bans and the clock on top, the two teams side by side as in the client. */
+.cs-board { flex: 1; min-height: 0; overflow: auto; display: flex; flex-direction: column; gap: 18px; padding: 18px 22px 22px; background: radial-gradient(ellipse at 50% 0%, rgb(255 255 255 / 0.035), transparent 60%), var(--bg); }
+.cs-top { display: grid; grid-template-columns: minmax(0, 1fr) auto minmax(0, 1fr); align-items: center; gap: 16px; }
+.cs-bans { display: flex; flex-wrap: wrap; gap: 6px; }
+.cs-bans.enemy { justify-content: flex-end; }
+.cs-ban { position: relative; width: 30px; height: 30px; border-radius: 24%; background: var(--raised); box-shadow: 0 0 0 1px var(--line-2); display: inline-grid; place-items: center; flex: none; }
+.cs-ban .portrait { box-shadow: none; }
+.cs-ban.st-done .portrait { filter: grayscale(1) brightness(0.7); }
+.cs-ban.st-done::after { content: ""; position: absolute; left: -3px; right: -3px; top: 50%; height: 2px; margin-top: -1px; border-radius: 1px; background: rgb(232 64 87 / 0.85); transform: rotate(-45deg); }
+.cs-ban.st-hover { outline: 1px dashed var(--soft); outline-offset: 1px; }
+.cs-ban.st-hover .portrait { opacity: 0.55; }
+.cs-clock { display: grid; justify-items: center; gap: 5px; min-width: 170px; text-align: center; }
+.cs-clock b { font: 700 12px/1 var(--body); letter-spacing: 0.08em; text-transform: uppercase; color: var(--soft); }
+.cs-clock .num { font: 800 34px/1 var(--display); font-variant-numeric: tabular-nums; }
+.cs-clock .num.hurry { color: var(--loss-ink); }
+.cs-bar { width: 160px; height: 4px; border-radius: 2px; background: rgb(255 255 255 / 0.08); overflow: hidden; }
+.cs-bar i { display: block; height: 100%; background: var(--soft); }
+.cs-teams { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); gap: 28px; align-items: start; }
+.cs-team { list-style: none; margin: 0; padding: 0; display: grid; gap: 8px; }
+.cs-seat { position: relative; display: flex; align-items: center; gap: 12px; min-height: 66px; padding: 6px 12px 6px 6px; border-radius: 10px; border: 1px solid var(--line); background: var(--panel); }
+.cs-team.ally .cs-seat { box-shadow: inset 3px 0 0 rgb(91 141 239 / 0.55); }
+.cs-team.enemy .cs-seat { flex-direction: row-reverse; text-align: right; padding: 6px 6px 6px 12px; box-shadow: inset -3px 0 0 rgb(232 64 87 / 0.55); }
+.cs-seat.me { background: linear-gradient(90deg, rgb(242 201 76 / 0.08), transparent 70%), var(--panel); }
+.cs-seat.turn::after { content: ""; position: absolute; inset: -1px; border-radius: 10px; box-shadow: 0 0 0 1px var(--ally), 0 0 18px rgb(91 141 239 / 0.3); animation: cs-turn 1.4s ease-in-out infinite; pointer-events: none; }
+.cs-team.enemy .cs-seat.turn::after { box-shadow: 0 0 0 1px var(--enemy), 0 0 18px rgb(232 64 87 / 0.3); }
+@keyframes cs-turn { 50% { opacity: 0.3; } }
+@media (prefers-reduced-motion: reduce) { .cs-seat.turn::after { animation: none; } }
+.cs-seat.st-hover .portrait { opacity: 0.5; filter: saturate(0.6); }
+.cs-blank { width: 52px; height: 52px; flex: none; border-radius: 24%; background: var(--raised); box-shadow: 0 0 0 1px var(--line); }
+.cs-who { display: grid; gap: 2px; min-width: 0; flex: 1; }
+.cs-who small { display: flex; align-items: center; gap: 6px; min-height: 14px; font: 600 10.5px/1.3 var(--body); letter-spacing: 0.06em; text-transform: uppercase; color: var(--muted); }
+.cs-team.enemy .cs-who small { justify-content: flex-end; }
+.cs-who .you { font: 800 9px/14px var(--body); letter-spacing: 0.06em; font-style: normal; padding: 0 5px; border-radius: 4px; background: var(--mark); color: var(--mark-ink); }
+.cs-who b { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font: 700 15px/1.25 var(--display); }
+.cs-seat.st-hover .cs-who b { color: var(--soft); }
+.cs-seat.st-open .cs-who b { font: 500 13px/1.25 var(--body); color: var(--muted); }
+.cs-who i { font-style: normal; font-size: 11.5px; color: var(--muted); }
+.cs-sp { display: grid; gap: 3px; flex: none; }
+/* Play, the position, the phases under it and a mark for each pick and ban. */
+.cs-tr { display: flex; align-items: center; gap: 12px; padding: 10px 16px; border-top: 1px solid var(--line); background: var(--panel); flex: none; }
+.cs-tr .num { font-size: 12.5px; color: var(--muted); font-variant-numeric: tabular-nums; white-space: nowrap; }
+.cs-track { position: relative; flex: 1; height: 30px; }
+.cs-marks { position: absolute; left: 0; right: 0; top: 2px; height: 12px; pointer-events: none; }
+.cs-marks i { position: absolute; top: 0; width: 2px; height: 12px; margin-left: -1px; border-radius: 1px; }
+.cs-marks .k-pick.us, .cs-marks .k-swap.us { background: var(--ally); }
+.cs-marks .k-pick.them, .cs-marks .k-swap.them { background: var(--enemy); }
+.cs-marks .k-ban { top: 6px; height: 6px; background: var(--muted); }
+.cs-bands { position: absolute; left: 0; right: 0; bottom: 3px; height: 3px; border-radius: 2px; overflow: hidden; background: rgb(255 255 255 / 0.06); pointer-events: none; }
+.cs-bands i { position: absolute; top: 0; bottom: 0; }
+.cs-bands .p-planning { background: rgb(255 255 255 / 0.2); }
+.cs-bands .p-ban_pick { background: rgb(242 201 76 / 0.5); }
+.cs-bands .p-finalization { background: rgb(76 195 138 / 0.5); }
+.cs-bands .p-game_starting { background: rgb(255 255 255 / 0.35); }
+.cs-track input[type="range"] { position: absolute; left: 0; right: 0; top: 13px; width: 100%; margin: 0; }
+/* What happened, beside the board. */
+.cs-ev { min-height: 0; display: flex; flex-direction: column; border-left: 1px solid var(--line); background: var(--panel); }
+.cs-ev h3 { margin: 0; padding: 12px 14px 8px; font: 600 10.5px/1.3 var(--body); letter-spacing: 0.06em; text-transform: uppercase; color: var(--muted); }
+.cs-ev ol { position: relative; flex: 1; min-height: 0; overflow: auto; list-style: none; margin: 0; padding: 0 6px 12px; }
+.cs-ev button { width: 100%; display: flex; align-items: center; gap: 8px; padding: 5px 8px; border: 0; border-radius: 6px; background: transparent; color: var(--muted); font-size: 12.5px; text-align: left; cursor: pointer; }
+.cs-ev button:hover { background: var(--hover); color: var(--text); }
+.cs-ev li.past button { color: var(--soft); }
+.cs-ev li.now button { background: var(--raised); color: var(--text); }
+.cs-ev .num { flex: none; width: 34px; font-size: 11.5px; color: var(--muted); font-variant-numeric: tabular-nums; }
+.cs-ev .tx { min-width: 0; }
+.cs-ev li.k-phase .tx { font-weight: 600; }
+.cs-ev li.k-hover .tx { font-style: italic; }
+.cs-dot { width: 22px; height: 22px; flex: none; display: grid; place-items: center; }
+.cs-dot::before { content: ""; width: 6px; height: 6px; border-radius: 50%; background: var(--muted); }
+@container (max-width: 980px) {
+  .cs-body { grid-template-columns: minmax(0, 1fr); grid-template-rows: minmax(0, 1fr) minmax(120px, 30%); }
+  .cs-ev { border-left: 0; border-top: 1px solid var(--line); }
+  .cs-teams { gap: 14px; }
+}
 .mb-h { position: relative; display: flex; align-items: center; flex-wrap: wrap; gap: 12px 22px; padding: 14px 60px 14px 20px; border-radius: 12px; border: 1px solid var(--line); background: var(--panel); overflow: hidden; flex: none; }
 .mb-h > .btn { position: absolute; top: 10px; right: 10px; }
 /* In the page instead of over the video, for a game without its video. */

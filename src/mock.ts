@@ -219,6 +219,21 @@ const matches: MatchSummary[] = SPEC.map(([h, c, result, k, d, a, cs, min, q, ta
   const me = { ...players[0], champion: CHAMPS[c][0], championKey: CHAMPS[c][1], kills: k, deaths: d, assists: a, cs };
   const m = base(idOf(ms), ms, result, me, tags);
   m.game = { ...m.game, queueId: QUEUES[q][0], queueName: QUEUES[q][1], length: min * 60 + 17 * (i % 4) };
+  m.capture = "window";
+  // The newest games have their champion select: its picks with the voice chat, the picks
+  // and a video of the client, and a video alone as the first test builds kept it (the
+  // sample game video stands in for the client's window).
+  if (i < 3) {
+    const video = i > 0 ? { video: "game.mp4", width: 1280, height: 720, capture: "window" as const } : { video: null };
+    m.draft = {
+      picks: i < 2 ? "draft-picks.json" : null, ...video, offset: 0, duration: i < 2 ? 180 : 94, startedEpochMs: ms - 200e3,
+      tracks: [
+        ...(i > 0 ? [{ name: "game" as const, file: null, silent: false, note: null }] : []),
+        { name: "discord", file: "discord.m4a", silent: false, note: null },
+        { name: "mic", file: "mic.m4a", silent: false, note: null },
+      ],
+    };
+  }
   m.sizeBytes = (4.2 + ((i * 37) % 36) / 10) * 1024 ** 3;
   m.videoBytes = m.sizeBytes - 2.4 * 1024 ** 2;
   const done = !UNREVIEWED.has(i);
@@ -554,7 +569,7 @@ let backups: LeagueBackup[] = [
 ];
 
 let settings: Settings = {
-  recordingsDir: "E:\\Rewatch", autoRecord: true, startWithWindows: true, fps: 60, resolution: "native", codec: "h264", encoder: "auto", quality: 23, recordDiscord: true, recordMic: true,
+  recordingsDir: "E:\\Rewatch", autoRecord: true, startWithWindows: true, fps: 60, captureWindow: true, recordDraft: true, draftVideo: false, resolution: "native", codec: "h264", encoder: "auto", quality: 23, recordDiscord: true, recordMic: true,
   micDevice: "", mouseTracking: true, keyTracking: true, keyMap: [], useClientApi: true,
   queues: { rankedSolo: true, rankedFlex: true, normal: true, aram: false, custom: true, other: true },
   quotaGb: 300, bookmarkHotkey: "F8", ffmpegPath: "", leagueDir: "", autoBackupLeague: true,
@@ -645,7 +660,7 @@ export async function mock<T>(cmd: string, args?: Record<string, unknown>): Prom
       case "get_settings": return settings;
       case "save_settings": settings = args!.settings as Settings; return settings;
       case "get_status": return status;
-      case "environment": return { ffmpeg: "C:\\ffmpeg\\bin\\ffmpeg.exe", ffmpegVersion: "ffmpeg version 7.1.1", ffprobeFound: true, leagueDir: "D:\\Riot Games\\League of Legends", suggestedRecordingsDir: "C:\\Users\\you\\Videos\\Rewatch", freeBytes: 412 * 1024 ** 3 };
+      case "environment": return { ffmpeg: "C:\\ffmpeg\\bin\\ffmpeg.exe", ffmpegVersion: "ffmpeg version 7.1.1", ffprobeFound: true, leagueDir: "D:\\Riot Games\\League of Legends", suggestedRecordingsDir: "C:\\Users\\you\\Videos\\Rewatch", freeBytes: 412 * 1024 ** 3, windowCapture: true };
       case "copy_file": return null;
       case "delete_match": {
         const i = matches.findIndex((m) => m.id === args!.id);

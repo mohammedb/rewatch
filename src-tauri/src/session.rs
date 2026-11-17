@@ -116,8 +116,8 @@ impl Session {
         let dir = root.join(&id);
         fs::create_dir_all(&dir)?;
 
-        let target = winutil::capture_target(game_pid, 20);
         let (ffmpeg, _) = settings.ffmpeg_tools();
+        let mut target = pick_target(settings, &ffmpeg, game_pid);
         let family = video::resolve_family(&ffmpeg, &target, settings);
 
         // Session time zero. The wall-clock value goes to FFmpeg, the monotonic one to
@@ -127,7 +127,7 @@ impl Session {
         let stop = Arc::new(AtomicBool::new(false));
 
         let tracked_keys = crate::keys::active_keys(settings);
-        let meta = SessionMeta {
+        let mut meta = SessionMeta {
             id,
             started_at: now.to_rfc3339(),
             started_epoch_ms: now.timestamp_millis(),
@@ -167,7 +167,28 @@ impl Session {
             spawn_track("mic", TrackKind::Mic((!id.is_empty()).then(|| id.to_string())));
         }
 
-        let video = match VideoRecorder::start(&ffmpeg, &target, settings, family, ref_epoch_us, &dir.join("video.mkv")) {
+        let raw_video = dir.join(GAME_FILES.raw);
+        let mut started = VideoRecorder::start(&ffmpeg, &target, settings, family, ref_epoch_us, &raw_video);
+        let window_failed = match (&mut started, target.window) {
+            (Err(e), Some(_)) => Some(e.to_string()),
+            // Windows may start capturing a window and then send nothing at all (a
+            // game in exclusive fullscreen, say). That would leave the game without video.
+            (Ok(video), Some(_)) => (!video.wait_for_picture(FIRST_PICTURE)).then(|| format!("no picture came in {}s", FIRST_PICTURE.as_secs())),
+            _ => None,
+        };
+        if let Some(why) = window_failed {
+            if let Ok(video) = started {
+                video.abandon();
+            }
+            // The window could not be captured: record the display it is on instead,
+            // so the game is not lost.
+            log(format!("[session {}] the game's window could not be captured ({why}); recording its display", meta.id));
+            target = target.display();
+            meta.target = target;
+            fs::write(dir.join("session.json"), serde_json::to_string_pretty(&meta)?)?;
+            started = VideoRecorder::start(&ffmpeg, &target, settings, family, ref_epoch_us, &raw_video);
+        }
+        let video = match started {
             Ok(v) => v,
             Err(e) => {
                 stop.store(true, Ordering::Relaxed);
@@ -199,8 +220,8 @@ impl Session {
         };
 
         log(format!(
-            "[session {}] recording {}x{} @{}fps on output {} ({}, {} encoder)",
-            meta.id, target.w, target.h, meta.fps, target.output_idx, meta.mode, family.label()
+            "[session {}] recording {}x{} @{}fps, {} on output {} ({}, {} encoder)",
+            meta.id, target.w, target.h, meta.fps, target.kind(), target.output_idx, meta.mode, family.label()
         ));
         let bookmarks = Arc::new(Mutex::new(Vec::new()));
         let hotkey_thread = winutil::parse_hotkey(&settings.bookmark_hotkey).map(|key| {
@@ -272,8 +293,118 @@ impl Session {
     }
 }
 
-fn file_size(p: &Path) -> u64 {
+pub(crate) fn file_size(p: &Path) -> u64 {
     fs::metadata(p).map(|m| m.len()).unwrap_or(0)
+}
+
+/// Whether League's own window should, and can, be captured on its own: the setting
+/// is on, Windows can do it without drawing on the screen, and this FFmpeg can.
+/// How long a game's window has to send its first picture. A game draws all the time,
+/// so the first comes within a second; none at all means Windows can't capture it.
+const FIRST_PICTURE: Duration = Duration::from_secs(5);
+
+pub fn wants_window(settings: &Settings, ffmpeg: &Path) -> bool {
+    settings.capture_window && winutil::window_capture_possible() && video::has_window_capture(ffmpeg)
+}
+
+/// What to record: the game's own window when it can be captured on its own,
+/// otherwise the whole display the game is on. A manual recording takes the main
+/// display.
+fn pick_target(settings: &Settings, ffmpeg: &Path, game_pid: Option<u32>) -> CaptureTarget {
+    if let (Some(pid), true) = (game_pid, wants_window(settings, ffmpeg)) {
+        if let Some(target) = winutil::window_target(pid, 20) {
+            return target;
+        }
+        log("[session] the game showed no window to capture; recording its display");
+        return winutil::capture_target(game_pid, 0);
+    }
+    winutil::capture_target(game_pid, 20)
+}
+
+/// How one capture's files are named: the raw ones written while recording, and the
+/// finished ones the player plays.
+pub struct Layout {
+    /// The video as captured.
+    pub raw: &'static str,
+    /// The finished video, with the game's sound (or the client's) in it.
+    pub video: &'static str,
+    /// Put before each sound track's name: `{prefix}discord.wav` while recording,
+    /// `{prefix}discord.m4a` when finished.
+    pub prefix: &'static str,
+}
+
+/// The game itself.
+pub const GAME_FILES: Layout = Layout { raw: "video.mkv", video: "game.mp4", prefix: "" };
+
+/// One capture joined into its finished files.
+pub struct Joined {
+    /// When, on the capture's own clock, its first video frame was taken.
+    pub video_start: f64,
+    /// The sound tracks it had: "game", "discord", "mic".
+    pub tracks: Vec<&'static str>,
+}
+
+/// Join one capture's raw files into the files the player plays: the video with the
+/// game's sound, and each other sound track as its own `.m4a`.
+pub fn join(ffmpeg: &Path, dir: &Path, files: &Layout, codec: &str) -> Result<Joined> {
+    let raw_video = dir.join(files.raw);
+    if file_size(&raw_video) == 0 {
+        return Err(anyhow!("No video was captured"));
+    }
+    let p = |x: &Path| x.to_string_lossy().to_string();
+
+    // When, on the capture's clock, the first video frame was taken.
+    let video_start = video::probe(ffmpeg, &raw_video).start;
+
+    let wav = |name: &str| dir.join(format!("{}{name}.wav", files.prefix));
+    let mut args: Vec<String> = ["-y", "-hide_banner", "-loglevel", "error", "-i"].map(String::from).to_vec();
+    args.push(p(&raw_video));
+    // Each sound file starts at the capture's time zero; skip ahead to where video begins.
+    let mut inputs: Vec<&'static str> = Vec::new();
+    for name in ["game", "discord", "mic"] {
+        if file_size(&wav(name)) > 44 {
+            args.extend(["-ss".into(), format!("{video_start:.4}"), "-ignore_length".into(), "1".into(), "-i".into()]);
+            args.push(p(&wav(name)));
+            inputs.push(name);
+        }
+    }
+    let idx = |name: &str| inputs.iter().position(|n| *n == name).map(|i| i + 1);
+
+    args.extend(["-map".into(), "0:v".into()]);
+    if let Some(i) = idx("game") {
+        args.extend(["-map".into(), format!("{i}:a"), "-c:a".into(), "aac".into(), "-b:a".into(), "192k".into()]);
+    }
+    args.extend(["-c:v".into(), "copy".into()]);
+    if codec == "hevc" {
+        args.extend(["-tag:v".into(), "hvc1".into()]);
+    }
+    args.push(p(&dir.join(files.video)));
+    for name in ["discord", "mic"] {
+        if let Some(i) = idx(name) {
+            args.extend(["-map".into(), format!("{i}:a"), "-c:a".into(), "aac".into(), "-b:a".into(), "128k".into()]);
+            args.push(p(&dir.join(format!("{}{name}.m4a", files.prefix))));
+        }
+    }
+    run_tool(ffmpeg, &args)?;
+    Ok(Joined { video_start, tracks: inputs })
+}
+
+/// A joined capture's sound tracks as match.json lists them. `results` says which were
+/// silent or failed; a recording finished after a crash has none.
+pub fn track_list(joined: &Joined, results: &[TrackResult], files: &Layout) -> Vec<Value> {
+    joined
+        .tracks
+        .iter()
+        .map(|n| {
+            let r = results.iter().find(|t| t.name == *n);
+            json!({
+                "name": n,
+                "file": if *n == "game" { Value::Null } else { json!(format!("{}{n}.m4a", files.prefix)) },
+                "silent": r.map(|r| r.peak == 0.0).unwrap_or(false),
+                "note": r.and_then(|r| r.error.clone()),
+            })
+        })
+        .collect()
 }
 
 /// Join the raw capture files of one session folder into the final recording and
@@ -287,46 +418,10 @@ pub fn finalize_dir(
     settings: &Settings,
 ) -> Result<String> {
     let (ffmpeg, _) = settings.ffmpeg_tools();
-    let raw_video = dir.join("video.mkv");
-    if file_size(&raw_video) == 0 {
-        return Err(anyhow!("No video was captured"));
-    }
     let p = |x: &Path| x.to_string_lossy().to_string();
-
-    // When, on the session clock, the first video frame was taken.
-    let video_start = video::probe(&ffmpeg, &raw_video).start;
-
-    let has = |name: &str| file_size(&dir.join(format!("{name}.wav"))) > 44;
-    let mut args: Vec<String> = ["-y", "-hide_banner", "-loglevel", "error", "-i"].map(String::from).to_vec();
-    args.push(p(&raw_video));
-    // Each sound file starts at session time zero; skip ahead to where video begins.
-    let mut inputs: Vec<&str> = Vec::new();
-    for name in ["game", "discord", "mic"] {
-        if has(name) {
-            args.extend(["-ss".into(), format!("{video_start:.4}"), "-ignore_length".into(), "1".into(), "-i".into()]);
-            args.push(p(&dir.join(format!("{name}.wav"))));
-            inputs.push(name);
-        }
-    }
-    let idx = |name: &str| inputs.iter().position(|n| *n == name).map(|i| i + 1);
-
-    args.extend(["-map".into(), "0:v".into()]);
-    if let Some(i) = idx("game") {
-        args.extend(["-map".into(), format!("{i}:a"), "-c:a".into(), "aac".into(), "-b:a".into(), "192k".into()]);
-    }
-    args.extend(["-c:v".into(), "copy".into()]);
-    if meta.codec == "hevc" {
-        args.extend(["-tag:v".into(), "hvc1".into()]);
-    }
-    let final_video = dir.join("game.mp4");
-    args.push(p(&final_video));
-    for name in ["discord", "mic"] {
-        if let Some(i) = idx(name) {
-            args.extend(["-map".into(), format!("{i}:a"), "-c:a".into(), "aac".into(), "-b:a".into(), "128k".into()]);
-            args.push(p(&dir.join(format!("{name}.m4a"))));
-        }
-    }
-    run_tool(&ffmpeg, &args)?;
+    let joined = join(&ffmpeg, dir, &GAME_FILES, &meta.codec)?;
+    let video_start = joined.video_start;
+    let final_video = dir.join(GAME_FILES.video);
 
     // Facts about the finished video.
     let facts = video::probe(&ffmpeg, &final_video);
@@ -357,19 +452,9 @@ pub fn finalize_dir(
         *t = (to_media(*t) * 10.0).round() / 10.0;
     }
 
-    let track_json: Vec<Value> = ["game", "discord", "mic"]
-        .iter()
-        .filter(|n| idx(n).is_some())
-        .map(|n| {
-            let r = tracks.iter().find(|t| t.name == *n);
-            json!({
-                "name": n,
-                "file": if *n == "game" { Value::Null } else { json!(format!("{n}.m4a")) },
-                "silent": r.map(|r| r.peak == 0.0).unwrap_or(false),
-                "note": r.and_then(|r| r.error.clone()),
-            })
-        })
-        .collect();
+    let track_json = track_list(&joined, &tracks, &GAME_FILES);
+    // Champion select, if it was recorded before this game.
+    let draft = crate::draft::finish(&ffmpeg, dir);
 
     let game = build_game_summary(&live, meta);
     let mouse_file = dir.join("mouse.csv");
@@ -385,8 +470,11 @@ pub fn finalize_dir(
         "height": height,
         "fps": meta.fps,
         "codec": meta.codec,
-        "video": "game.mp4",
+        // "window": only the game's window was recorded; "display": the whole screen.
+        "capture": meta.target.kind(),
+        "video": GAME_FILES.video,
         "tracks": track_json,
+        "draft": draft,
         "game": game,
         "events": events,
         "clock": clock,
@@ -416,7 +504,7 @@ pub fn finalize_dir(
     let _ = crate::voice::for_dir(&ffmpeg, dir);
 
     // Raw capture files are no longer needed.
-    for f in ["video.mkv", "video.log", "game.wav", "discord.wav", "mic.wav", "live.json", "session.json"] {
+    for f in ["video.mkv", "video.log", "game.wav", "discord.wav", "mic.wav", "live.json", "session.json"].iter().chain(&crate::draft::RAW_FILES) {
         let _ = fs::remove_file(dir.join(f));
     }
     log(format!("[session {}] saved, {:.0}s, video starts at {:.3}s", meta.id, duration, video_start));
